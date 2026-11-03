@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mac 安全監控</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--muted:#667085;--line:#e4e7ec;--accent:#2563eb;--high:#d92d20;--medium:#e8730c;--low:#c9a400;--info:#5b7fbd;--ok:#12a150;--code:#f2f4f7}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#0f1216;--card:#171b21;--fg:#e6e9ef;--muted:#98a2b3;--line:#2a313b;--accent:#60a5fa;--high:#f97066;--medium:#fb923c;--low:#facc15;--info:#7ea6e0;--ok:#4ade80;--code:#222831}}
+:root[data-theme=dark]{--bg:#0f1216;--card:#171b21;--fg:#e6e9ef;--muted:#98a2b3;--line:#2a313b;--accent:#60a5fa;--high:#f97066;--medium:#fb923c;--low:#facc15;--info:#7ea6e0;--ok:#4ade80;--code:#222831}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 -apple-system,"PingFang TC","Noto Sans TC",sans-serif}
+.wrap{max-width:1000px;margin:0 auto;padding:24px 16px 60px}h1{font-size:22px;margin:0}h2{font-size:16px;margin:0 0 12px}
+.muted{color:var(--muted);font-size:13px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin-top:16px}
+.top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+button,.btn{font:inherit;padding:8px 14px;border-radius:9px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer;text-decoration:none;display:inline-block}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}button:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.target{display:flex;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line)}
+.target:last-child{border:0}.target .p{flex:1;min-width:0}.target code{font-size:12px;color:var(--muted);word-break:break-all}
+.kind{font-size:11px;padding:1px 7px;border-radius:9px;background:var(--code);color:var(--muted);margin-left:6px}
+input[type=text],input[type=number]{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--fg)}
+input[type=text]{flex:1;min-width:200px}.prog{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin-top:10px}
+.prog span{display:block;height:100%;width:30%;background:var(--accent);animation:mv 1.4s infinite ease-in-out}
+@keyframes mv{0%{margin-left:-30%}100%{margin-left:100%}}
+table{width:100%;border-collapse:collapse;font-size:14px}td,th{padding:8px 6px;border-bottom:1px solid var(--line);text-align:left}
+.pill{display:inline-block;min-width:26px;text-align:center;font-size:12px;font-weight:600;border-radius:9px;padding:1px 6px;color:#fff}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+label.cfg{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0}
+.note{font-size:13px;background:var(--code);border-radius:10px;padding:10px 12px;margin-top:10px}
+@media (max-width:600px){.hide-sm{display:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div><h1>🛡 Mac 安全監控</h1><div class="muted" id="sched"></div></div>
+    <div class="row">
+      <a class="btn" href="/sop" target="_blank" rel="noopener">📖 運作 SOP</a>
+      <label class="muted"><input type="checkbox" id="notify"> 有變動時發 Telegram</label>
+      <button id="quick">快速掃描</button>
+      <button class="primary" id="full">完整掃描</button>
+    </div>
+  </div>
+
+  <div class="card" id="statusCard">
+    <div class="top"><h2 id="stTitle">狀態</h2><button id="cancel" style="display:none">取消</button></div>
+    <div id="stText" class="muted"></div>
+    <div class="prog" id="prog" style="display:none"><span></span></div>
+  </div>
+
+  <div class="card" id="nextCard">
+    <h2>下一次會套用的設定</h2>
+    <div id="nextBody" class="muted"></div>
+  </div>
+
+  <div class="card">
+    <h2>掃描範圍</h2>
+    <div class="muted">「家目錄」不含 ~/Library；雲端硬碟和外接/NAS 磁碟分開列出。雲端「僅限線上」的檔案只看檔名、不讀內容，不會觸發下載。</div>
+    <div id="targets" style="margin-top:8px"></div>
+    <div class="row" style="margin-top:12px">
+      <input type="text" id="newPath" placeholder="/Volumes/NAS/共用資料夾 或 ~/某個資料夾">
+      <button id="pick">選擇資料夾…</button>
+      <button id="add">加入</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="top"><h2>🧯 漏洞快訊</h2>
+      <div class="row">
+        <select id="feedRange" style="font:inherit;padding:7px 8px;border-radius:9px;border:1px solid var(--line);background:var(--card);color:var(--fg)">
+          <option value="24">最近 24 小時</option><option value="72">最近 3 天</option><option value="168">最近 7 天</option>
+          <option value="since">自上次推送以來（與排程相同）</option>
+        </select>
+        <button class="primary" id="feedNow">立即發出漏洞摘要</button>
+      </div>
+    </div>
+    <div id="feedMsg" class="note" style="display:none"></div>
+    <div class="muted" id="feedMeta"></div>
+    <div id="feed" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card">
+    <h2>報告</h2>
+    <table><thead><tr><th>時間</th><th class="hide-sm">模式／觸發</th><th class="hide-sm">範圍</th><th>風險（高/中/低）</th><th>變動</th><th></th></tr></thead><tbody id="reports"></tbody></table>
+  </div>
+
+  <div class="card">
+    <h2>常駐監控設定</h2>
+    <div class="grid">
+      <div>
+        <label class="cfg">快速掃描間隔（分鐘）<input type="number" id="c_quick" min="5" style="width:80px"></label>
+        <label class="cfg">每天完整掃描時間（點）<input type="number" id="c_hour" min="0" max="23" style="width:80px"></label>
+        <label class="cfg">查詢 CVE / 版本資料庫<input type="checkbox" id="c_online"></label>
+        <label class="cfg">漏洞快訊頻率（小時，0=關閉）<input type="number" id="c_feed" min="0" max="168" style="width:80px"></label>
+      </div>
+      <div>
+        <label class="cfg">AI 摘要<input type="checkbox" id="c_llm"></label>
+        <label class="cfg">Ollama 主機<input type="text" id="c_host" style="max-width:230px" placeholder="http://127.0.0.1:11434"></label>
+        <div class="row" style="justify-content:flex-end;gap:6px;margin:-2px 0 4px">
+          <button type="button" class="hostPreset" data-h="http://127.0.0.1:11434" style="padding:3px 9px;font-size:12px">本機</button>
+          <button type="button" class="hostPreset" data-h="https://ollama.com" style="padding:3px 9px;font-size:12px">ollama.com 雲端</button>
+        </div>
+        <label class="cfg">模型<input type="text" id="c_model" list="modelList" style="max-width:230px"><datalist id="modelList"></datalist></label>
+        <div class="row" style="justify-content:flex-end"><button type="button" id="testOllama">測試連線</button></div>
+        <div id="ollamaMsg" class="muted" style="text-align:right;min-height:1.2em"></div>
+      </div>
+    </div>
+    <div class="row" style="margin-top:8px"><button id="saveCfg">儲存設定</button><button id="testTg">傳送 Telegram 測試訊息</button><span id="cfgMsg" class="muted"></span></div>
+    <div class="note" id="secretNote"></div>
+  </div>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let state = null, targets = [], cfgLoaded = false;
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : {method:"POST", headers:{"Content-Type":"application/json","X-Secaudit":"1"}, body:JSON.stringify(body)});
+  if (r.status === 401) { document.body.innerHTML = "<div class='wrap'><h3>登入已失效，請用 PM2 日誌中的網址重新開啟。</h3></div>"; throw 0; }
+  return r.json();
+}
+
+function renderStatus(st) {
+  $("#prog").style.display = st.running ? "" : "none";
+  $("#cancel").style.display = st.running ? "" : "none";
+  $("#full").disabled = $("#quick").disabled = st.running;
+  $("#stTitle").textContent = st.running ? `掃描中（${st.mode === "full" ? "完整" : "快速"}）` : "狀態";
+  let t = st.running ? `${esc(st.phase)}　<code>${esc(st.current)}</code>` :
+          (st.last_report ? `上次報告 ${esc(st.last_report)}，與前次相比 ${st.last_changes} 項變動` : "尚未掃描");
+  if (st.last_error) t += `<br><span style="color:var(--high)">錯誤：${esc(st.last_error)}</span>`;
+  $("#stText").innerHTML = t;
+  let sc = st.next_quick ? `下次快速掃描 ${st.next_quick} ・ 下次完整掃描 ${st.next_full}` : "常駐排程未啟動（只開 Web UI）";
+  if (st.watch) sc += ` ・ ⚡ 即時監看 ${st.watch.paths} 處（每輪 ${st.watch.cost_ms ?? "-"} ms）${st.watch.pending ? `，${st.watch.pending} 處變動待確認` : ""}${st.watch.last_trigger ? `，上次觸發 ${st.watch.last_trigger}` : ""}`;
+  $("#sched").textContent = sc;
+}
+
+const KIND = {home:"家目錄", cloud:"雲端硬碟", volume:"磁碟", custom:"自訂"};
+function renderTargets() {
+  $("#targets").innerHTML = targets.map((t, i) => `
+    <div class="target">
+      <input type="checkbox" data-i="${i}" ${t.enabled ? "checked" : ""} ${t.kind === "home" ? "" : ""}>
+      <div class="p"><div>${esc(t.label)}<span class="kind">${KIND[t.kind] || t.kind}</span>${t.exists === false ? ' <span class="kind" style="color:var(--high)">未掛載</span>' : ""}</div>
+      <code>${esc(t.display || t.path)}</code></div>
+      ${t.kind === "custom" ? `<button data-rm="${i}">移除</button>` : ""}
+    </div>`).join("");
+  $("#targets").querySelectorAll("input[type=checkbox]").forEach(cb => cb.onchange = () => { targets[cb.dataset.i].enabled = cb.checked; saveTargets(); });
+  $("#targets").querySelectorAll("[data-rm]").forEach(b => b.onclick = () => { targets.splice(+b.dataset.rm, 1); saveTargets(true); });
+}
+async function saveTargets(rerender) {
+  await api("/api/targets", {targets: targets.map(t => ({path:t.path, label:t.label, kind:t.kind, enabled:t.enabled}))});
+  if (rerender) refresh();
+}
+
+function pill(n, sev) { return `<span class="pill" style="background:var(--${sev})">${n || 0}</span>`; }
+function renderReports(rs) {
+  $("#reports").innerHTML = rs.map(r => `<tr>
+    <td>${esc(r.started)}</td><td class="hide-sm">${r.mode === "full" ? "完整" : "快速"}${r.source ? `<br><span class="muted">${{manual:"手動",scheduler:"排程",watch:"即時監看"}[r.source] || esc(r.source)}${r.notify === false ? "・不通知" : ""}</span>` : ""}</td>
+    <td class="hide-sm muted" title="${esc((r.targets || []).join("\n"))}">${r.mode === "full" ? `${(r.targets || []).length} 個資料夾` : "—"}</td>
+    <td>${pill(r.counts.high,"high")} ${pill(r.counts.medium,"medium")} ${pill(r.counts.low,"low")}</td>
+    <td>${r.changes ? `${r.changes}${r.attention ? ` <b style="color:var(--high)">⚠️${r.attention}</b>` : ""}` : "—"}</td>
+    <td style="white-space:nowrap"><a class="btn" href="/reports/${esc(r.name)}.html" target="_blank" rel="noopener">檢視</a>
+        <a class="btn" href="/reports/${esc(r.name)}.md?dl=1">MD</a></td></tr>`).join("") ||
+    `<tr><td colspan="6" class="muted">還沒有報告</td></tr>`;
+}
+
+function renderConfig(c, s) {
+  if (!cfgLoaded) {
+    $("#c_quick").value = c.quick_interval_min; $("#c_hour").value = c.full_scan_hour;
+    $("#c_online").checked = c.online; $("#c_llm").checked = c.llm_enabled; $("#c_feed").value = c.vulnfeed_hours ?? 6;
+    $("#c_host").value = c.ollama_host; $("#c_model").value = c.ollama_model; cfgLoaded = true; hostHint();
+  }
+  const ok = v => v ? '<span style="color:var(--ok)">✓ 已設定</span>' : '<span style="color:var(--medium)">✗ 未設定</span>';
+  $("#secretNote").innerHTML = `機密由 1Password 注入（不寫入檔案）：Telegram ${ok(s.telegram)} ・ Ollama API Key ${ok(s.ollama)}<br>
+    設定方式見 README.md。注意：AI 摘要會把「變動清單」（路徑、指令片段，機密已遮罩）傳到上面的 Ollama 主機。`;
+}
+
+function renderNext(n) {
+  if (!n) return;
+  const on = b => b ? '<b style="color:var(--ok)">開</b>' : "關";
+  let applied = n.applied === null ? "還沒有任何完整掃描報告" :
+    n.applied ? `✅ 已套用在 ${esc(n.last_full)} 的完整掃描報告` :
+    `<b style="color:var(--medium)">⚠️ 範圍已變更，尚未套用到任何完整掃描</b>（上次完整掃描 ${esc(n.last_full)}）——會在 ${esc(n.next_full || "下次完整掃描")} 套用，或按右上角「完整掃描」立即套用`;
+  $("#nextBody").innerHTML = `
+    <div>⚡ 即時監看：${on(n.watch)}　🔁 下次快速掃描：<b>${esc(n.next_quick || "—")}</b>（不遍歷資料夾）　🗂 下次完整掃描：<b>${esc(n.next_full || "—")}</b></div>
+    <div style="margin-top:6px">連網查詢 CVE ${on(n.online)} ・ AI 摘要 ${on(n.llm)}（${esc(n.model)}）・ 排程與即時監看有變動才發 Telegram</div>
+    <div style="margin-top:8px">完整掃描範圍（${n.targets.length} 個）：${n.targets.map(t => `<code>${esc(t.path)}</code>${t.exists ? "" : ' <b style="color:var(--high)">未掛載</b>'}`).join("、") || "（沒有勾選）"}</div>
+    <div style="margin-top:6px">${applied}</div>`;
+}
+
+function renderFeed(h, st) {
+  $("#feedNow").disabled = !!st.feed_running;
+  $("#feedNow").textContent = st.feed_running ? "抓取與摘要中…（約 10～30 秒）" : "立即發出漏洞摘要";
+  if (st.feed_msg) { $("#feedMsg").style.display = ""; $("#feedMsg").textContent = "✅ " + st.feed_msg; }
+  $("#feedMeta").innerHTML = `下次自動抓取：${esc(st.next_feed || "常駐程式啟動後 5 分鐘")} ・ 來源：GitHub Advisory Database、CISA KEV（已被實際利用）` +
+    (st.feed_running ? " ・ <b>抓取中…</b>" : "");
+  if (!h || !h.length) { $("#feed").innerHTML = '<div class="muted">還沒有快訊</div>'; return; }
+  $("#feed").innerHTML = h.slice(0, 5).map(r => `
+    <details ${r === h[0] ? "open" : ""} style="border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:6px 0">
+      <summary><b>${esc(r.time)}</b>${r.manual ? ' <span class="kind">手動</span>' : ""} ・ ${esc(r.period)} ・ 新漏洞 ${r.fetched} 筆 ・
+        ${r.affected.length ? `<b style="color:var(--high)">🔴 影響你的專案 ${r.affected.length}</b>` : '<span style="color:var(--ok)">未影響你的專案</span>'}
+        ・ 已被利用 ${r.kev.length}${r.sent === false ? ' ・ <span style="color:var(--medium)">Telegram 未送出</span>' : ""}</summary>
+      ${r.affected.map(a => `<div style="margin:8px 0;padding:8px 10px;border-left:4px solid var(--high);background:var(--code);border-radius:6px">
+        <b>${esc(a.cve || a.id)}</b> <span class="kind">${esc(a.severity)}</span> ${esc(a.summary)}
+        ${a.hits[0] && r.sums["pkg:" + a.hits[0].eco + ":" + a.hits[0].name] ? `<div>${esc(r.sums["pkg:" + a.hits[0].eco + ":" + a.hits[0].name])}</div>` : ""}
+        ${a.hits.map(x => `<div class="muted">└ ${esc(x.eco)} <code>${esc(x.name)}@${esc(x.version)}</code> → 升級到 <b>${esc(x.fixed || "尚無修正版")}</b>　專案：${esc(x.projects.join("、"))}</div>`).join("")}
+        <a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer" class="muted">詳細資料 ↗</a></div>`).join("")}
+      ${r.kev.length ? `<div style="margin-top:6px"><b>已被實際利用（CISA KEV）</b>${r.kev.map(k => `<div class="muted">${k.maybe_you ? "👉 " : ""}<a href="${esc(k.url || "")}" target="_blank" rel="noopener noreferrer">${esc(k.id)}</a> ${esc(k.vendor)} ${esc(k.product)}：${esc((r.sums || {})[k.id] || k.name)}${k.ransomware ? "（勒索軟體使用中）" : ""}</div>`).join("")}</div>` : ""}
+      ${r.notable.length ? `<div style="margin-top:6px"><b>其他 Critical</b>${r.notable.map(a => `<div class="muted"><a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.cve || a.id)}</a> ${esc(a.packages.join("、"))}：${esc((r.sums || {})[a.cve || a.id] || a.summary)}</div>`).join("")}</div>` : ""}
+      ${r.ai ? `<div class="note" style="white-space:pre-wrap">🤖 ${esc(r.ai)}</div>` : ""}
+      ${r.index_size ? "" : '<div class="note">尚未建立套件索引，跑過一次完整掃描後才能比對你的專案。</div>'}
+    </details>`).join("");
+}
+
+async function refresh() {
+  state = await api("/api/state");
+  renderStatus(state.status);
+  targets = state.targets; renderTargets();
+  renderReports(state.reports);
+  renderConfig(state.config, state.secrets);
+  renderNext(state.next);
+  renderFeed(state.vulnfeed, state.status);
+  clearTimeout(window._t); window._t = setTimeout(refresh, (state.status.running || state.status.feed_running) ? 1500 : 10000);
+}
+
+$("#full").onclick = async () => { await api("/api/scan", {mode:"full", notify:$("#notify").checked}); refresh(); };
+$("#quick").onclick = async () => { await api("/api/scan", {mode:"quick", notify:$("#notify").checked}); refresh(); };
+$("#cancel").onclick = () => api("/api/cancel", {});
+$("#feedNow").onclick = async () => {
+  $("#feedNow").disabled = true; $("#feedNow").textContent = "抓取與摘要中…（約 10～30 秒）";
+  await api("/api/vulnfeed", {lookback_hours: $("#feedRange").value}); refresh();
+};
+$("#pick").onclick = async () => { const r = await api("/api/pick", {}); if (r.path) $("#newPath").value = r.path; };
+$("#add").onclick = async () => {
+  const p = $("#newPath").value.trim(); if (!p) return;
+  targets.push({path:p, label:p.split("/").filter(Boolean).pop() || p, kind:"custom", enabled:true});
+  $("#newPath").value = ""; await saveTargets(true);
+};
+$("#saveCfg").onclick = async () => {
+  const r = await api("/api/config", {quick_interval_min:+$("#c_quick").value, full_scan_hour:+$("#c_hour").value, online:$("#c_online").checked,
+    llm_enabled:$("#c_llm").checked, ollama_host:$("#c_host").value, ollama_model:$("#c_model").value, vulnfeed_hours:+$("#c_feed").value});
+  if (r.error) { $("#cfgMsg").innerHTML = `<span style="color:var(--high)">❌ ${esc(r.error)}</span>`; return; }
+  $("#cfgMsg").textContent = "已儲存，下一次 AI 摘要開始套用"; setTimeout(() => $("#cfgMsg").textContent = "", 3000); cfgLoaded = false;
+};
+function hostHint() {
+  const h = $("#c_host").value.trim();
+  const local = /^(https?:\/\/)?(127\.|localhost|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h);
+  const cloud = /ollama\.com/.test(h);
+  $("#ollamaMsg").innerHTML = cloud ? "雲端：需要 OLLAMA_API_KEY，變動清單會傳到 ollama.com" :
+    local ? "本機 / 區網：不需要 API Key，資料不會離開你的網路" :
+    (h.startsWith("http://") ? '<span style="color:var(--medium)">⚠️ 用未加密的 http 連到外部主機，資料可能被攔截</span>' : "");
+}
+$("#c_host").addEventListener("input", hostHint);
+document.querySelectorAll(".hostPreset").forEach(b => b.onclick = () => { $("#c_host").value = b.dataset.h; hostHint(); });
+$("#testOllama").onclick = async () => {
+  $("#testOllama").disabled = true; $("#ollamaMsg").textContent = "測試中…（本機模型第一次載入可能要 10～60 秒）";
+  const r = await api("/api/test-ollama", {host:$("#c_host").value, model:$("#c_model").value});
+  $("#testOllama").disabled = false;
+  $("#modelList").innerHTML = (r.models || []).map(m => `<option value="${esc(m)}">`).join("");
+  $("#ollamaMsg").innerHTML = r.ok
+    ? `<span style="color:var(--ok)">✅ 連線成功，模型回覆「${esc(r.reply)}」（${r.seconds} 秒）</span>・主機上有 ${r.models.length} 個模型，點「模型」欄可選擇。記得按「儲存設定」。`
+    : `<span style="color:var(--high)">❌ ${esc(r.error || "失敗")}</span>${(r.models || []).length ? `・主機上有：${r.models.slice(0, 6).map(esc).join("、")}${r.models.length > 6 ? "…" : ""}` : ""}`;
+};
+$("#testTg").onclick = async () => { const r = await api("/api/test-telegram", {}); $("#cfgMsg").textContent = r.ok ? "已傳送" : "傳送失敗（請看 PM2 日誌）"; };
+refresh();
+</script>
+</body>
+</html>

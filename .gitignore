@@ -1,0 +1,12 @@
+# 掃描結果、比對基準、Web UI token、快取（含個人資料，絕對不要提交）
+data/
+# 機密
+.env
+.env.*
+!.env.tpl.example
+# 個人的 1Password 引用（含 vault 與項目 ID）
+.env.tpl
+# Python
+__pycache__/
+*.pyc
+.DS_Store
