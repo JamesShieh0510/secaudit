@@ -27,6 +27,8 @@ table{width:100%;border-collapse:collapse;font-size:14px}td,th{padding:8px 6px;b
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
 label.cfg{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0}
 .note{font-size:13px;background:var(--code);border-radius:10px;padding:10px 12px;margin-top:10px}
+.pgnav{display:flex;justify-content:center;align-items:center;gap:10px;margin:10px 0 2px;flex-wrap:wrap}
+.pgnav button{padding:4px 12px;font-size:13px}
 @media (max-width:600px){.hide-sm{display:none}}
 </style>
 </head>
@@ -82,6 +84,8 @@ label.cfg{display:flex;justify-content:space-between;align-items:center;gap:8px;
   <div class="card">
     <h2>報告</h2>
     <table><thead><tr><th>時間</th><th class="hide-sm">模式／觸發</th><th class="hide-sm">範圍</th><th>風險（高/中/低）</th><th>變動</th><th></th></tr></thead><tbody id="reports"></tbody></table>
+    <div id="reportsNav"></div>
+    <div class="muted" style="margin-top:6px">沒有變動的排程掃描不另存報告；報告保留 30 天，完整掃描保留 90 天。</div>
   </div>
 
   <div class="card">
@@ -120,6 +124,29 @@ label.cfg{display:flex;justify-content:space-between;align-items:center;gap:8px;
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let state = null, targets = [], cfgLoaded = false;
+const PG = {};                 // 每個清單目前在第幾頁
+const OPEN = new Set();        // 使用者展開過的項目（重新繪製時保留）
+let feedInit = false;
+function pageSlice(key, arr, size) {
+  const pages = Math.max(1, Math.ceil(arr.length / size));
+  const p = Math.min(Math.max(1, PG[key] || 1), pages); PG[key] = p;
+  return {items: arr.slice((p - 1) * size, p * size), p, pages, total: arr.length, offset: (p - 1) * size};
+}
+function navHtml(key, p, pages, total) {
+  if (pages <= 1) return "";
+  return `<div class="pgnav" data-key="${esc(key)}"><button data-to="${p - 1}" ${p <= 1 ? "disabled" : ""}>‹ 上一頁</button>
+    <span class="muted">第 ${p} / ${pages} 頁・共 ${total} 筆</span><button data-to="${p + 1}" ${p >= pages ? "disabled" : ""}>下一頁 ›</button></div>`;
+}
+document.addEventListener("click", e => {
+  const b = e.target.closest(".pgnav button[data-to]"); if (!b) return;
+  const key = b.parentElement.dataset.key; PG[key] = +b.dataset.to;
+  if (key === "reports") refresh(); else rerenderLocal();
+});
+document.addEventListener("toggle", e => {
+  const d = e.target; if (!d.dataset || !d.dataset.okey) return;
+  d.open ? OPEN.add(d.dataset.okey) : OPEN.delete(d.dataset.okey);
+}, true);
+function rerenderLocal() { renderTargets(); if (state) renderFeed(state.vulnfeed, state.status); }
 
 async function api(path, body) {
   const r = await fetch(path, body === undefined ? {} : {method:"POST", headers:{"Content-Type":"application/json","X-Secaudit":"1"}, body:JSON.stringify(body)});
@@ -145,13 +172,14 @@ function renderStatus(st) {
 
 const KIND = {home:"家目錄", cloud:"雲端硬碟", volume:"磁碟", custom:"自訂"};
 function renderTargets() {
-  $("#targets").innerHTML = targets.map((t, i) => `
+  const pg = pageSlice("targets", targets, 10);
+  $("#targets").innerHTML = pg.items.map((t, j) => { const i = pg.offset + j; return `
     <div class="target">
       <input type="checkbox" data-i="${i}" ${t.enabled ? "checked" : ""} ${t.kind === "home" ? "" : ""}>
       <div class="p"><div>${esc(t.label)}<span class="kind">${KIND[t.kind] || t.kind}</span>${t.exists === false ? ' <span class="kind" style="color:var(--high)">未掛載</span>' : ""}</div>
       <code>${esc(t.display || t.path)}</code></div>
       ${t.kind === "custom" ? `<button data-rm="${i}">移除</button>` : ""}
-    </div>`).join("");
+    </div>`; }).join("") + navHtml("targets", pg.p, pg.pages, pg.total);
   $("#targets").querySelectorAll("input[type=checkbox]").forEach(cb => cb.onchange = () => { targets[cb.dataset.i].enabled = cb.checked; saveTargets(); });
   $("#targets").querySelectorAll("[data-rm]").forEach(b => b.onclick = () => { targets.splice(+b.dataset.rm, 1); saveTargets(true); });
 }
@@ -161,7 +189,10 @@ async function saveTargets(rerender) {
 }
 
 function pill(n, sev) { return `<span class="pill" style="background:var(--${sev})">${n || 0}</span>`; }
-function renderReports(rs) {
+function renderReports(rp) {
+  const rs = rp.items || [];
+  PG.reports = rp.page || 1;
+  $("#reportsNav").innerHTML = navHtml("reports", rp.page || 1, rp.pages || 1, rp.total || 0);
   $("#reports").innerHTML = rs.map(r => `<tr>
     <td>${esc(r.started)}</td><td class="hide-sm">${r.mode === "full" ? "完整" : "快速"}${r.source ? `<br><span class="muted">${{manual:"手動",scheduler:"排程",watch:"即時監看"}[r.source] || esc(r.source)}${r.notify === false ? "・不通知" : ""}</span>` : ""}</td>
     <td class="hide-sm muted" title="${esc((r.targets || []).join("\n"))}">${r.mode === "full" ? `${(r.targets || []).length} 個資料夾` : "—"}</td>
@@ -204,25 +235,28 @@ function renderFeed(h, st) {
   $("#feedMeta").innerHTML = `下次自動抓取：${esc(st.next_feed || "常駐程式啟動後 5 分鐘")} ・ 來源：GitHub Advisory Database、CISA KEV（已被實際利用）` +
     (st.feed_running ? " ・ <b>抓取中…</b>" : "");
   if (!h || !h.length) { $("#feed").innerHTML = '<div class="muted">還沒有快訊</div>'; return; }
-  $("#feed").innerHTML = h.slice(0, 5).map(r => `
-    <details ${r === h[0] ? "open" : ""} style="border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:6px 0">
+  if (!feedInit) { OPEN.add("feed:" + h[0].time); feedInit = true; }   // 預設展開最新一筆
+  const hp = pageSlice("feedHistory", h, 5);
+  $("#feed").innerHTML = hp.items.map(r => { const ap = pageSlice("feedAff:" + r.time, r.affected, 10); return `
+    <details data-okey="feed:${esc(r.time)}" ${OPEN.has("feed:" + r.time) ? "open" : ""} style="border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:6px 0">
       <summary><b>${esc(r.time)}</b>${r.manual ? ' <span class="kind">手動</span>' : ""} ・ ${esc(r.period)} ・ 新漏洞 ${r.fetched} 筆 ・
         ${r.affected.length ? `<b style="color:var(--high)">🔴 影響你的專案 ${r.affected.length}</b>` : '<span style="color:var(--ok)">未影響你的專案</span>'}
         ・ 已被利用 ${r.kev.length}${r.sent === false ? ' ・ <span style="color:var(--medium)">Telegram 未送出</span>' : ""}</summary>
-      ${r.affected.map(a => `<div style="margin:8px 0;padding:8px 10px;border-left:4px solid var(--high);background:var(--code);border-radius:6px">
+      ${ap.items.map(a => `<div style="margin:8px 0;padding:8px 10px;border-left:4px solid var(--high);background:var(--code);border-radius:6px">
         <b>${esc(a.cve || a.id)}</b> <span class="kind">${esc(a.severity)}</span> ${esc(a.summary)}
         ${a.hits[0] && r.sums["pkg:" + a.hits[0].eco + ":" + a.hits[0].name] ? `<div>${esc(r.sums["pkg:" + a.hits[0].eco + ":" + a.hits[0].name])}</div>` : ""}
         ${a.hits.map(x => `<div class="muted">└ ${esc(x.eco)} <code>${esc(x.name)}@${esc(x.version)}</code> → 升級到 <b>${esc(x.fixed || "尚無修正版")}</b>　專案：${esc(x.projects.join("、"))}</div>`).join("")}
         <a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer" class="muted">詳細資料 ↗</a></div>`).join("")}
+      ${navHtml("feedAff:" + r.time, ap.p, ap.pages, ap.total)}
       ${r.kev.length ? `<div style="margin-top:6px"><b>已被實際利用（CISA KEV）</b>${r.kev.map(k => `<div class="muted">${k.maybe_you ? "👉 " : ""}<a href="${esc(k.url || "")}" target="_blank" rel="noopener noreferrer">${esc(k.id)}</a> ${esc(k.vendor)} ${esc(k.product)}：${esc((r.sums || {})[k.id] || k.name)}${k.ransomware ? "（勒索軟體使用中）" : ""}</div>`).join("")}</div>` : ""}
       ${r.notable.length ? `<div style="margin-top:6px"><b>其他 Critical</b>${r.notable.map(a => `<div class="muted"><a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.cve || a.id)}</a> ${esc(a.packages.join("、"))}：${esc((r.sums || {})[a.cve || a.id] || a.summary)}</div>`).join("")}</div>` : ""}
       ${r.ai ? `<div class="note" style="white-space:pre-wrap">🤖 ${esc(r.ai)}</div>` : ""}
       ${r.index_size ? "" : '<div class="note">尚未建立套件索引，跑過一次完整掃描後才能比對你的專案。</div>'}
-    </details>`).join("");
+    </details>`; }).join("") + navHtml("feedHistory", hp.p, hp.pages, hp.total);
 }
 
 async function refresh() {
-  state = await api("/api/state");
+  state = await api("/api/state?rpage=" + (PG.reports || 1));
   renderStatus(state.status);
   targets = state.targets; renderTargets();
   renderReports(state.reports);

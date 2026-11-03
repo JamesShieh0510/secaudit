@@ -124,22 +124,36 @@ details.sec>summary{list-style:none}details.sec>summary::before{content:"▸ ";c
 details.cat{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--line);border-radius:10px;margin:8px 0;padding:8px 12px}
 details.cat>summary::before{content:"▸ ";color:var(--muted)}details.cat[open]>summary::before{content:"▾ "}
 details.cat details.item{margin:6px 0}
+.pgnav{display:flex;justify-content:center;align-items:center;gap:10px;margin:8px 0;flex-wrap:wrap;font-size:13px}
+.pgnav button{padding:3px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);cursor:pointer}
+.pgnav button:disabled{opacity:.4;cursor:default}.fh,.pgh{display:none!important}
 a.btn,.filter .tool{display:inline-block;padding:6px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);text-decoration:none;font-size:14px;cursor:pointer}
 .sop{margin-top:40px;border-left-color:var(--info)}.sop h3{font-size:15px;margin:20px 0 8px}.sop ol,.sop ul{padding-left:22px;margin:6px 0}.sop li{margin:4px 0}.sop table{margin:6px 0}
 """
 
 JS = """
 const q=document.getElementById('q');let sev='all';
+function itemsOf(c){return [...c.children].filter(x=>x.matches('.item,tr.row'));}
+function paginate(c){const size=+c.dataset.size||20;const vis=itemsOf(c).filter(x=>!x.classList.contains('fh'));
+ const pages=Math.max(1,Math.ceil(vis.length/size));let p=Math.min(Math.max(1,+(c.dataset.page||1)),pages);c.dataset.page=p;
+ itemsOf(c).forEach(x=>x.classList.add('pgh'));vis.slice((p-1)*size,p*size).forEach(x=>x.classList.remove('pgh'));
+ const host=c.tagName==='TBODY'?c.closest('table'):c;let nav=host.nextElementSibling;
+ if(!nav||!nav.classList.contains('pgnav')){nav=document.createElement('div');nav.className='pgnav';host.after(nav);}
+ if(pages<=1){nav.style.display='none';return;}nav.style.display='';
+ nav.innerHTML='<button data-d="-1"'+(p<=1?' disabled':'')+'>‹ 上一頁</button><span>第 '+p+' / '+pages+' 頁・共 '+vis.length+' 筆</span><button data-d="1"'+(p>=pages?' disabled':'')+'>下一頁 ›</button>';
+ nav.querySelectorAll('button').forEach(b=>b.onclick=()=>{c.dataset.page=p+(+b.dataset.d);paginate(c);host.scrollIntoView({block:'nearest'});});}
 function apply(){const t=q.value.toLowerCase();const active=sev!=='all'||t;
- document.querySelectorAll('.item[data-sev],tr[data-sev]').forEach(e=>{
-  const ok=(sev==='all'||e.dataset.sev===sev)&&(!t||e.textContent.toLowerCase().includes(t));e.style.display=ok?'':'none';});
+ document.querySelectorAll('.item[data-sev],tr.row').forEach(e=>{const s=e.dataset.sev;
+  const ok=(sev==='all'||!s||s===sev)&&(!t||e.textContent.toLowerCase().includes(t));e.classList.toggle('fh',!ok);});
+ document.querySelectorAll('.pg').forEach(c=>{c.dataset.page=1;paginate(c);});
  document.querySelectorAll('details.cat,details.sec[data-sec]').forEach(d=>{
-  const n=[...d.querySelectorAll('.item[data-sev],tr[data-sev]')].filter(x=>x.style.display!=='none').length;
+  const n=[...d.querySelectorAll('.item[data-sev],tr.row')].filter(x=>!x.classList.contains('fh')).length;
   d.style.display=n?'':'none'; if(active&&n) d.open=true;});}
 q.addEventListener('input',apply);document.querySelectorAll('.filter button[data-f]').forEach(b=>b.onclick=()=>{
  document.querySelectorAll('.filter button[data-f]').forEach(x=>x.classList.remove('on'));b.classList.add('on');sev=b.dataset.f;apply();});
 document.getElementById('expandAll').onclick=()=>document.querySelectorAll('details').forEach(d=>d.open=true);
 document.getElementById('collapseAll').onclick=()=>document.querySelectorAll('details').forEach(d=>d.open=false);
+document.querySelectorAll('.pg').forEach(paginate);
 """
 
 
@@ -220,12 +234,12 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
             att = sum(1 for ch in changes if ch["attention"])
             p.append('<details class="sec"%s><summary><b>變動明細（%d 項%s）</b></summary>' % (
                 " open" if len(changes) <= 20 else "", len(changes), "，⚠️ %d 項需注意" % att if att else ""))
-            p.append('<table><tr><th>類型</th><th>區段</th><th>項目</th><th>舊</th><th>新</th></tr>')
+            p.append('<table><thead><tr><th>類型</th><th>區段</th><th>項目</th><th>舊</th><th>新</th></tr></thead><tbody class="pg" data-size="50">')
             for ch in changes:
-                p.append('<tr><td>%s%s</td><td>%s</td><td><code>%s</code></td><td>%s</td><td>%s</td></tr>' % (
+                p.append('<tr class="row"><td>%s%s</td><td>%s</td><td><code>%s</code></td><td>%s</td><td>%s</td></tr>' % (
                     '<span class="att">⚠️ </span>' if ch["attention"] else "", e(TYPE_LABEL[ch["type"]]), e(ch["section"]),
                     e(ch["key"]), e(ch.get("old", ""))[:300], e(ch.get("new", ""))[:300]))
-            p.append('</table></details>')
+            p.append('</tbody></table></details>')
     p.append('<h2>檢查結果</h2><div class="filter"><input id="q" placeholder="搜尋標題、路徑、內容…">'
              '<button class="on" data-f="all">全部</button>%s'
              '<button type="button" id="expandAll" class="tool">全部展開</button><button type="button" id="collapseAll" class="tool">全部收合</button>'
@@ -255,27 +269,30 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
                      sev, " open" if sev == "high" else "", sev, SEV_LABEL[sev], len(group),
                      {"high": "今天處理", "medium": "本週處理", "low": "有空時處理"}[sev]))
         if sev == "high":
-            p.extend(finding_html(f) for f in group)
+            p.append('<div class="pg" data-size="20">%s</div>' % "".join(finding_html(f) for f in group))
         else:
             cats = {}
             for f in group:
                 cats.setdefault(f["category"], []).append(f)
+            loose = []
             for cat in sorted(cats, key=lambda x: CAT_ORDER.index(x) if x in CAT_ORDER else 9):
                 items = cats[cat]
                 if len(items) <= 3:
-                    p.extend(finding_html(f) for f in items)
+                    loose.extend(items)
                 else:
-                    p.append('<details class="cat"><summary><b>%s</b>（%d）</summary>%s</details>' % (
+                    p.append('<details class="cat"><summary><b>%s</b>（%d）</summary><div class="pg" data-size="20">%s</div></details>' % (
                         e(cat), len(items), "".join(finding_html(f) for f in items)))
+            if loose:
+                p.append('<div class="pg" data-size="20">%s</div>' % "".join(finding_html(f) for f in loose))
         p.append('</details>')
     infos = [f for f in fs if f["severity"] == "info"]
     if infos:
         p.append('<details class="sec" data-sec="info"><summary><h2 style="display:inline">資訊：請確認你都認得（%d）</h2></summary><table>' % len(infos))
-        p.append('<tr><th>分類</th><th>項目</th><th>內容</th></tr>')
+        p.append('<thead><tr><th>分類</th><th>項目</th><th>內容</th></tr></thead><tbody class="pg" data-size="50">')
         for f in infos:
-            p.append('<tr data-sev="info"><td>%s</td><td>%s<br><span class="muted">%s</span></td><td><code>%s</code></td></tr>' % (
+            p.append('<tr class="row" data-sev="info"><td>%s</td><td>%s<br><span class="muted">%s</span></td><td><code>%s</code></td></tr>' % (
                 e(f["category"]), e(f["title"]), e(f["path"]), e(f["evidence"])))
-        p.append('</table></details>')
+        p.append('</tbody></table></details>')
     if sop:
         p.append(_sop.to_html(sop, e, open_=False))
     if md_button:

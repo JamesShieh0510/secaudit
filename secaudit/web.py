@@ -39,8 +39,8 @@ def _vulnfeed_history():
     except (OSError, ValueError):
         return []
     return [{"time": r["time"], "period": r["period"], "manual": r.get("manual", False), "fetched": r["fetched"], "sent": r.get("sent"),
-             "index_size": r.get("index_size", 0), "affected": r["affected"][:20], "kev": r["kev"][:10],
-             "notable": r["notable"][:5], "ai": r.get("ai", ""), "sums": r.get("sums", {})} for r in h[:10]]
+             "index_size": r.get("index_size", 0), "affected": r["affected"][:200], "kev": r["kev"][:10],
+             "notable": r["notable"][:5], "ai": r.get("ai", ""), "sums": r.get("sums", {})} for r in h[:30]]
 
 
 def next_settings(engine, cfg):
@@ -109,7 +109,7 @@ def make_handler(engine: Engine, token: str, port: int):
                     "status": engine.status,
                     "targets": [{"path": t.path, "display": home_rel(t.path), "label": t.label, "kind": t.kind,
                                  "enabled": t.enabled, "exists": os.path.isdir(t.path)} for t in load_targets(cfg)],
-                    "reports": engine.reports()[:40],
+                    "reports": engine.reports(page=int((qs.get("rpage") or ["1"])[0] or 1), size=15),
                     "next": next_settings(engine, cfg),
                     "vulnfeed": _vulnfeed_history(),
                     "config": {k: cfg.get(k) for k in ("quick_interval_min", "full_scan_hour", "online", "llm_enabled",

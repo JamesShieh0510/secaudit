@@ -303,10 +303,23 @@ class Engine:
                 except OSError:
                     pass
 
-    def reports(self):
+    def reports(self, page=None, size=15):
+        """報告清單。每份報告的摘要依檔案修改時間快取在記憶體，不用每次重讀全部 JSON。
+        page=None 回傳全部（list）；否則回傳 {"items", "total", "page", "pages"}。"""
+        cache = self.__dict__.setdefault("_report_index", {})
+        names = sorted((f for f in os.listdir(REPORTS) if f.endswith(".json")), reverse=True)
+        for k in list(cache):
+            if k not in names:
+                del cache[k]
         out = []
-        for f in sorted(os.listdir(REPORTS), reverse=True):
-            if not f.endswith(".json"):
+        for f in names:
+            try:
+                mt = os.path.getmtime(os.path.join(REPORTS, f))
+            except OSError:
+                continue
+            ent = cache.get(f)
+            if ent and ent[0] == mt:
+                out.append(ent[1])
                 continue
             d = _read(os.path.join(REPORTS, f), {})
             cnt = {}
@@ -317,7 +330,12 @@ class Engine:
                         "source": st.get("source", ""), "targets": [t["path"] for t in st.get("targets", [])] or
                         [t["path"] for t in d.get("targets", [])], "notify": st.get("notify"),
                         "changes": len(d.get("changes") or []), "attention": sum(1 for c in (d.get("changes") or []) if c.get("attention"))})
-        return out
+            cache[f] = (mt, out[-1])
+        if page is None:
+            return out
+        pages = max(1, (len(out) + size - 1) // size)
+        page = min(max(1, page), pages)
+        return {"items": out[(page - 1) * size: page * size], "total": len(out), "page": page, "pages": pages}
 
     def scheduler(self):
         """常駐排程：每 N 分鐘快速掃描，每天固定時間完整掃描。"""
