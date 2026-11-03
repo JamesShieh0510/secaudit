@@ -8,7 +8,7 @@ WATCH_SECTIONS = {
     "MCP 伺服器", "Claude Code hooks", "Claude Code 允許清單", "使用者 LaunchAgent", "全域 LaunchAgent",
     "LaunchDaemon（root 權限）", "crontab", "shell 啟動檔", "Telegram channel", "plugin marketplaces",
     "AI 指令檔", "有漏洞的套件", "瀏覽器擴充功能", "~/.ssh 檔案", "authorized_keys 公鑰",
-    "可疑位置的執行檔", "勒索軟體跡象", "secaudit 授權金鑰",
+    "可疑位置的執行檔", "勒索軟體跡象", "secaudit 授權金鑰", "已確認無害項目",
 }
 
 
@@ -72,7 +72,8 @@ def machine_context() -> dict:
     """偵測當下的環境，幫助判斷「是不是我本人在操作」。"""
     ctx = {"detected_at": time.strftime("%Y-%m-%d %H:%M:%S %A")}
     try:
-        out = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True, timeout=10).stdout
+        from .core import safe_env
+        out = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True, timeout=10, env=safe_env()).stdout
         m = re.search(r'"HIDIdleTime" = (\d+)', out)
         if m:
             ctx["user_idle_minutes"] = int(int(m.group(1)) / 1e9 / 60)

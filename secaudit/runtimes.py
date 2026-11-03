@@ -14,7 +14,7 @@ import time
 import urllib.error
 import urllib.request
 
-from .core import HOME, Finding, ScanContext, home_rel, read_text
+from .core import HOME, Finding, ScanContext, home_rel, read_text, safe_env
 
 CAT = "供應鏈與版本"
 H = HOME
@@ -48,7 +48,7 @@ def _run_version(path, args, cache):
     if key in cache:
         return cache[key]
     try:
-        out = subprocess.run([path] + args, capture_output=True, text=True, timeout=10)
+        out = subprocess.run([path] + args, capture_output=True, text=True, timeout=10, env=safe_env())
         v = _clean(out.stdout + " " + out.stderr)
     except (OSError, subprocess.TimeoutExpired):
         v = ""

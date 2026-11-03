@@ -141,6 +141,8 @@ class Engine:
             if result["cancelled"]:
                 self.status["phase"] = "已取消"
                 return None
+            from . import acks
+            acks.apply(result)          # 已確認無害的問題移出 findings（檔案內容改變則標記失效）
             state = _read(os.path.join(DATA, "state.json"), {})
             backfill_first_seen(state)
             changes, new_state, baseline = compare(state, result)

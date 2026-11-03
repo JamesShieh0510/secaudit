@@ -5,7 +5,7 @@ import math
 import os
 
 from .core import SEVERITIES, SEV_LABEL
-from .diff import TYPE_LABEL
+from .diff import TYPE_LABEL, finding_key
 from . import sop as _sop
 
 SEV_ORDER = {s: i for i, s in enumerate(SEVERITIES)}
@@ -124,6 +124,7 @@ details.sec>summary{list-style:none}details.sec>summary::before{content:"▸ ";c
 details.cat{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--line);border-radius:10px;margin:8px 0;padding:8px 12px}
 details.cat>summary::before{content:"▸ ";color:var(--muted)}details.cat[open]>summary::before{content:"▾ "}
 details.cat details.item{margin:6px 0}
+.ackrow{margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .pgnav{display:flex;justify-content:center;align-items:center;gap:10px;margin:8px 0;flex-wrap:wrap;font-size:13px}
 .pgnav button{padding:3px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);cursor:pointer}
 .pgnav button:disabled{opacity:.4;cursor:default}.fh,.pgh{display:none!important}
@@ -153,6 +154,16 @@ q.addEventListener('input',apply);document.querySelectorAll('.filter button[data
  document.querySelectorAll('.filter button[data-f]').forEach(x=>x.classList.remove('on'));b.classList.add('on');sev=b.dataset.f;apply();});
 document.getElementById('expandAll').onclick=()=>document.querySelectorAll('details').forEach(d=>d.open=true);
 document.getElementById('collapseAll').onclick=()=>document.querySelectorAll('details').forEach(d=>d.open=false);
+const RPT=document.body.dataset.report||'';
+document.querySelectorAll('.ackbtn').forEach(b=>{
+ if(location.protocol!=='http:'||!RPT){b.parentElement.style.display='none';return;}
+ b.onclick=async()=>{const msg=b.nextElementSibling;
+  if(!confirm('確定這個問題是無害的嗎？\n\n標記後它會移到「已確認無害」，不再計入風險；若是檔案，內容一改變標記就會失效。\n這個操作會發 Telegram 通知。'))return;
+  b.disabled=true;msg.textContent='處理中…';
+  try{const r=await fetch('/api/ack',{method:'POST',headers:{'Content-Type':'application/json','X-Secaudit':'1'},
+    body:JSON.stringify({report:RPT,key:b.dataset.key})});const j=await r.json();
+   msg.textContent=j.ok?'已標記，下一次掃描起生效（可在 Web UI 取消）':'失敗：'+(j.error||r.status);if(!j.ok)b.disabled=false;}
+  catch(e){msg.textContent='失敗：'+e;b.disabled=false;}};});
 document.querySelectorAll('.pg').forEach(paginate);
 """
 
@@ -190,7 +201,7 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
     for f in fs:
         cats.setdefault(f["category"], {s: 0 for s in SEVERITIES})[f["severity"]] += 1
     p = ['<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">',
-         '<title>安全掃描報告</title><style>%s</style></head><body><div class="wrap">' % CSS,
+         '<title>安全掃描報告</title><style>%s</style></head><body data-report="%s"><div class="wrap">' % (CSS, e(name)),
          '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">'
          '<div><h1>🛡 安全掃描報告</h1><div class="muted">%s ・ %s ・ 耗時 %s 秒 ・ 模式 %s</div></div><div>%s</div></div>' % (
              e(result["host"]), e(result["started"]), e(result["duration_sec"]), e(result["mode"]), md_button)]
@@ -256,7 +267,8 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
             if f.get(k):
                 val = '<span class="ev">%s</span>' % e(f[k]) if k in ("path", "evidence") else e(f[k])
                 out.append('<dt>%s</dt><dd>%s</dd>' % (label, val))
-        out.append('</dl></details>')
+        out.append('</dl><div class="ackrow"><button type="button" class="ackbtn tool" data-key="%s">✅ 標記為已確認無害</button>'
+                   '<span class="muted ackmsg"></span></div></details>' % e(finding_key(f)))
         return "".join(out)
 
     # 依重要性分段收合：高風險展開；中 / 低風險收合，且同分類超過 3 項再分一層
@@ -293,6 +305,17 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
             p.append('<tr class="row" data-sev="info"><td>%s</td><td>%s<br><span class="muted">%s</span></td><td><code>%s</code></td></tr>' % (
                 e(f["category"]), e(f["title"]), e(f["path"]), e(f["evidence"])))
         p.append('</tbody></table></details>')
+    acked = result.get("acknowledged") or []
+    if acked:
+        p.append('<details class="sec" data-sec="acked"><summary><h2 style="display:inline">✅ 已確認無害（%d）</h2>'
+                 '<span class="muted">　不計入風險數量；檔案內容改變時標記自動失效</span></summary><div class="pg" data-size="20">' % len(acked))
+        for f in acked:
+            a = f.get("ack") or {}
+            p.append('<div class="item" style="padding:8px 12px;border:1px solid var(--line);border-radius:10px;margin:6px 0">'
+                     '<span class="tag">%s</span><span class="tag">%s</span>%s<div class="muted">%s ・ 標記於 %s%s</div></div>' % (
+                         SEV_LABEL.get(f["severity"], ""), e(f["category"]), e(f["title"]), e(f.get("path", "")),
+                         e(a.get("time", "")), ("・" + e(a["note"])) if a.get("note") else ""))
+        p.append('</div></details>')
     if sop:
         p.append(_sop.to_html(sop, e, open_=False))
     if md_button:

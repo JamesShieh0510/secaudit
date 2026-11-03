@@ -10,7 +10,7 @@ import subprocess
 import time
 import urllib.parse
 
-from .core import HOME, Finding, ScanContext, home_rel, truncate
+from .core import HOME, Finding, ScanContext, home_rel, safe_env, truncate
 
 CAT = "瀏覽器"
 APP_SUPPORT = os.path.join(HOME, "Library", "Application Support")
@@ -244,7 +244,7 @@ def check_extensions(ctx: ScanContext):
 def check_debug_and_theft(ctx: ScanContext):
     ctx.report(CAT, "遠端除錯與 cookie 外流跡象")
     try:
-        ps = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=10).stdout
+        ps = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=10, env=safe_env()).stdout
     except (OSError, subprocess.TimeoutExpired):
         ps = ""
     for line in ps.splitlines():

@@ -27,6 +27,7 @@ def load_dotenv(path: str):
     except OSError:
         return 0
     n = 0
+    loaded = []
     for line in lines:
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -38,7 +39,11 @@ def load_dotenv(path: str):
             v = v[1:-1]
         if k and k not in os.environ:
             os.environ[k] = v
+            loaded.append(k)
             n += 1
+    if loaded:
+        from secaudit.core import remember_secret_keys
+        remember_secret_keys(loaded)     # 子程序（修復動作、掃描用的工具）會把這些變數過濾掉
     return n
 
 
@@ -53,6 +58,7 @@ def _op_inject(tpl: str):
 
 def _apply_env(text: str) -> int:
     n = 0
+    loaded = []
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -63,7 +69,10 @@ def _apply_env(text: str) -> int:
         if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
             v = v[1:-1]
         os.environ[k] = v
+        loaded.append(k)
         n += 1
+    from secaudit.core import remember_secret_keys
+    remember_secret_keys(loaded)
     return n
 
 

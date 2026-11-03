@@ -10,7 +10,7 @@ import os
 import subprocess
 import time
 
-from .core import HOME, home_rel
+from .core import HOME, home_rel, safe_env
 from .checks_ai import MCP_JSON_SOURCES, SKILL_ROOTS
 from .checks_browser import _chromium_profiles
 from .checks_persistence import LAUNCH_DIRS, SHELL_RC
@@ -69,7 +69,7 @@ class ClaudeJsonSig:
 
 def _crontab_sig():
     try:
-        out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=5).stdout
+        out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=5, env=safe_env()).stdout
     except (OSError, subprocess.TimeoutExpired):
         return None
     return hashlib.sha1(out.encode()).hexdigest()
@@ -112,6 +112,7 @@ def build_watch_list():
     w.append(("crontab", _crontab_sig))
     from .app import DATA      # 授權修復動作用的 YubiKey 清單：任何人直接改這個檔都要警示
     f("secaudit 授權金鑰", os.path.join(DATA, "webauthn.json"))
+    f("已確認無害項目", os.path.join(DATA, "acks.json"))      # 任何人直接改標記檔都要警示
     return w
 
 

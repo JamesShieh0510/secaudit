@@ -1,5 +1,6 @@
 """共用資料結構與工具函式（Python 3.8 相容，只用標準庫）。"""
 import os
+import re
 import stat
 import threading
 from dataclasses import dataclass, field, asdict
@@ -154,3 +155,25 @@ def mode_str(st) -> str:
 
 def group_or_world_readable(st) -> bool:
     return bool(st.st_mode & (stat.S_IRGRP | stat.S_IROTH))
+
+
+# ---------------------------------------------------------------- 子程序用的環境變數
+SECRET_ENV = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "OLLAMA_API_KEY")
+_SECRETISH = re.compile(r"KEY|TOKEN|SECRET|PASSW|PWD|CREDENTIAL|AUTH|COOKIE|SESSION|PRIVATE|CHAT_ID|DSN|DATABASE|_URL$|_URI$|_SK$", re.I)
+_ENV_KEEP = {"PWD", "OLDPWD", "SSH_AUTH_SOCK"}
+
+
+def remember_secret_keys(names):
+    """記錄從 1Password / .env 載入的變數名稱（存在 SECAUDIT_SECRET_KEYS），讓所有子程序都能把它們過濾掉。"""
+    cur = {k for k in os.environ.get("SECAUDIT_SECRET_KEYS", "").split(",") if k}
+    os.environ["SECAUDIT_SECRET_KEYS"] = ",".join(sorted(cur | set(names)))
+
+
+def safe_env(**extra):
+    """拿掉常駐程式持有的機密後的環境變數：固定名單 + SECAUDIT_SECRET_KEYS 列出的名稱 + 名稱看起來像機密的變數。
+    掃描時執行的 codesign、crontab、npm、各語言的 --version 等子程序都用這個，避免把 Telegram / Ollama 金鑰交給它們。"""
+    drop = set(SECRET_ENV) | {k for k in os.environ.get("SECAUDIT_SECRET_KEYS", "").split(",") if k}
+    env = {k: v for k, v in os.environ.items()
+           if k not in drop and k != "SECAUDIT_SECRET_KEYS" and (k in _ENV_KEEP or not _SECRETISH.search(k))}
+    env.update(extra)
+    return env

@@ -99,6 +99,12 @@ label.cfg{display:flex;justify-content:space-between;align-items:center;gap:8px;
     <details style="margin-top:10px"><summary class="muted">執行紀錄</summary><div id="actHistory" class="muted"></div></details>
   </div>
 
+  <div class="card" id="ackCard">
+    <h2>✅ 已確認無害</h2>
+    <div class="muted">在報告中按「標記為已確認無害」的問題會列在這裡，不計入風險數量與未處理提醒。指向檔案的標記綁定檔案內容，檔案一改變就會失效並重新警示。新增或取消標記都會發 Telegram。</div>
+    <div id="ackList" style="margin-top:8px"></div>
+  </div>
+
   <div class="card">
     <h2>常駐監控設定</h2>
     <div class="grid">
@@ -157,7 +163,19 @@ document.addEventListener("toggle", e => {
   const d = e.target; if (!d.dataset || !d.dataset.okey) return;
   d.open ? OPEN.add(d.dataset.okey) : OPEN.delete(d.dataset.okey);
 }, true);
-function rerenderLocal() { renderTargets(); if (state) renderFeed(state.vulnfeed, state.status); }
+function rerenderLocal() { renderTargets(); if (state) { renderFeed(state.vulnfeed, state.status); renderAcks(state.acks || []); } }
+function renderAcks(list) {
+  const pg = pageSlice("acks", list, 10);
+  $("#ackList").innerHTML = (pg.items.map(a => `<div class="target"><div class="p">
+      <div><span class="kind">${esc({high:"高",medium:"中",low:"低"}[a.severity] || a.severity)}</span> ${esc(a.title)}</div>
+      <code>${esc(a.path)}</code><div class="muted">標記於 ${esc(a.time)}${a.sha ? "・綁定檔案內容" : "・未綁定檔案（只比對問題本身）"}</div></div>
+      <button data-unack="${esc(a.key)}">取消標記</button></div>`).join("") || '<div class="muted">目前沒有標記</div>') +
+    navHtml("acks", pg.p, pg.pages, pg.total);
+  $("#ackList").querySelectorAll("[data-unack]").forEach(b => b.onclick = async () => {
+    b.disabled = true; const r = await api("/api/unack", {key: b.dataset.unack});
+    if (!r.ok) { b.disabled = false; return; } refresh();
+  });
+}
 
 async function api(path, body) {
   const r = await fetch(path, body === undefined ? {} : {method:"POST", headers:{"Content-Type":"application/json","X-Secaudit":"1"}, body:JSON.stringify(body)});
@@ -274,6 +292,7 @@ async function refresh() {
   renderConfig(state.config, state.secrets);
   renderNext(state.next);
   renderFeed(state.vulnfeed, state.status);
+  renderAcks(state.acks || []);
   clearTimeout(window._t); window._t = setTimeout(refresh, (state.status.running || state.status.feed_running) ? 1500 : 10000);
 }
 

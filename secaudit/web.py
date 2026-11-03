@@ -10,6 +10,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import acks as acks_mod
 from .app import DATA, REPORTS, Engine, load_config, load_targets, normalize_host, save_config
 from .core import home_rel
 
@@ -126,6 +127,7 @@ def make_handler(engine: Engine, token: str, port: int):
                     "reports": engine.reports(page=int((qs.get("rpage") or ["1"])[0] or 1), size=15),
                     "next": next_settings(engine, cfg),
                     "vulnfeed": _vulnfeed_history(),
+                    "acks": acks_mod.items(),
                     "config": {k: cfg.get(k) for k in ("quick_interval_min", "full_scan_hour", "online", "llm_enabled",
                                                        "ollama_host", "ollama_model", "vulnfeed_hours", "reminder_enabled",
                                                        "reminder_weekday", "reminder_hour", "escalate_days")},
@@ -298,6 +300,24 @@ def make_handler(engine: Engine, token: str, port: int):
                 with codes_lock:
                     codes[code] = time.time()
                 return self._send(200, {"url": "http://localhost:%d/?c=%s" % (port, code)})
+            if path in ("/api/ack", "/api/unack"):
+                # 「已確認無害」會降低警示，所以每次新增 / 取消都發 Telegram，讓使用者知道
+                from . import acks
+                from .notify import telegram_send
+                import html as _h
+                if path == "/api/ack":
+                    ok, msg, ent = acks.add_from_report(str(body.get("report", ""))[:32], str(body.get("key", ""))[:1000],
+                                                        str(body.get("note", ""))[:200])
+                    if ok:
+                        telegram_send("✅ secaudit：已將「%s」標記為已確認無害%s。不是你做的話請到 Web UI 取消。" % (
+                            _h.escape(ent["title"][:120]), "（綁定檔案內容）" if ent["sha"] else ""))
+                    return self._send(200 if ok else 404, {"ok": ok, "error": msg})
+                key = str(body.get("key", ""))[:1000]
+                ent = next((x for x in acks.items() if x["key"] == key), None)
+                ok = acks.remove(key)
+                if ok and ent:
+                    telegram_send("↩️ secaudit：已取消「%s」的無害標記，下一次掃描起會重新列出。" % _h.escape(ent["title"][:120]))
+                return self._send(200 if ok else 404, {"ok": ok})
             if path == "/api/test-telegram":
                 from .notify import telegram_send
                 return self._send(200, {"ok": telegram_send("🛡 secaudit 測試訊息：Telegram 警示設定成功。")})

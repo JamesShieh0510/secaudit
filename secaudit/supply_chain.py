@@ -10,7 +10,7 @@ import time
 import urllib.error
 import urllib.request
 
-from .core import Finding, ScanContext, file_fingerprint, home_rel, read_text, truncate
+from .core import Finding, ScanContext, file_fingerprint, home_rel, read_text, safe_env, truncate
 
 CAT = "供應鏈與版本"
 UA = {"User-Agent": "secaudit/1.0", "Content-Type": "application/json"}
@@ -218,7 +218,7 @@ RUNTIMES = [
 
 def _run(cmd):
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15, env=safe_env())
         return (r.stdout + r.stderr).strip()
     except (OSError, subprocess.TimeoutExpired):
         return ""

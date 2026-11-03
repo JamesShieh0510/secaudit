@@ -4,7 +4,7 @@ import plistlib
 import re
 import subprocess
 
-from .core import HOME, Finding, ScanContext, file_fingerprint, home_rel, read_text, truncate
+from .core import HOME, Finding, ScanContext, file_fingerprint, home_rel, read_text, safe_env, truncate
 from .rules import SUSPICIOUS_CMDS
 from .checks_secrets import report_secrets
 
@@ -24,7 +24,7 @@ def _signature(path: str) -> str:
     if not os.path.exists(path):
         return "missing"
     try:
-        r = subprocess.run(["codesign", "-dv", "--verbose=2", path], capture_output=True, text=True, timeout=10)
+        r = subprocess.run(["codesign", "-dv", "--verbose=2", path], capture_output=True, text=True, timeout=10, env=safe_env())
     except (OSError, subprocess.TimeoutExpired):
         return "unknown"
     out = r.stderr
@@ -96,7 +96,7 @@ def max_sev(a: str, b: str) -> str:
 def check_crontab(ctx: ScanContext):
     ctx.report(CAT, "crontab")
     try:
-        r = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
+        r = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10, env=safe_env())
     except (OSError, subprocess.TimeoutExpired):
         return
     lines = [l for l in r.stdout.splitlines() if l.strip() and not l.lstrip().startswith("#")]
