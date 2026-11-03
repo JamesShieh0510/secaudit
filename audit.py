@@ -155,19 +155,11 @@ def main():
         have = {k: bool(os.environ.get(k)) for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "OLLAMA_API_KEY")}
         print("環境變數：" + "、".join("%s %s" % (k, "✓" if v else "✗") for k, v in have.items()))
         print("Telegram：" + ("✅ 已送出" if telegram_send("🛡 secaudit 測試訊息：Telegram 警示設定成功。") else "❌ 失敗"))
-        host = cfg.get("ollama_host", "https://ollama.com").rstrip("/")
-        body = {"model": cfg.get("ollama_model"), "stream": False,
-                "messages": [{"role": "user", "content": "只回覆兩個字：正常"}]}
-        req = urllib.request.Request(host + "/api/chat", data=json.dumps(body).encode(), method="POST",
-                                     headers={"Content-Type": "application/json",
-                                              "Authorization": "Bearer " + os.environ.get("OLLAMA_API_KEY", "")})
-        try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                ans = json.loads(r.read().decode()).get("message", {}).get("content", "").strip()
-            print("Ollama（%s）：✅ 模型回覆「%s」" % (cfg.get("ollama_model"), ans[:40]))
-        except Exception as e:
-            code = getattr(e, "code", "")
-            print("Ollama（%s）：❌ %s %s" % (cfg.get("ollama_model"), type(e).__name__, code))
+        from secaudit.notify import test_ollama
+        r = test_ollama(cfg.get("ollama_host", "https://ollama.com"), cfg.get("ollama_model"))
+        where = "雲端" if r["cloud"] else "本機/區網"
+        print("Ollama（%s，%s，%s）：%s" % (where, r["host"], cfg.get("ollama_model"),
+              "✅ 模型回覆「%s」（%s 秒）" % (r.get("reply"), r.get("seconds")) if r["ok"] else "❌ " + r.get("error", "")))
     elif args.cmd == "url":
         print("http://127.0.0.1:%d/?t=%s" % (cfg["web_port"], get_token()))
     elif args.cmd == "serve":

@@ -245,11 +245,15 @@ function hostHint() {
   const h = $("#c_host").value.trim();
   const local = /^(https?:\/\/)?(127\.|localhost|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h);
   const cloud = /ollama\.com/.test(h);
+  if (/[-:]cloud$/.test($("#c_model").value.trim()) && !cloud) {
+    $("#ollamaMsg").innerHTML = '<span style="color:var(--medium)">⚠️ 這是 Ollama 的雲端模型（-cloud），雖然主機是本機，資料仍會經由本機 Ollama 送到 ollama.com</span>'; return;
+  }
   $("#ollamaMsg").innerHTML = cloud ? "雲端：需要 OLLAMA_API_KEY，變動清單會傳到 ollama.com" :
     local ? "本機 / 區網：不需要 API Key，資料不會離開你的網路" :
     (h.startsWith("http://") ? '<span style="color:var(--medium)">⚠️ 用未加密的 http 連到外部主機，資料可能被攔截</span>' : "");
 }
 $("#c_host").addEventListener("input", hostHint);
+$("#c_model").addEventListener("input", hostHint);
 document.querySelectorAll(".hostPreset").forEach(b => b.onclick = () => { $("#c_host").value = b.dataset.h; hostHint(); });
 $("#testOllama").onclick = async () => {
   $("#testOllama").disabled = true; $("#ollamaMsg").textContent = "測試中…（本機模型第一次載入可能要 10～60 秒）";

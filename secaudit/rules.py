@@ -49,7 +49,9 @@ SUSPICIOUS_CMDS = [
 # Prompt injection 常見語句（中英）
 INJECTION_PHRASES = re.compile(
     r"ignore (?:all |any )?(?:previous|prior|above) instructions|disregard (?:the )?(?:system|previous)|"
-    r"do not (?:tell|inform|mention to) the user|without (?:telling|informing) the user|"
+    # 「do not tell the user to run X」是在避免給錯建議，不算；「do not tell the user about/that…」才是要瞞著使用者
+    r"(?:do not|don't|never) (?:tell|inform|mention (?:it |this )?to|let) the user (?:about|that|what|anything|know|see)\b|"
+    r"without (?:telling|informing|notifying|alerting) the user|(?:hide|conceal|keep) (?:this|it|that) from the user|"
     r"you are now (?:in )?(?:developer|dan|jailbreak)|"
     r"忽略(?:之前|先前|上面|以上)的?(?:所有)?指令|不要告訴使用者|不要讓使用者知道",
     re.I,
