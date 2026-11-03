@@ -11,17 +11,42 @@ from .rules import SECRET_RULES, GENERIC_ASSIGN, is_placeholder
 CAT = "機密與憑證"
 
 
+_WEAK_PW = {"postgres", "password", "pass", "root", "admin", "secret", "example", "test", "changeme", "mysql", "redis",
+            "guest", "user", "dev", "local", "123456", "pw"}
+_LOCAL_HOST = re.compile(r"^(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal|db|database|postgres|mysql|redis|mongo|mongodb)(?::\d+)?(?:/|$)", re.I)
+_DB_PARTS = re.compile(r"^([\w+.-]+://)([^:/@]+):([^@]+)@(.*)$")
+
+
+def _db_url(raw):
+    """資料庫連線字串：回傳 (是否略過, severity, 遮罩後的證據)。範例 / 變數佔位不算；本機弱帳密降為 low。"""
+    m = _DB_PARTS.match(raw)
+    if not m:
+        return False, "high", mask(raw)
+    scheme, user, pw, rest = m.groups()
+    if is_placeholder(pw) or re.match(r"^[%$]|^\*+$", pw):
+        return True, "", ""
+    local = bool(_LOCAL_HOST.match(rest))
+    sev = "low" if local and (pw.lower() in _WEAK_PW or pw.lower() == user.lower()) else "high"
+    return False, sev, "%s%s:****@%s" % (scheme, user, rest[:60])
+
+
 def find_secrets(text: str, generic: bool = False):
     """回傳 {rule_id: (名稱, severity, [行號], 第一個遮罩值)}。"""
     hits = {}
-    lines = None
     for rid, name, rx, sev in SECRET_RULES:
         for m in rx.finditer(text):
-            if lines is None:
-                lines = text
-            ln = text.count("\n", 0, m.start()) + 1
             ev = "（私鑰內容不顯示）" if rid == "private-key" else mask(m.group(0))
-            h = hits.setdefault(rid, [name, sev, [], ev])
+            s = sev
+            if rid == "db-url":
+                skip, s, ev = _db_url(m.group(0))
+                if skip:
+                    continue
+            elif rid == "jdbc-password":
+                ev = re.sub(r"((?:password|pwd)=)[^;&\s'\"]+", r"\1****", m.group(0), flags=re.I)[:90]
+            ln = text.count("\n", 0, m.start()) + 1
+            h = hits.setdefault(rid, [name, s, [], ev])
+            if s == "high":
+                h[1] = "high"            # 同一種機密只要有一處是高風險，整體算高風險
             h[2].append(ln)
     if generic:
         for m in GENERIC_ASSIGN.finditer(text):
@@ -45,6 +70,63 @@ def report_secrets(ctx: ScanContext, path: str, text: str, category: str = CAT,
             why="明文機密一旦被任何程式（包括被 prompt injection 操控的 AI 代理）讀到就會外洩。",
             fix="到服務後台撤銷並重新產生此金鑰，改存 1Password，檔案中改用 op:// 引用。",
         ))
+
+
+CLOUD_MARKERS = ("/Library/Mobile Documents/", "/Library/CloudStorage/", "/Dropbox/")
+
+
+def _git_state(path):
+    """回傳 'tracked'（已提交到 git）、'untracked'（在 git 專案裡但沒提交）或 ''（不在 git 專案裡）。"""
+    import subprocess
+    from .core import safe_env
+    d = os.path.dirname(path)
+    while d and d != os.path.dirname(d):
+        if os.path.isdir(os.path.join(d, ".git")):
+            try:
+                r = subprocess.run(["git", "-C", d, "ls-files", "--error-unmatch", "--", os.path.relpath(path, d)],
+                                   capture_output=True, text=True, timeout=10, env=safe_env())
+            except (OSError, subprocess.TimeoutExpired):
+                return ""
+            return "tracked" if r.returncode == 0 else "untracked"
+        d = os.path.dirname(d)
+    return ""
+
+
+def report_file_secrets(ctx: ScanContext, path: str, text: str):
+    """遍歷到的一般檔案：同一個檔案裡的所有機密彙整成一筆，附上處理方式。"""
+    hits = find_secrets(text)
+    if not hits:
+        return
+    order = {"high": 0, "medium": 1, "low": 2}
+    sev = min((h[1] for h in hits.values()), key=lambda s: order.get(s, 9))
+    kinds = sorted(hits.values(), key=lambda h: order.get(h[1], 9))
+    detail = "；".join("%s %d 處（第 %s 行，%s）" % (n, len(l), ", ".join(map(str, l[:4])) + ("…" if len(l) > 4 else ""), ev)
+                      for n, s, l, ev in kinds)
+    git = _git_state(path)
+    cloud = any(c in path for c in CLOUD_MARKERS)
+    notes = []
+    if git == "tracked":
+        notes.append("⚠️ 這個檔案已經提交到 git：就算刪掉，機密仍留在 git 歷史，push 過的話也在遠端")
+        sev = "high" if sev != "low" else "medium"
+    elif git == "untracked":
+        notes.append("在 git 專案裡但沒有提交，請確認它在 .gitignore 裡")
+    if cloud:
+        notes.append("⚠️ 位在雲端硬碟，已經同步到雲端")
+    rel = home_rel(path)
+    fix = ("① 改存 1Password：用 scripts/op-store.sh 或 1Password App 建立項目，原本的值改成 op:// 引用；"
+           "整份文件要保留的話，可用 op document create '%s' --vault Private 存成 1Password 文件。"
+           "② 只是要封存：hdiutil create -encryption AES-256 -stdinpass -srcfolder '%s' -volname secrets ~/Secure/secrets.dmg"
+           "（密碼存 1Password），確認能開啟後刪除原檔並清空垃圾桶。"
+           "③ 這些機密如果曾經外流（提交到 git、同步到雲端、分享過），先到各服務撤銷並更換。" % (path, os.path.dirname(path)))
+    if git == "tracked":
+        fix += "④ 從 git 歷史移除：git filter-repo --invert-paths --path '%s'（會改寫歷史，先和團隊確認）。" % os.path.relpath(path, os.path.dirname(path))
+    ctx.inv("散落的機密檔案", rel, "%s | %s" % (",".join(sorted(hits)), file_fingerprint(path)))
+    ctx.add(Finding(
+        rule="file-secrets", severity=sev, category=CAT,
+        title="檔案裡寫死了 %d 種機密：%s" % (len(hits), "、".join(h[0] for h in kinds[:3]) + ("…" if len(kinds) > 3 else "")),
+        path=rel, detail=detail + ("　｜　" + "；".join(notes) if notes else ""),
+        why="寫死在文件或程式裡的連線字串、token 會被備份、同步、複製到別的專案，也會被任何讀得到檔案的程式（包括 AI 助手）看到。",
+        fix=fix))
 
 
 def check_env_file(ctx: ScanContext, path: str):

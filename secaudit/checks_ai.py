@@ -339,7 +339,8 @@ def check_telegram(ctx: ScanContext):
 TRANSCRIPT_ROOTS = [("~/.claude/projects", "Claude Code"), ("~/.claude/history.jsonl", "Claude Code 輸入歷史"),
                     ("~/.claude/paste-cache", "Claude Code 貼上暫存"), ("~/.codex/sessions", "Codex")]
 PREFILTER = ("sk-", "AIza", "AKIA", "ASIA", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_",
-             "xox", "_live_", ":AA", "hf_", "gsk_", "PRIVATE KEY")
+             "xox", "_live_", ":AA", "hf_", "gsk_", "PRIVATE KEY", "postgres", "mysql", "mariadb", "mongodb", "redis",
+             "amqp", "mssql", "sqlserver", "clickhouse", "jdbc:", "hooks.slack.com", "/api/webhooks/")
 
 
 def check_transcripts(ctx: ScanContext, cache: dict):

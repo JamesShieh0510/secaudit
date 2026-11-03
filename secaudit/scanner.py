@@ -81,10 +81,12 @@ def walk_target(ctx: ScanContext, t: Target, lockfiles: list, ransom=None, pins=
                     checks_ai.check_claude_settings_file(ctx, p)
                 elif fn in supply_chain.LOCKFILES:
                     lockfiles.append(p)
-                elif ext in CONTENT_EXTS or fn in CONTENT_NAMES:
-                    text = checks_secrets.read_text(p, ctx)
+                elif ext in CONTENT_EXTS or fn in CONTENT_NAMES or (not ext and not fn.startswith(".")):
+                    # 沒有副檔名的檔案（例如 notes、prod-config）只看 256KB 以下的純文字檔；二進位檔 read_text 會略過
+                    text = checks_secrets.read_text(p, ctx) if (ext or fn in CONTENT_NAMES) else \
+                        checks_secrets.read_text(p, ctx, limit=256 * 1024)
                     if text:
-                        checks_secrets.report_secrets(ctx, p, text)
+                        checks_secrets.report_file_secrets(ctx, p, text)
             except Exception:  # 單一檔案出錯不影響整體掃描
                 ctx.stats["errors"] += 1
 

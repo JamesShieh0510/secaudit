@@ -2,7 +2,7 @@
 import re
 
 # 規則有變動時加 1：AI 對話紀錄等快取會自動失效、重新掃描
-RULES_VERSION = 2
+RULES_VERSION = 3
 
 # (rule_id, 名稱, regex, severity)
 SECRET_RULES = [
@@ -16,6 +16,13 @@ SECRET_RULES = [
     ("telegram-bot", "Telegram Bot Token", re.compile(r"\b\d{8,10}:AA[A-Za-z0-9_\-]{33}\b"), "high"),
     ("hf-token", "Hugging Face Token", re.compile(r"\bhf_[A-Za-z0-9]{34,}\b"), "high"),
     ("groq-key", "Groq API Key", re.compile(r"\bgsk_[A-Za-z0-9]{40,}\b"), "high"),
+    # 資料庫 / 訊息佇列連線字串（帳號:密碼@主機）。本機測試用的弱帳密在 find_secrets 裡降為低風險
+    ("db-url", "資料庫連線字串（含密碼）", re.compile(
+        r"\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqps?|mssql|sqlserver|clickhouse|cockroachdb|"
+        r"oracle|neo4j(?:\+s)?|couchdb|elasticsearch)(?:\+\w+)?://[^\s:/@'\"<>{}]+:[^\s@/'\"<>{}]{3,}@[^\s'\"<>]+"), "high"),
+    ("jdbc-password", "JDBC 連線字串（含密碼）", re.compile(r"\bjdbc:\w+:[^\s'\"]*?(?:password|pwd)=[^\s;&'\"]{3,}", re.I), "high"),
+    ("slack-webhook", "Slack Webhook", re.compile(r"https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]{20,}"), "high"),
+    ("discord-webhook", "Discord Webhook", re.compile(r"https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d{15,}/[\w-]{50,}"), "high"),
     # 私鑰：標記後面必須接著金鑰內容（至少 3 行 base64）。只有標記的通常是程式碼或說明文字。
     # 換行可能是真的換行，也可能是 JSON 裡跳脫的 \\n（AI 對話紀錄）
     ("private-key", "私鑰內容", re.compile(

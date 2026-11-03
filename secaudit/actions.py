@@ -140,7 +140,9 @@ def _run_cmd(argv, timeout=3600, keep=4000, env=None):
 # ---------------------------------------------------------------- 動作 1：遮罩 AI 對話紀錄裡的金鑰
 TRANSCRIPT_DIRS = [os.path.expanduser(p) for p in ("~/.claude/projects", "~/.claude/paste-cache", "~/.codex/sessions")]
 TRANSCRIPT_FILES = [os.path.expanduser("~/.claude/history.jsonl")]
-_BRULES = [(rid, re.compile(rx.pattern.encode())) for rid, _n, rx, _s in SECRET_RULES]
+# 保留 re.I / re.M / re.S / re.X（bytes 樣式不能帶 re.UNICODE，所以只取這幾個）
+_BFLAGS = re.I | re.M | re.S | re.X
+_BRULES = [(rid, re.compile(rx.pattern.encode(), rx.flags & _BFLAGS)) for rid, _n, rx, _s in SECRET_RULES]
 _PK_HEAD = re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----")
 _PK_END = re.compile(rb"-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----")
 _PK_BODY = re.compile(rb"(?:(?<=\\n)|(?<=\\r)|(?<=\s))[A-Za-z0-9+/=]+")
