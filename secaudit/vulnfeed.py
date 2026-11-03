@@ -294,5 +294,12 @@ def run_feed(engine, cfg, cache, force=False, lookback_hours=None):
         st["last"] = now
     st["seen"] = (list(seen) + [a.get("ghsa_id") for a in ghsa] + [k.get("cveID") for k in kev])[-5000:]
     st["history"] = ([record] + st.get("history", []))[:30]
+    # 影響你專案的套件放進待辦清單，直到升級（由提醒功能比對套件索引後移除）
+    op = st.setdefault("open", {})
+    for g in group_affected(affected):
+        for v in g["versions"]:
+            k = "%s|%s|%s" % (g["eco"], g["name"], v)
+            ent = op.setdefault(k, {"first_seen": time.strftime("%Y-%m-%d %H:%M:%S")})
+            ent.update(cves=g["cves"][:6], fixed=g["fixed"], severity=g["severity"], projects=g["projects"][:5])
     _write_private(path, st)
     return record

@@ -33,6 +33,11 @@ def build_sop(cfg: dict, targets: list):
               ["🧯 漏洞快訊", ("每 %d 小時" % cfg.get("vulnfeed_hours", 6)) if cfg.get("vulnfeed_hours", 6) else "（已關閉）",
                "抓取 GitHub Advisory Database 與 CISA KEV 的新漏洞，比對你專案的套件版本與本機軟體；"
                "有影響到你的會以 🔴 標出要升級到哪個版本，再推送 Telegram 摘要。"],
+              ["📋 未處理提醒", ("每週%s %02d:00" % ("一二三四五六日"[cfg.get("reminder_weekday", 0)], cfg.get("reminder_hour", 9)))
+               if cfg.get("reminder_enabled", True) else "（已關閉）",
+               "列出還沒處理的高 / 中風險問題與「已存在幾天」，依嚴重程度 × 天數排序；"
+               "有高風險超過 %d 天未處理時，改成每天提醒直到處理完。漏洞快訊中影響你專案的套件也會留在清單裡，直到升級。"
+               % cfg.get("escalate_days", 7)],
               ["👆 手動", "Web UI 或指令", "手動掃描預設不發 Telegram（Web UI 可勾選要不要發）。"],
           ])]
 
@@ -52,9 +57,14 @@ def build_sop(cfg: dict, targets: list):
               ["勒索軟體跡象：勒索信檔名、大量「原檔名.怪副檔名」", "桌面、文件、下載、圖片", "桌面、文件、下載、圖片", "＋所有勾選的資料夾（含 NAS）"],
               ["瀏覽器登入 session、擴充功能、遠端除錯、cookie 外流跡象", "✅", "✅", "✅"],
               ["AI 對話紀錄裡有沒有貼過金鑰（只重掃有變動的檔案）", "✅", "✅", "✅"],
-              ["Node.js / Python / Go 等是否 EOL 或缺安全修補、全域 npm 套件 CVE", "—", "✅" if online else "（已關閉）", "✅" if online else "（已關閉）"],
+              ["所有已安裝的執行環境（Node.js、Python、Go、Ruby、Java、PHP、Rust、Deno、Bun、.NET；"
+               "nvm / Homebrew / conda / pyenv / uv / rbenv / rustup / asdf…）是否停止維護；Node.js 是否錯過官方標記的安全更新", "—",
+               "✅" if online else "（已關閉）", "✅" if online else "（已關閉）"],
+              ["全域 npm 套件 CVE", "—", "✅" if online else "（已關閉）", "✅" if online else "（已關閉）"],
               ["遍歷勾選的資料夾：明文 .env、金鑰、私鑰、專案層級 AI 設定", "—", "—", "✅"],
               ["各專案 lockfile 的套件漏洞（OSV.dev）", "—", "—", "✅" if online else "（已關閉）"],
+              ["專案指定的執行環境版本：.nvmrc、.python-version、.tool-versions、go.mod、package.json engines、"
+               "pyproject.toml、Dockerfile FROM、docker-compose image 等是否停止維護", "—", "—", "✅" if online else "（已關閉）"],
               ["一般耗時", "數秒", "數秒～1 分鐘", "依資料夾大小，數十秒到數十分鐘"],
           ]),
           ("p", "完整掃描目前的範圍：" + tlist),
@@ -70,12 +80,14 @@ def build_sop(cfg: dict, targets: list):
                   ("請 AI（%s）把每個變動分成 A 你本人操作 / B 程式自動更新 / C 可疑。AI 只能建議唯讀的檢查指令，"
                    "若輸出刪除或停用類指令會被自動隱藏。" % model) if llm else "AI 摘要已關閉。",
                   "有變動才發 Telegram；沒有變動不會打擾你。",
-                  "產出三份報告：.html（給你看）、.md（給其他 AI 處理）、.json（原始資料），保留最近 %d 份。" % cfg.get("max_reports", 60)])]
+                  "產出三份報告：.html（給你看，可直接下載 Markdown）、.md（給其他 AI 處理）、.json（原始資料）。"
+                  "排程與即時監看的快速掃描若沒有變動，只更新狀態、不另存報告。報告保留 %d 天，完整掃描保留 %d 天。"
+                  % (cfg.get("report_keep_days", 30), cfg.get("full_report_keep_days", 90))])]
 
     B += [("h", "4. 哪些資料會離開這台電腦"),
           ("table", ["送到哪裡", "送出什麼", "不會送出"], [
               ["OSV.dev（Google 維護的漏洞資料庫）" if online else "OSV.dev（已關閉）", "套件名稱與版本", "程式碼、路徑、專案名稱"],
-              ["endoflife.date" if online else "endoflife.date（已關閉）", "查詢的工具名稱（nodejs、python…）", "你的版本號以外的任何資料"],
+              ["endoflife.date、nodejs.org" if online else "endoflife.date、nodejs.org（已關閉）", "只下載公開的版本清單", "你的版本號與路徑"],
               [("Ollama（%s）" % host) if llm else "Ollama（已關閉）", "變動清單：路徑、指令片段、檔案指紋（機密已遮罩）", "檔案內容、完整機密值"],
               ["GitHub API / CISA（漏洞快訊）", "只有下載公開漏洞清單，不上傳任何資料", "—"],
               ["Telegram", "警示摘要、漏洞快訊", "完整機密值"],
@@ -123,8 +135,8 @@ def to_md(blocks):
     return "\n".join(out)
 
 
-def to_html(blocks, esc):
-    p = ['<details class="sop" open><summary><h2 style="display:inline">%s</h2></summary>' % esc(blocks[0][1])]
+def to_html(blocks, esc, open_=True):
+    p = ['<details class="sop"%s><summary><h2 style="display:inline">%s</h2></summary>' % (" open" if open_ else "", esc(blocks[0][1]))]
     for b in blocks[1:]:
         k = b[0]
         if k == "h":

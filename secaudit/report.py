@@ -79,6 +79,8 @@ def to_markdown(result, changes=None, summary="", sop=None):
             continue
         for f in group:
             out.append("### [%s] %s" % (f["category"], _md(f["title"])))
+            if f.get("first_seen"):
+                out.append("- **已存在**：%d 天（第一次出現 %s）" % (f.get("age_days", 0), f["first_seen"][:10]))
             for label, k in (("規則", "rule"), ("路徑", "path"), ("細節", "detail"), ("證據（已遮罩）", "evidence"),
                              ("風險", "why"), ("建議", "fix")):
                 if f.get(k):
@@ -117,15 +119,27 @@ td,th{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertic
 .filter button{padding:6px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);cursor:pointer}
 .filter button.on{background:var(--fg);color:var(--bg)}.summary{white-space:pre-wrap;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
 .att{color:var(--high);font-weight:700}
+details.sec{background:none;border:0;border-top:1px solid var(--line);border-radius:0;padding:14px 0 6px;margin:18px 0 0}
+details.sec>summary{list-style:none}details.sec>summary::before{content:"▸ ";color:var(--muted)}details.sec[open]>summary::before{content:"▾ "}
+details.cat{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--line);border-radius:10px;margin:8px 0;padding:8px 12px}
+details.cat>summary::before{content:"▸ ";color:var(--muted)}details.cat[open]>summary::before{content:"▾ "}
+details.cat details.item{margin:6px 0}
+a.btn,.filter .tool{display:inline-block;padding:6px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);text-decoration:none;font-size:14px;cursor:pointer}
 .sop{margin-top:40px;border-left-color:var(--info)}.sop h3{font-size:15px;margin:20px 0 8px}.sop ol,.sop ul{padding-left:22px;margin:6px 0}.sop li{margin:4px 0}.sop table{margin:6px 0}
 """
 
 JS = """
 const q=document.getElementById('q');let sev='all';
-function apply(){const t=q.value.toLowerCase();document.querySelectorAll('[data-sev]').forEach(e=>{
- const ok=(sev==='all'||e.dataset.sev===sev)&&(!t||e.textContent.toLowerCase().includes(t));e.style.display=ok?'':'none';});}
-q.addEventListener('input',apply);document.querySelectorAll('.filter button').forEach(b=>b.onclick=()=>{
- document.querySelectorAll('.filter button').forEach(x=>x.classList.remove('on'));b.classList.add('on');sev=b.dataset.f;apply();});
+function apply(){const t=q.value.toLowerCase();const active=sev!=='all'||t;
+ document.querySelectorAll('.item[data-sev],tr[data-sev]').forEach(e=>{
+  const ok=(sev==='all'||e.dataset.sev===sev)&&(!t||e.textContent.toLowerCase().includes(t));e.style.display=ok?'':'none';});
+ document.querySelectorAll('details.cat,details.sec[data-sec]').forEach(d=>{
+  const n=[...d.querySelectorAll('.item[data-sev],tr[data-sev]')].filter(x=>x.style.display!=='none').length;
+  d.style.display=n?'':'none'; if(active&&n) d.open=true;});}
+q.addEventListener('input',apply);document.querySelectorAll('.filter button[data-f]').forEach(b=>b.onclick=()=>{
+ document.querySelectorAll('.filter button[data-f]').forEach(x=>x.classList.remove('on'));b.classList.add('on');sev=b.dataset.f;apply();});
+document.getElementById('expandAll').onclick=()=>document.querySelectorAll('details').forEach(d=>d.open=true);
+document.getElementById('collapseAll').onclick=()=>document.querySelectorAll('details').forEach(d=>d.open=false);
 """
 
 
@@ -150,8 +164,12 @@ def _donut(c):
             % (r, cx, cx, sw, "".join(segs), n))
 
 
-def to_html(result, changes=None, summary="", sop=None):
+def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
     e = lambda s: html.escape(str(s or ""))
+    # Markdown 直接內嵌成 data URI：HTML 存到本機離線打開也能下載
+    import base64
+    md_button = ('<a class="btn" download="security-%s.md" href="data:text/markdown;charset=utf-8;base64,%s">⬇ 下載 Markdown</a>'
+                 % (e(name), base64.b64encode(md_text.encode("utf-8")).decode())) if md_text else ""
     fs = _sorted(result["findings"])
     c = _counts(fs)
     cats = {}
@@ -159,8 +177,13 @@ def to_html(result, changes=None, summary="", sop=None):
         cats.setdefault(f["category"], {s: 0 for s in SEVERITIES})[f["severity"]] += 1
     p = ['<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">',
          '<title>安全掃描報告</title><style>%s</style></head><body><div class="wrap">' % CSS,
-         '<h1>🛡 安全掃描報告</h1><div class="muted">%s ・ %s ・ 耗時 %s 秒 ・ 模式 %s</div>' % (
-             e(result["host"]), e(result["started"]), e(result["duration_sec"]), e(result["mode"]))]
+         '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">'
+         '<div><h1>🛡 安全掃描報告</h1><div class="muted">%s ・ %s ・ 耗時 %s 秒 ・ 模式 %s</div></div><div>%s</div></div>' % (
+             e(result["host"]), e(result["started"]), e(result["duration_sec"]), e(result["mode"]), md_button)]
+    overdue = sum(1 for f in fs if f["severity"] == "high" and (f.get("age_days") or 0) >= 7)
+    if overdue:
+        p.append('<div class="card" style="margin-top:12px;border-left:4px solid var(--high)">⏰ <b>%d 個高風險已超過 7 天未處理</b>，'
+                 '常駐程式會每天用 Telegram 提醒，直到處理完。</div>' % overdue)
     p.append('<div class="grid"><div class="card" style="display:flex;gap:16px;align-items:center">%s<div class="muted">' % _donut(c))
     for s in ("high", "medium", "low", "info"):
         p.append('<div><span style="color:var(--%s)">●</span> %s：<b>%d</b></div>' % (s, SEV_LABEL[s], c[s]))
@@ -194,36 +217,69 @@ def to_html(result, changes=None, summary="", sop=None):
         if summary:
             p.append('<div class="summary"><b>AI 摘要</b>（僅供參考，⚠️ 標記由規則判定）<br>%s</div>' % e(summary))
         if changes:
+            att = sum(1 for ch in changes if ch["attention"])
+            p.append('<details class="sec"%s><summary><b>變動明細（%d 項%s）</b></summary>' % (
+                " open" if len(changes) <= 20 else "", len(changes), "，⚠️ %d 項需注意" % att if att else ""))
             p.append('<table><tr><th>類型</th><th>區段</th><th>項目</th><th>舊</th><th>新</th></tr>')
             for ch in changes:
                 p.append('<tr><td>%s%s</td><td>%s</td><td><code>%s</code></td><td>%s</td><td>%s</td></tr>' % (
                     '<span class="att">⚠️ </span>' if ch["attention"] else "", e(TYPE_LABEL[ch["type"]]), e(ch["section"]),
                     e(ch["key"]), e(ch.get("old", ""))[:300], e(ch.get("new", ""))[:300]))
-            p.append('</table>')
+            p.append('</table></details>')
     p.append('<h2>檢查結果</h2><div class="filter"><input id="q" placeholder="搜尋標題、路徑、內容…">'
-             '<button class="on" data-f="all">全部</button>%s</div>' % "".join(
-                 '<button data-f="%s">%s %d</button>' % (s, SEV_LABEL[s], c[s]) for s in SEVERITIES))
-    for f in fs:
-        if f["severity"] == "info":
-            continue
-        p.append('<details data-sev="%s" style="border-left-color:var(--%s)"><summary><span class="tag" style="color:var(--%s)">%s</span>'
-                 '<span class="tag">%s</span>%s</summary><dl>' % (
-                     f["severity"], f["severity"], f["severity"], SEV_LABEL[f["severity"]], e(f["category"]), e(f["title"])))
+             '<button class="on" data-f="all">全部</button>%s'
+             '<button type="button" id="expandAll" class="tool">全部展開</button><button type="button" id="collapseAll" class="tool">全部收合</button>'
+             '%s</div>' % ("".join('<button data-f="%s">%s %d</button>' % (s, SEV_LABEL[s], c[s]) for s in SEVERITIES), md_button))
+
+    def finding_html(f):
+        age = f.get("age_days")
+        age_tag = '<span class="tag" style="%s">已存在 %d 天</span>' % (
+            "color:var(--high);font-weight:700" if (age or 0) >= 7 and f["severity"] == "high" else "", age) if age is not None else ""
+        out = ['<details class="item" data-sev="%s" style="border-left-color:var(--%s)"><summary><span class="tag" style="color:var(--%s)">%s</span>'
+               '<span class="tag">%s</span>%s%s</summary><dl>' % (
+                   f["severity"], f["severity"], f["severity"], SEV_LABEL[f["severity"]], e(f["category"]), age_tag, e(f["title"]))]
         for label, k in (("路徑", "path"), ("細節", "detail"), ("證據", "evidence"), ("為什麼危險", "why"), ("建議", "fix")):
             if f.get(k):
                 val = '<span class="ev">%s</span>' % e(f[k]) if k in ("path", "evidence") else e(f[k])
-                p.append('<dt>%s</dt><dd>%s</dd>' % (label, val))
-        p.append('</dl></details>')
+                out.append('<dt>%s</dt><dd>%s</dd>' % (label, val))
+        out.append('</dl></details>')
+        return "".join(out)
+
+    # 依重要性分段收合：高風險展開；中 / 低風險收合，且同分類超過 3 項再分一層
+    for sev in ("high", "medium", "low"):
+        group = [f for f in fs if f["severity"] == sev]
+        if not group:
+            continue
+        p.append('<details class="sec" data-sec="%s"%s><summary><h2 style="display:inline;color:var(--%s)">%s風險（%d）</h2>'
+                 '<span class="muted">　%s</span></summary>' % (
+                     sev, " open" if sev == "high" else "", sev, SEV_LABEL[sev], len(group),
+                     {"high": "今天處理", "medium": "本週處理", "low": "有空時處理"}[sev]))
+        if sev == "high":
+            p.extend(finding_html(f) for f in group)
+        else:
+            cats = {}
+            for f in group:
+                cats.setdefault(f["category"], []).append(f)
+            for cat in sorted(cats, key=lambda x: CAT_ORDER.index(x) if x in CAT_ORDER else 9):
+                items = cats[cat]
+                if len(items) <= 3:
+                    p.extend(finding_html(f) for f in items)
+                else:
+                    p.append('<details class="cat"><summary><b>%s</b>（%d）</summary>%s</details>' % (
+                        e(cat), len(items), "".join(finding_html(f) for f in items)))
+        p.append('</details>')
     infos = [f for f in fs if f["severity"] == "info"]
     if infos:
-        p.append('<h2>資訊：請確認你都認得（%d）</h2><table>' % len(infos))
+        p.append('<details class="sec" data-sec="info"><summary><h2 style="display:inline">資訊：請確認你都認得（%d）</h2></summary><table>' % len(infos))
         p.append('<tr><th>分類</th><th>項目</th><th>內容</th></tr>')
         for f in infos:
             p.append('<tr data-sev="info"><td>%s</td><td>%s<br><span class="muted">%s</span></td><td><code>%s</code></td></tr>' % (
                 e(f["category"]), e(f["title"]), e(f["path"]), e(f["evidence"])))
-        p.append('</table>')
+        p.append('</table></details>')
     if sop:
-        p.append(_sop.to_html(sop, e))
+        p.append(_sop.to_html(sop, e, open_=False))
+    if md_button:
+        p.append('<div style="margin-top:28px;text-align:center">%s</div>' % md_button)
     p.append('<script>%s</script></div></body></html>' % JS)
     return "".join(p)
 
@@ -233,9 +289,9 @@ def save_reports(result, reports_dir, changes=None, summary="", sop=None):
     name = result["started"].replace("-", "").replace(":", "").replace(" ", "-")
     base = os.path.join(reports_dir, name)
     payload = dict(result, changes=changes, summary=summary)
-    for ext, content in ((".json", json.dumps(payload, ensure_ascii=False, indent=1)),
-                         (".md", to_markdown(result, changes, summary, sop)),
-                         (".html", to_html(result, changes, summary, sop))):
+    md = to_markdown(result, changes, summary, sop)
+    for ext, content in ((".json", json.dumps(payload, ensure_ascii=False, indent=1)), (".md", md),
+                         (".html", to_html(result, changes, summary, sop, md_text=md, name=name))):
         fd = os.open(base + ext, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(content)

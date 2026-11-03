@@ -92,6 +92,13 @@ label.cfg{display:flex;justify-content:space-between;align-items:center;gap:8px;
         <label class="cfg">每天完整掃描時間（點）<input type="number" id="c_hour" min="0" max="23" style="width:80px"></label>
         <label class="cfg">查詢 CVE / 版本資料庫<input type="checkbox" id="c_online"></label>
         <label class="cfg">漏洞快訊頻率（小時，0=關閉）<input type="number" id="c_feed" min="0" max="168" style="width:80px"></label>
+        <label class="cfg">未處理問題提醒<input type="checkbox" id="c_rem"></label>
+        <label class="cfg">每週提醒
+          <span><select id="c_wd" style="font:inherit;padding:6px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg)">
+            <option value="0">星期一</option><option value="1">星期二</option><option value="2">星期三</option><option value="3">星期四</option>
+            <option value="4">星期五</option><option value="5">星期六</option><option value="6">星期日</option></select>
+          <input type="number" id="c_rh" min="0" max="23" style="width:60px"> 點</span></label>
+        <label class="cfg">高風險超過幾天未處理 → 每天提醒<input type="number" id="c_esc" min="1" max="90" style="width:80px"></label>
       </div>
       <div>
         <label class="cfg">AI 摘要<input type="checkbox" id="c_llm"></label>
@@ -105,7 +112,7 @@ label.cfg{display:flex;justify-content:space-between;align-items:center;gap:8px;
         <div id="ollamaMsg" class="muted" style="text-align:right;min-height:1.2em"></div>
       </div>
     </div>
-    <div class="row" style="margin-top:8px"><button id="saveCfg">儲存設定</button><button id="testTg">傳送 Telegram 測試訊息</button><span id="cfgMsg" class="muted"></span></div>
+    <div class="row" style="margin-top:8px"><button id="saveCfg">儲存設定</button><button id="testTg">傳送 Telegram 測試訊息</button><button id="remNow">立即發送未處理提醒</button><span id="cfgMsg" class="muted"></span></div>
     <div class="note" id="secretNote"></div>
   </div>
 </div>
@@ -126,10 +133,12 @@ function renderStatus(st) {
   $("#full").disabled = $("#quick").disabled = st.running;
   $("#stTitle").textContent = st.running ? `掃描中（${st.mode === "full" ? "完整" : "快速"}）` : "狀態";
   let t = st.running ? `${esc(st.phase)}　<code>${esc(st.current)}</code>` :
-          (st.last_report ? `上次報告 ${esc(st.last_report)}，與前次相比 ${st.last_changes} 項變動` : "尚未掃描");
+          (st.last_report ? `上次報告 ${esc(st.last_report)}，與前次相比 ${st.last_changes} 項變動` : "尚未掃描") +
+          (st.last_check ? `　・ 上次檢查 ${esc(st.last_check)}（沒有變動的排程掃描不另存報告）` : "");
   if (st.last_error) t += `<br><span style="color:var(--high)">錯誤：${esc(st.last_error)}</span>`;
   $("#stText").innerHTML = t;
   let sc = st.next_quick ? `下次快速掃描 ${st.next_quick} ・ 下次完整掃描 ${st.next_full}` : "常駐排程未啟動（只開 Web UI）";
+  if (st.next_reminder) sc += ` ・ 📋 下次未處理提醒 ${st.next_reminder}${st.escalated ? "（逾期，每天提醒）" : ""}`;
   if (st.watch) sc += ` ・ ⚡ 即時監看 ${st.watch.paths} 處（每輪 ${st.watch.cost_ms ?? "-"} ms）${st.watch.pending ? `，${st.watch.pending} 處變動待確認` : ""}${st.watch.last_trigger ? `，上次觸發 ${st.watch.last_trigger}` : ""}`;
   $("#sched").textContent = sc;
 }
@@ -167,6 +176,7 @@ function renderConfig(c, s) {
   if (!cfgLoaded) {
     $("#c_quick").value = c.quick_interval_min; $("#c_hour").value = c.full_scan_hour;
     $("#c_online").checked = c.online; $("#c_llm").checked = c.llm_enabled; $("#c_feed").value = c.vulnfeed_hours ?? 6;
+    $("#c_rem").checked = c.reminder_enabled ?? true; $("#c_wd").value = c.reminder_weekday ?? 0; $("#c_rh").value = c.reminder_hour ?? 9; $("#c_esc").value = c.escalate_days ?? 7;
     $("#c_host").value = c.ollama_host; $("#c_model").value = c.ollama_model; cfgLoaded = true; hostHint();
   }
   const ok = v => v ? '<span style="color:var(--ok)">✓ 已設定</span>' : '<span style="color:var(--medium)">✗ 未設定</span>';
@@ -237,7 +247,8 @@ $("#add").onclick = async () => {
 };
 $("#saveCfg").onclick = async () => {
   const r = await api("/api/config", {quick_interval_min:+$("#c_quick").value, full_scan_hour:+$("#c_hour").value, online:$("#c_online").checked,
-    llm_enabled:$("#c_llm").checked, ollama_host:$("#c_host").value, ollama_model:$("#c_model").value, vulnfeed_hours:+$("#c_feed").value});
+    llm_enabled:$("#c_llm").checked, ollama_host:$("#c_host").value, ollama_model:$("#c_model").value, vulnfeed_hours:+$("#c_feed").value,
+    reminder_enabled:$("#c_rem").checked, reminder_weekday:+$("#c_wd").value, reminder_hour:+$("#c_rh").value, escalate_days:+$("#c_esc").value});
   if (r.error) { $("#cfgMsg").innerHTML = `<span style="color:var(--high)">❌ ${esc(r.error)}</span>`; return; }
   $("#cfgMsg").textContent = "已儲存，下一次 AI 摘要開始套用"; setTimeout(() => $("#cfgMsg").textContent = "", 3000); cfgLoaded = false;
 };
@@ -264,6 +275,7 @@ $("#testOllama").onclick = async () => {
     ? `<span style="color:var(--ok)">✅ 連線成功，模型回覆「${esc(r.reply)}」（${r.seconds} 秒）</span>・主機上有 ${r.models.length} 個模型，點「模型」欄可選擇。記得按「儲存設定」。`
     : `<span style="color:var(--high)">❌ ${esc(r.error || "失敗")}</span>${(r.models || []).length ? `・主機上有：${r.models.slice(0, 6).map(esc).join("、")}${r.models.length > 6 ? "…" : ""}` : ""}`;
 };
+$("#remNow").onclick = async () => { const r = await api("/api/reminder", {}); $("#cfgMsg").textContent = r.ok ? `已送出（${r.items} 項${r.escalated ? "，含逾期高風險" : ""}）` : "傳送失敗（已放入待送清單）"; };
 $("#testTg").onclick = async () => { const r = await api("/api/test-telegram", {}); $("#cfgMsg").textContent = r.ok ? "已傳送" : "傳送失敗（請看 PM2 日誌）"; };
 refresh();
 </script>

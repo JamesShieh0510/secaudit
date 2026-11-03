@@ -253,6 +253,8 @@ def scan_agent_text(ctx: ScanContext, path: str, text: str, kind: str, strict: b
 
 
 def check_skills(ctx: ScanContext):
+    from .runtimes import disabled_codex_plugins
+    disabled = disabled_codex_plugins()
     for root, label in SKILL_ROOTS:
         base = os.path.expanduser(root)
         if not os.path.isdir(base):
@@ -264,6 +266,10 @@ def check_skills(ctx: ScanContext):
         for dp, dns, fns in os.walk(base):
             dns[:] = [d for d in dns if d not in ("node_modules", ".git", "__pycache__", ".venv") and not d.startswith("temp_git_")]
             trusted = os.path.relpath(dp, base).split(os.sep)[0] in TRUSTED_MARKETPLACES
+            rel = os.path.relpath(dp, base).split(os.sep)
+            if root == "~/.codex/plugins" and len(rel) >= 3 and rel[0] == "cache" and (rel[1], rel[2]) in disabled:
+                dns[:] = []      # 已停用的 Codex plugin 不檢查內容（清單快照仍會記錄，重新啟用時會發現）
+                continue
             if ctx.cancel.is_set():
                 return
             for fn in fns:

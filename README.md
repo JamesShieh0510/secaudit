@@ -19,7 +19,8 @@
 | 機密與憑證 | 明文 `.env`、各家 API Key 格式、私鑰（權限、是否有密碼保護）、`~/.ssh`（新增的金鑰、authorized_keys 新增的公鑰）、`~/.aws`、`~/.npmrc`、`~/.docker`、`~/.git-credentials` 等 |
 | 瀏覽器 | Chrome / Arc / Brave / Edge / Firefox 各 profile 中重要服務的登入 session 持續多久、閒置多久；擴充功能權限；是否開著遠端除錯；暫存資料夾是否出現 Cookies / Login Data 副本。**只讀 cookie 的網域與時間，不讀取、不解密 cookie 值** |
 | 開機自動執行 | LaunchAgents / LaunchDaemons（含程式簽章）、crontab、shell 啟動檔 |
-| 供應鏈與版本 | 各專案 lockfile（npm / pnpm / yarn / pip / poetry / uv / Go / Cargo / Gemfile / composer）查 [OSV.dev](https://osv.dev)；全域 npm 套件；Node.js / Python / Go 等是否 EOL（[endoflife.date](https://endoflife.date)） |
+| 供應鏈與版本 | 各專案 lockfile（npm / pnpm / yarn / pip / poetry / uv / Go / Cargo / Gemfile / composer）查 [OSV.dev](https://osv.dev)；全域 npm 套件 |
+| 執行環境版本 | **所有已安裝的**Node.js、Python、Go、Ruby、Java、PHP、Rust、Deno、Bun、.NET（nvm / fnm / volta / asdf / mise / Homebrew / conda / pyenv / uv / rbenv / rvm / sdkman / rustup / 系統內建）是否停止維護（[endoflife.date](https://endoflife.date)）；Node.js 是否錯過官方標記的安全更新；專案指定的版本（`.nvmrc`、`.python-version`、`.tool-versions`、`go.mod`、`package.json` engines、`pyproject.toml`、`Dockerfile` FROM、compose `image:`） |
 | 漏洞快訊 | 定期抓取 [GitHub Advisory Database](https://github.com/advisories) 與 [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)，比對你專案實際使用的套件版本，影響到你的會標出要升級到哪個版本，附每則 50～100 字摘要與連結 |
 
 ### 執行方式
@@ -30,6 +31,7 @@
 | 🔁 快速掃描 | 每 15 分鐘 | 固定位置檢查 + AI 對話紀錄 + 執行環境版本 |
 | 🗂 完整掃描 | 每天 03:00 | 再加上遍歷你勾選的資料夾 + 專案套件 CVE |
 | 🧯 漏洞快訊 | 每 6 小時 | 新漏洞摘要推送 |
+| 📋 未處理提醒 | 每週一 09:00 | 還沒處理的高 / 中風險與「已存在幾天」；高風險超過 7 天未處理改成每天提醒 |
 
 完整說明請見 Web UI 的「📖 運作 SOP」頁面（依目前設定即時產生）。
 
@@ -130,7 +132,7 @@ TELEGRAM_BOT_TOKEN={{ op://<vault>/<item>/TELEGRAM_BOT_TOKEN }}
 | 送到哪裡 | 送出什麼 |
 |---|---|
 | OSV.dev | 套件名稱與版本 |
-| endoflife.date | 工具名稱（nodejs、python…） |
+| endoflife.date、nodejs.org | 只下載公開的版本清單 |
 | GitHub API / CISA | 只下載公開漏洞清單，不上傳資料 |
 | Ollama 主機（啟用 AI 摘要時） | 變動清單：路徑、指令片段、檔案指紋（機密已遮罩）；漏洞快訊的公開漏洞資料 |
 | Telegram | 警示與漏洞快訊 |

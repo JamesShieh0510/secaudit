@@ -25,9 +25,14 @@ DEFAULT_CONFIG = {
     "web_port": 8765,
     "notify_baseline": True,
     "vulnfeed_hours": 6,            # 漏洞快訊頻率（小時），0 = 關閉
+    "reminder_enabled": True,       # 未處理問題定期提醒
+    "reminder_weekday": 0,          # 0 = 星期一
+    "reminder_hour": 9,
+    "escalate_days": 7,             # 高風險超過幾天未處理 → 改成每天提醒
     "watch_enabled": True,          # 關鍵位置即時監看
     "watch_interval_sec": 10,        # 第一次建立基準時也通知一次
-    "max_reports": 60,
+    "report_keep_days": 30,         # 一般報告保留天數
+    "full_report_keep_days": 90,    # 完整掃描報告保留天數
     "targets": [],                  # [{path,label,kind,enabled}]，空的時候用預設
 }
 
@@ -93,6 +98,22 @@ def load_targets(cfg=None):
     return out
 
 
+def backfill_first_seen(state):
+    """舊版沒有記錄 first_seen：從過去的報告找出每個問題最早出現的時間補上（只在缺少時做一次）。"""
+    from .diff import finding_key
+    missing = [(s, k) for s, fs in (state.get("findings") or {}).items() for k, f in fs.items() if not f.get("first_seen")]
+    if not missing:
+        return
+    earliest = {}
+    for f in sorted(x for x in os.listdir(REPORTS) if x.endswith(".json")):
+        d = _read(os.path.join(REPORTS, f), {})
+        for x in d.get("findings", []):
+            if x.get("severity") in ("high", "medium", "low"):
+                earliest.setdefault((x.get("scope"), finding_key(x)), d.get("started"))
+    for s, k in missing:
+        state["findings"][s][k]["first_seen"] = earliest.get((s, k)) or state.get("updated") or time.strftime("%Y-%m-%d %H:%M:%S")
+
+
 class Engine:
     def __init__(self):
         self.lock = threading.Lock()
@@ -121,7 +142,16 @@ class Engine:
                 self.status["phase"] = "已取消"
                 return None
             state = _read(os.path.join(DATA, "state.json"), {})
+            backfill_first_seen(state)
             changes, new_state, baseline = compare(state, result)
+            # 標註每個問題第一次出現的時間，報告裡顯示「已存在 N 天」
+            from .diff import finding_key
+            from .reminders import age_days
+            for f in result["findings"]:
+                ent = (new_state["findings"].get(f.get("scope"), {}) or {}).get(finding_key(f))
+                if ent and ent.get("first_seen"):
+                    f["first_seen"] = ent["first_seen"]
+                    f["age_days"] = age_days(ent["first_seen"])
             summary = ""
             if changes and notify_user:
                 self._progress("AI 分析變動", "")
@@ -132,12 +162,19 @@ class Engine:
             from .core import home_rel
             sop = build_sop(cfg, [{"path": t.path, "display": home_rel(t.path), "label": t.label, "enabled": t.enabled}
                                   for t in load_targets(cfg)])
-            name = report.save_reports(result, REPORTS, changes if state else None, summary, sop)
+            # 排程 / 即時監看的快速掃描沒有變動時不另存報告（只更新狀態），避免報告清單被大量相同的報告淹沒
+            skip_report = source in ("scheduler", "watch") and mode == "quick" and state and not changes and not baseline
+            name = "" if skip_report else report.save_reports(result, REPORTS, changes if state else None, summary, sop)
             # 不發通知的手動掃描不更新比對基準，否則變動會被「吃掉」，排程掃描就永遠不會通知
             if notify_user or not state:
                 _write_private(os.path.join(DATA, "state.json"), new_state)
-            self._prune_reports(cfg.get("max_reports", 60))
-            self.status.update(last_report=name, last_changes=len(changes))
+            self._prune_reports(cfg)
+            self.status["last_check"] = time.strftime("%H:%M:%S")
+            if name:
+                self.status.update(last_report=name, last_changes=len(changes))
+            else:
+                self.status["phase"] = "完成（沒有變動，未另存報告）"
+                return self.status.get("last_report") or ""
             url = "http://127.0.0.1:%d/reports/%s.html" % (cfg["web_port"], name)
             if notify_user and changes:
                 msg = notify.build_alert(result["host"], changes, summary, name, url, trigger=trigger)
@@ -173,6 +210,33 @@ class Engine:
             traceback.print_exc()
         finally:
             self.status["feed_running"] = False
+
+    def send_reminder(self, force=False):
+        """送出未處理問題清單。回傳 (是否送出, 項目數, 是否升級中)。"""
+        from . import reminders
+        cfg = load_config()
+        state = _read(os.path.join(DATA, "state.json"), {})
+        feed_path = os.path.join(DATA, "vulnfeed.json")
+        feed = _read(feed_path, {})
+        pkgindex = _read(os.path.join(DATA, "cache.json"), {}).get("osv", {}).get("pkgindex", {})
+        items, stale = reminders.open_items(state, feed.get("open", {}), pkgindex)
+        if stale and feed.get("open"):
+            for k in stale:
+                feed["open"].pop(k, None)
+            _write_private(feed_path, feed)
+        esc = reminders.is_escalated(items, cfg)
+        self.status["open_items"] = len(items)
+        self.status["escalated"] = esc
+        if not items and not force:
+            return False, 0, esc
+        import socket
+        msg = reminders.build_message(items, cfg, "http://127.0.0.1:%d/" % cfg["web_port"], socket.gethostname()) if items else \
+            "📋 目前沒有未處理的高 / 中風險問題 👍"
+        ok = notify.telegram_send(msg)
+        if not ok:
+            self._outbox_add(msg)
+        self.status["last_reminder"] = time.strftime("%m-%d %H:%M")
+        return ok, len(items), esc
 
     @staticmethod
     def settings_snapshot(cfg, mode, source, notify_user, online, trigger=None):
@@ -214,9 +278,25 @@ class Engine:
         threading.Thread(target=self.scan, args=(mode, notify_user), daemon=True).start()
         return True
 
-    def _prune_reports(self, keep):
+    def _prune_reports(self, cfg):
+        """依天數保留：一般報告 report_keep_days 天、完整掃描 full_report_keep_days 天；最新 5 份一律保留。
+        檔名就是時間，所以只有超過保留天數的報告才需要打開來看是不是完整掃描。"""
+        if time.time() - getattr(self, "_last_prune", 0) < 3600:
+            return
+        self._last_prune = time.time()
+        keep = int(cfg.get("report_keep_days", 30))
+        keep_full = int(cfg.get("full_report_keep_days", 90))
         names = sorted({f.rsplit(".", 1)[0] for f in os.listdir(REPORTS) if f.endswith(".json")})
-        for n in names[:-keep] if keep > 0 else []:
+        now = time.time()
+        for n in names[:-5]:
+            try:
+                age = (now - time.mktime(time.strptime(n, "%Y%m%d-%H%M%S"))) / 86400
+            except ValueError:
+                continue
+            if age <= keep:
+                continue
+            if age <= keep_full and _read(os.path.join(REPORTS, n + ".json"), {}).get("mode") == "full":
+                continue
             for ext in (".json", ".md", ".html"):
                 try:
                     os.remove(os.path.join(REPORTS, n + ext))
@@ -250,6 +330,10 @@ class Engine:
         next_full = time.time() + 5 if "walk" not in state.get("inventory", {}) else self._next_full(cfg)
         next_quick = time.time() + 60
         next_feed = time.time() + 300      # 啟動 5 分鐘後抓第一次漏洞快訊
+        from . import reminders
+        _items, _ = reminders.open_items(state, _read(os.path.join(DATA, "vulnfeed.json"), {}).get("open", {}),
+                                         _read(os.path.join(DATA, "cache.json"), {}).get("osv", {}).get("pkgindex", {}))
+        next_rem = reminders.next_time(cfg, reminders.is_escalated(_items, cfg))
         while True:
             cfg = load_config()
             now = time.time()
@@ -260,6 +344,13 @@ class Engine:
                 next_feed = now + hrs * 3600
                 self.run_vulnfeed()
             self.status["next_feed"] = time.strftime("%m-%d %H:%M", time.localtime(next_feed)) if hrs else "（已關閉）"
+            if cfg.get("reminder_enabled", True):
+                if now >= next_rem:
+                    _ok, _n, esc = self.send_reminder()
+                    next_rem = reminders.next_time(cfg, esc, now + 60)
+                self.status["next_reminder"] = time.strftime("%m-%d %H:%M", time.localtime(next_rem))
+            else:
+                self.status["next_reminder"] = "（已關閉）"
             if now - getattr(self, "_last_flush", 0) > 120:
                 self._last_flush = now
                 self.flush_outbox()

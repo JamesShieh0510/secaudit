@@ -32,8 +32,11 @@ def compare(prev_state: dict, result: dict):
         cur_find = {finding_key(f): f for f in result["findings"]
                     if f.get("scope") == scope and f["severity"] != "info"}
         new_state["inventory"][scope] = cur_inv
+        old_scope = prev_find.get(scope, {})
         new_state["findings"][scope] = {k: {"severity": f["severity"], "title": f["title"], "path": f["path"],
-                                            "category": f["category"]} for k, f in cur_find.items()}
+                                            "category": f["category"], "fix": (f.get("fix") or "")[:160],
+                                            "first_seen": (old_scope.get(k) or {}).get("first_seen") or result["started"]}
+                                        for k, f in cur_find.items()}
         if scope not in prev_inv:
             baseline.append(scope)
             continue

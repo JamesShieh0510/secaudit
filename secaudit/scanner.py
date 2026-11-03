@@ -5,7 +5,7 @@ import socket
 import stat
 import time
 
-from . import checks_ai, checks_browser, checks_persistence, checks_secrets, checks_threats, supply_chain
+from . import checks_ai, checks_browser, checks_persistence, checks_secrets, checks_threats, runtimes, supply_chain
 from .core import HOME, PRUNE_DIRS, ScanContext, Target, is_dataless
 from .rules import (AI_INSTRUCTION_FILES, CONTENT_EXTS, CONTENT_NAMES, ENV_FILE_RE, ENV_SAFE_SUFFIX,
                     PRIVATE_KEY_NAMES)
@@ -40,7 +40,7 @@ def default_targets():
     return ts
 
 
-def walk_target(ctx: ScanContext, t: Target, lockfiles: list, ransom=None):
+def walk_target(ctx: ScanContext, t: Target, lockfiles: list, ransom=None, pins=None):
     seen = 0
     is_home = os.path.realpath(t.path) == os.path.realpath(HOME)
     for dp, dns, fns in os.walk(t.path, onerror=lambda e: ctx.stats.__setitem__("errors", ctx.stats["errors"] + 1)):
@@ -66,6 +66,8 @@ def walk_target(ctx: ScanContext, t: Target, lockfiles: list, ransom=None):
             if ransom is not None:
                 ransom.feed(dp, fn)
             ext = os.path.splitext(fn)[1].lower()
+            if pins is not None and runtimes.is_pin_file(fn):
+                pins.append(p)      # 版本檔另外收集，不影響下面原本的檢查
             try:
                 if ENV_FILE_RE.match(fn) and not fn.endswith(ENV_SAFE_SUFFIX):
                     checks_secrets.check_env_file(ctx, p)
@@ -109,6 +111,7 @@ def run_scan(targets, mode="full", cache=None, progress=None, cancel=None, onlin
 
     lockfiles = []
     ransom = checks_threats.RansomTracker()
+    pins = []
     if mode == "full":
         ctx.scope = "walk"
         for t in ctx.targets:
@@ -118,7 +121,7 @@ def run_scan(targets, mode="full", cache=None, progress=None, cancel=None, onlin
                 ctx.report("略過", "%s 不存在或未掛載" % t.path)
                 continue
             ctx.report("掃描 " + t.label, t.path)
-            walk_target(ctx, t, lockfiles, ransom)
+            walk_target(ctx, t, lockfiles, ransom, pins)
 
     if mode == "full":
         ctx.scope = "walk"
@@ -127,11 +130,12 @@ def run_scan(targets, mode="full", cache=None, progress=None, cancel=None, onlin
     if online and not ctx.cancel.is_set():
         ctx.scope = "online"
         osv = cache.setdefault("osv", {})
-        supply_chain.check_runtimes(ctx, osv)
+        runtimes.check_installed(ctx, osv, online=True)
         supply_chain.check_global_npm(ctx, osv)
         if mode == "full":
-            ctx.scope = "walk"   # 專案相依套件跟著 walk 結果比對
+            ctx.scope = "walk"   # 專案相依套件、專案指定版本跟著 walk 結果比對
             supply_chain.check_dependencies(ctx, lockfiles, osv)
+            runtimes.check_project_pins(ctx, pins, osv, online=True)
 
     ctx.report("完成", "")
     return {

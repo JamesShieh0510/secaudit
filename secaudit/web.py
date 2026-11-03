@@ -113,7 +113,8 @@ def make_handler(engine: Engine, token: str, port: int):
                     "next": next_settings(engine, cfg),
                     "vulnfeed": _vulnfeed_history(),
                     "config": {k: cfg.get(k) for k in ("quick_interval_min", "full_scan_hour", "online", "llm_enabled",
-                                                       "ollama_host", "ollama_model", "vulnfeed_hours")},
+                                                       "ollama_host", "ollama_model", "vulnfeed_hours", "reminder_enabled",
+                                                       "reminder_weekday", "reminder_hour", "escalate_days")},
                     "secrets": {"telegram": bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID")),
                                 "ollama": bool(os.environ.get("OLLAMA_API_KEY"))},
                 })
@@ -159,6 +160,9 @@ def make_handler(engine: Engine, token: str, port: int):
                 mode = "quick" if body.get("mode") == "quick" else "full"
                 ok = engine.scan_async(mode, notify_user=bool(body.get("notify", False)))
                 return self._send(200 if ok else 409, {"started": ok})
+            if path == "/api/reminder":
+                ok, n, esc = engine.send_reminder(force=True)
+                return self._send(200, {"ok": ok, "items": n, "escalated": esc})
             if path == "/api/vulnfeed":
                 if engine.status.get("feed_running"):
                     return self._send(409, {"started": False})
@@ -186,7 +190,8 @@ def make_handler(engine: Engine, token: str, port: int):
             if path == "/api/config":
                 cfg = load_config()
                 for k, typ in (("quick_interval_min", int), ("full_scan_hour", int), ("online", bool),
-                               ("llm_enabled", bool), ("ollama_model", str), ("vulnfeed_hours", int)):
+                               ("llm_enabled", bool), ("ollama_model", str), ("vulnfeed_hours", int),
+                               ("reminder_enabled", bool), ("reminder_weekday", int), ("reminder_hour", int), ("escalate_days", int)):
                     if k in body:
                         cfg[k] = typ(body[k])
                 if "ollama_host" in body:
@@ -194,6 +199,9 @@ def make_handler(engine: Engine, token: str, port: int):
                         cfg["ollama_host"] = normalize_host(body["ollama_host"])
                     except ValueError as e:
                         return self._send(400, {"error": str(e)})
+                cfg["reminder_weekday"] = min(6, max(0, cfg.get("reminder_weekday", 0)))
+                cfg["reminder_hour"] = min(23, max(0, cfg.get("reminder_hour", 9)))
+                cfg["escalate_days"] = min(90, max(1, cfg.get("escalate_days", 7)))
                 cfg["quick_interval_min"] = max(5, cfg["quick_interval_min"])
                 cfg["full_scan_hour"] = min(23, max(0, cfg["full_scan_hour"]))
                 save_config(cfg)
