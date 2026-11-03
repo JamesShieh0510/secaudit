@@ -43,7 +43,7 @@
   - ⬆️ 升級執行環境：Homebrew 的修補版、`rustup update stable`、`bun upgrade`、pnpm。會跨版本線的 Homebrew 升級（例如 `node` 24 → 26）會標示出來，預設不勾選。
   - 🧹 清除比本機 Go 舊的 toolchain 快取。
   - Touch ID 小工具是 `secaudit/touchid.swift`。常駐程式每次啟動後第一次使用時，用 `swiftc` 重新編譯到 `data/bin/`（需要 Xcode Command Line Tools），並在記憶體記下雜湊，之後每次使用前比對。
-  - **YubiKey（WebAuthn / FIDO2）**：可以取代 Touch ID，兩者任選一種。只支援 ES256，簽章用 macOS 內建的 `/usr/bin/openssl` 驗證。WebAuthn 不接受 IP 位址，所以要用 `http://localhost:8765` 開啟 Web UI（頁面上有「切換到 localhost」按鈕）。註冊時會驗證 attestation 出廠憑證，必須追溯到 Yubico 的 FIDO 根憑證（`secaudit/yubico_fido_roots.pem`），所以只接受真的 YubiKey，軟體偽造的金鑰會被拒絕（瀏覽器詢問「是否允許查看安全金鑰的品牌和型號」時要按允許）。新增或刪除 YubiKey 本身也要先通過 Touch ID 或已註冊的 YubiKey，Touch ID 對話框只顯示固定文字，不含使用者輸入的名稱；授權的 challenge 會綁定這次預覽勾選的步驟，只能用一次。`data/webauthn.json` 只存公鑰，而且在即時監看清單中，被直接修改會發 ⚠️ 警示。
+  - **YubiKey（WebAuthn / FIDO2）**：可以取代 Touch ID，兩者任選一種。只支援 ES256，簽章用 macOS 內建的 `/usr/bin/openssl` 驗證。WebAuthn 不接受 IP 位址，所以要用 `http://localhost:8765` 開啟 Web UI（頁面上有「切換到 localhost」按鈕）。註冊時會驗證 attestation 出廠憑證，必須追溯到 Yubico 的 FIDO 根憑證（`secaudit/yubico_fido_roots.pem`），所以只接受真的 YubiKey，軟體偽造的金鑰會被拒絕（瀏覽器詢問「是否允許查看安全金鑰的品牌和型號」時要按允許）。每次註冊和授權都要求輸入 YubiKey PIN（觸碰加 PIN），撿到 YubiKey 的人沒有 PIN 就不能用；不支援 PIN 的舊款 U2F 金鑰無法註冊。新增或刪除 YubiKey 本身也要先通過 Touch ID 或已註冊的 YubiKey，Touch ID 對話框只顯示固定文字，不含使用者輸入的名稱；授權的 challenge 會綁定這次預覽勾選的步驟，只能用一次。`data/webauthn.json` 只存公鑰，而且在即時監看清單中，被直接修改會發 ⚠️ 警示。
   - 威脅模型：擋得住其他網頁、遠端，以及只能呼叫 Web UI API 的程式。擋不住已經能以你的身分寫入檔案、執行程式的惡意程式，因為它可以直接改 secaudit 本身。
 - **機密不外流**：報告與警示中的機密一律遮罩；報告檔案權限 600。
 - **雲端硬碟不觸發下載**：iCloud / Google Drive / OneDrive 中「僅限線上」的檔案只看檔名。

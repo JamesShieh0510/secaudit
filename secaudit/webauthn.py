@@ -3,7 +3,10 @@
 - 註冊時一定要有 attestation（packed 或 fido-u2f），而且憑證鏈要能追溯到 Yubico 的 FIDO 根憑證
   （secaudit/yubico_fido_roots.pem）。所以只有真的 YubiKey 才能註冊，軟體偽造的金鑰會被拒絕。
   沒有這一步的話，authenticatorData（包括「有觸碰」旗標）都是用戶端自己填的，伺服器無法分辨。
-- 只支援 ES256（ECDSA P-256），所有 FIDO2 / U2F YubiKey 都支援。
+- 只支援 ES256（ECDSA P-256）。
+- 一律要求使用者驗證（YubiKey PIN）：只有觸碰不夠，撿到或偷到 YubiKey 的人沒有 PIN 就不能授權。
+  因為註冊的金鑰已經驗證過是真的 YubiKey，authenticatorData 裡的 UV 旗標是 YubiKey 簽章保證的。
+  只支援 U2F、不支援 PIN 的舊款金鑰無法註冊。
 - WebAuthn 不接受 IP 位址當 RP ID，所以 RP ID 固定是 localhost，Web UI 要用 http://localhost:<port> 開啟。
 - data/webauthn.json 只存公鑰（權限 600）；私鑰永遠不會離開 YubiKey。
 - 註冊 / 刪除金鑰本身也必須先通過 Touch ID 或已註冊的 YubiKey（由 actions.py 負責）。
@@ -238,7 +241,7 @@ def creation_options(port):
     return {"challenge": issue("register", ""), "rp": {"id": RP_ID, "name": "secaudit"},
             "user": {"id": b64u(hashlib.sha256(b"secaudit-local-user").digest()[:16]), "name": "secaudit", "displayName": "secaudit"},
             "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
-            "authenticatorSelection": {"authenticatorAttachment": "cross-platform", "userVerification": "discouraged",
+            "authenticatorSelection": {"authenticatorAttachment": "cross-platform", "userVerification": "required",
                                        "residentKey": "discouraged"},
             "excludeCredentials": [{"type": "public-key", "id": k["id"]} for k in keys()],
             "attestation": "direct", "timeout": 60000}
@@ -249,7 +252,7 @@ def request_options(purpose, binding):
     ks = keys()
     if not ks:
         return None
-    return {"challenge": issue(purpose, binding), "rpId": RP_ID, "userVerification": "discouraged", "timeout": 60000,
+    return {"challenge": issue(purpose, binding), "rpId": RP_ID, "userVerification": "required", "timeout": 60000,
             "allowCredentials": [{"type": "public-key", "id": k["id"]} for k in ks]}
 
 
@@ -268,6 +271,8 @@ def check_registration(reg, port):
             raise ValueError("RP ID 不符")
         if not ad["up"] or "cred_id" not in ad:
             raise ValueError("金鑰沒有回報使用者在場")
+        if not ad["uv"]:
+            raise ValueError("這把金鑰沒有驗證 PIN。請先替 YubiKey 設定 PIN（瀏覽器通常會提示），或改用支援 FIDO2 的 YubiKey")
         x, y = _cose_xy(ad["cose"])
         model = _verify_attestation(att, ad_raw, ad, hashlib.sha256(cdj).digest(), x, y)
     except ValueError:
@@ -312,6 +317,8 @@ def verify_assertion(asr, purpose, binding, port):
             raise ValueError("RP ID 不符")
         if not ad["up"]:
             raise ValueError("沒有觸碰 YubiKey")
+        if not ad["uv"]:
+            raise ValueError("沒有輸入 YubiKey PIN")
         with _store_lock:
             ks = _read(STORE, {}).get("keys", [])
             k = next((x for x in ks if x["id"] == asr.get("id") and x.get("attested")), None)
