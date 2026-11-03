@@ -1,6 +1,9 @@
 """偵測規則：機密格式、可疑指令、隱藏字元。"""
 import re
 
+# 規則有變動時加 1：AI 對話紀錄等快取會自動失效、重新掃描
+RULES_VERSION = 2
+
 # (rule_id, 名稱, regex, severity)
 SECRET_RULES = [
     ("anthropic-key", "Anthropic API Key", re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"), "high"),
@@ -13,7 +16,11 @@ SECRET_RULES = [
     ("telegram-bot", "Telegram Bot Token", re.compile(r"\b\d{8,10}:AA[A-Za-z0-9_\-]{33}\b"), "high"),
     ("hf-token", "Hugging Face Token", re.compile(r"\bhf_[A-Za-z0-9]{34,}\b"), "high"),
     ("groq-key", "Groq API Key", re.compile(r"\bgsk_[A-Za-z0-9]{40,}\b"), "high"),
-    ("private-key", "私鑰內容", re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY(?: BLOCK)?-----"), "high"),
+    # 私鑰：標記後面必須接著金鑰內容（至少 3 行 base64）。只有標記的通常是程式碼或說明文字。
+    # 換行可能是真的換行，也可能是 JSON 裡跳脫的 \\n（AI 對話紀錄）
+    ("private-key", "私鑰內容", re.compile(
+        r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY(?: BLOCK)?-----"
+        r"(?:\\\\r|\\\\n|\\r|\\n|\s)+(?:[A-Za-z0-9+/=]{40,}(?:\\\\r|\\\\n|\\r|\\n|\s)+){3,}"), "high"),
 ]
 
 # .env 類檔案內「KEY=明文值」的通用規則（只套用在 env 類檔案，避免誤報）

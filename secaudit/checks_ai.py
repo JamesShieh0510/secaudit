@@ -4,7 +4,7 @@ import os
 import re
 
 from .core import HOME, Finding, ScanContext, file_fingerprint, home_rel, lstat_safe, mask, read_text, truncate
-from .rules import (AI_INSTRUCTION_FILES, HIDDEN_CHARS, HIDDEN_CHARS_HIGH, INJECTION_PHRASES, SECRET_RULES,
+from .rules import (RULES_VERSION, AI_INSTRUCTION_FILES, HIDDEN_CHARS, HIDDEN_CHARS_HIGH, INJECTION_PHRASES, SECRET_RULES,
                     SUSPICIOUS_CMDS, is_placeholder)
 from .checks_secrets import find_secrets
 
@@ -339,6 +339,8 @@ PREFILTER = ("sk-", "AIza", "AKIA", "ASIA", "ghp_", "gho_", "ghu_", "ghs_", "ghr
 def check_transcripts(ctx: ScanContext, cache: dict):
     """掃描 AI 對話紀錄有沒有貼過金鑰。用 (大小, 修改時間) 快取，只重掃有變動的檔案。"""
     ctx.report("AI 與 Agent", "AI 對話紀錄")
+    for k in [k for k in cache if not k.startswith("v%d|" % RULES_VERSION)]:
+        del cache[k]
     for root, label in TRANSCRIPT_ROOTS:
         base = os.path.expanduser(root)
         files = []
@@ -353,7 +355,7 @@ def check_transcripts(ctx: ScanContext, cache: dict):
             st = lstat_safe(p)
             if st is None or st.st_size > 200 * 1024 * 1024:
                 continue
-            key = "%s|%d|%d" % (p, st.st_size, int(st.st_mtime))
+            key = "v%d|%s|%d|%d" % (RULES_VERSION, p, st.st_size, int(st.st_mtime))
             if key in cache:
                 result = cache[key]
             else:
