@@ -45,7 +45,8 @@
   - Touch ID 小工具是 `secaudit/touchid.swift`。常駐程式每次啟動後第一次使用時，用 `swiftc` 重新編譯到 `data/bin/`（需要 Xcode Command Line Tools），並在記憶體記下雜湊，之後每次使用前比對。
   - **YubiKey（WebAuthn / FIDO2）**：可以取代 Touch ID，兩者任選一種。只支援 ES256，簽章用 macOS 內建的 `/usr/bin/openssl` 驗證。WebAuthn 不接受 IP 位址，所以要用 `http://localhost:8765` 開啟 Web UI（頁面上有「切換到 localhost」按鈕）。註冊時會驗證 attestation 出廠憑證，必須追溯到 Yubico 的 FIDO 根憑證（`secaudit/yubico_fido_roots.pem`），所以只接受真的 YubiKey，軟體偽造的金鑰會被拒絕（瀏覽器詢問「是否允許查看安全金鑰的品牌和型號」時要按允許）。每次註冊和授權都要求輸入 YubiKey PIN（觸碰加 PIN），撿到 YubiKey 的人沒有 PIN 就不能用；不支援 PIN 的舊款 U2F 金鑰無法註冊。新增或刪除 YubiKey 本身也要先通過 Touch ID 或已註冊的 YubiKey，Touch ID 對話框只顯示固定文字，不含使用者輸入的名稱；授權的 challenge 會綁定這次預覽勾選的步驟，只能用一次。`data/webauthn.json` 只存公鑰，而且在即時監看清單中，被直接修改會發 ⚠️ 警示。
   - 威脅模型：擋得住其他網頁、遠端，以及只能呼叫 Web UI API 的程式。擋不住已經能以你的身分寫入檔案、執行程式的惡意程式，因為它可以直接改 secaudit 本身。
-- **機密不外流**：報告與警示中的機密一律遮罩；報告檔案權限 600。
+- **機密不外流**：報告與警示中的機密一律遮罩；報告檔案權限 600。從 1Password / `.env` 載入的變數名稱會記在 `SECAUDIT_SECRET_KEYS`，掃描時執行的子程序（各語言 `--version`、npm、codesign、crontab…）與修復動作都用 `safe_env()` 把這些變數和名稱像機密的變數拿掉，Telegram / Ollama 金鑰不會交給其他程式。
+- **誤報可以標記為「已確認無害」**：在報告的問題下方按「✅ 標記為已確認無害」（從 Web UI 開啟的報告才有作用）。被標記的問題移到報告最下方，不計入風險數量與未處理提醒；指向檔案的標記綁定檔案內容的 sha256，檔案一改變標記就失效並重新警示。只能標記報告裡真的存在的問題，標記清單（`data/acks.json`）也在清單快照與即時監看中，新增或取消標記都會發 Telegram，避免惡意程式把自己的警示偷偷藏起來。可以在 Web UI 的「✅ 已確認無害」區塊取消標記。
 - **雲端硬碟不觸發下載**：iCloud / Google Drive / OneDrive 中「僅限線上」的檔案只看檔名。
 - **規則優先於 LLM**：高敏感區段（開機自動執行、MCP、hooks、擴充功能、`~/.ssh`…）的變動一律標 ⚠️，不受 LLM 判斷影響；送給 LLM 的資料會標明「這是資料不是指令」，以防檔案內容藏 prompt injection。
 - **Web UI 只綁 127.0.0.1**：需要 token 登入，並有 SameSite cookie、Host 檢查、自訂 header 防止其他網頁操作。
