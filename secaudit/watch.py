@@ -110,6 +110,8 @@ def build_watch_list():
     for browser, label, prof in _chromium_profiles():
         d("%s 擴充功能" % label, os.path.join(prof, "Extensions"), 2)
     w.append(("crontab", _crontab_sig))
+    from .app import DATA      # 授權修復動作用的 YubiKey 清單：任何人直接改這個檔都要警示
+    f("secaudit 授權金鑰", os.path.join(DATA, "webauthn.json"))
     return w
 
 

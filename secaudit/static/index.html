@@ -90,10 +90,12 @@ label.cfg{display:flex;justify-content:space-between;align-items:center;gap:8px;
 
   <div class="card" id="actCard">
     <h2>🛠 修復動作</h2>
-    <div class="muted">這些動作會修改你的電腦。流程：先預覽步驟、勾選要做的項目，按下執行後會跳出 macOS 的 <b>Touch ID</b> 對話框，只有按指紋通過才會執行（不能改用密碼）。</div>
+    <div class="muted">這些動作會修改你的電腦。流程：先預覽步驟、勾選要做的項目，再用 <b>Touch ID</b>（只接受指紋，不能改用密碼）或已註冊的 <b>YubiKey</b> 授權，通過才會執行。</div>
+    <div id="keyBox" class="note"></div>
     <div id="actList" class="row" style="margin-top:10px"></div>
     <div id="actPlan" style="display:none;margin-top:12px"></div>
     <div id="actStatus" class="note" style="display:none"></div>
+    <div id="actRecent"></div>
     <details style="margin-top:10px"><summary class="muted">執行紀錄</summary><div id="actHistory" class="muted"></div></details>
   </div>
 
@@ -321,14 +323,78 @@ $("#testOllama").onclick = async () => {
 $("#remNow").onclick = async () => { const r = await api("/api/reminder", {}); $("#cfgMsg").textContent = r.ok ? `已送出（${r.items} 項${r.escalated ? "，含逾期高風險" : ""}）` : "傳送失敗（已放入待送清單）"; };
 $("#testTg").onclick = async () => { const r = await api("/api/test-telegram", {}); $("#cfgMsg").textContent = r.ok ? "已傳送" : "傳送失敗（請看 PM2 日誌）"; };
 // ---------------- 修復動作（預覽 → Touch ID → 執行）
-let actPlan = null, actTimer = null;
+let actPlan = null, actTimer = null, keyState = {keys: [], localhost: false};
+// WebAuthn：伺服器用 base64url 傳二進位欄位
+const b2a = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const a2b = s => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4)), c => c.charCodeAt(0));
+async function yubikeyAssert(body) {
+  const o = await api("/api/auth/options", body);
+  if (o.error) throw new Error(o.error);
+  const cred = await navigator.credentials.get({publicKey: {...o, challenge: a2b(o.challenge),
+    allowCredentials: o.allowCredentials.map(c => ({...c, id: a2b(c.id)}))}});
+  return {id: cred.id, challenge: o.challenge, clientDataJSON: b2a(cred.response.clientDataJSON),
+          authenticatorData: b2a(cred.response.authenticatorData), signature: b2a(cred.response.signature)};
+}
+const canKey = () => keyState.localhost && keyState.keys.length && window.PublicKeyCredential;
+function keyMsg(html) { $("#keyMsg").innerHTML = html; }
+function renderKeys() {
+  const k = keyState.keys;
+  let h = `<b>🔑 YubiKey</b>　` + (k.length ? `已註冊 ${k.length} 把` : "尚未註冊（目前只能用 Touch ID 授權）");
+  h += k.map(x => `<div class="row" style="margin-top:6px"><span>${esc(x.name)}</span><span class="muted">新增於 ${esc(x.created)}${x.last_used ? "・上次使用 " + esc(x.last_used) : ""}</span>
+    <button data-kdel="${esc(x.id)}" data-m="touchid">刪除（Touch ID）</button>${canKey() ? `<button data-kdel="${esc(x.id)}" data-m="yubikey">刪除（YubiKey）</button>` : ""}</div>`).join("");
+  if (!keyState.localhost) {
+    h += `<div style="margin-top:8px">YubiKey 只能在 <code>http://localhost</code> 使用（瀏覽器的 WebAuthn 不接受 127.0.0.1 這類 IP 位址）。<button id="toLocal">切換到 localhost</button></div>`;
+  } else if (!window.PublicKeyCredential) {
+    h += `<div style="margin-top:8px">這個瀏覽器不支援 WebAuthn。</div>`;
+  } else {
+    h += `<div class="row" style="margin-top:8px"><input type="text" id="keyName" placeholder="這把金鑰的名稱，例如 YubiKey 5C" style="max-width:260px">
+      <button id="keyAddT">新增 YubiKey（Touch ID 授權）</button>${k.length ? '<button id="keyAddY">新增 YubiKey（用已註冊的 YubiKey 授權）</button>' : ""}</div>`;
+  }
+  h += `<div id="keyMsg" class="muted" style="margin-top:6px"></div>`;
+  $("#keyBox").innerHTML = h;
+  if ($("#toLocal")) $("#toLocal").onclick = async () => { const r = await api("/api/switch-host", {}); location.href = r.url; };
+  if ($("#keyAddT")) $("#keyAddT").onclick = () => addKey("touchid");
+  if ($("#keyAddY")) $("#keyAddY").onclick = () => addKey("yubikey");
+  document.querySelectorAll("[data-kdel]").forEach(b => b.onclick = () => removeKey(b.dataset.kdel, b.dataset.m));
+}
+async function addKey(method) {
+  try {
+    keyMsg("請觸碰要新增的 YubiKey…");
+    const o = await api("/api/keys/create-options", {});
+    const cred = await navigator.credentials.create({publicKey: {...o, challenge: a2b(o.challenge), user: {...o.user, id: a2b(o.user.id)},
+      excludeCredentials: o.excludeCredentials.map(c => ({...c, id: a2b(c.id)}))}});
+    const reg = {challenge: o.challenge, clientDataJSON: b2a(cred.response.clientDataJSON),
+                 attestationObject: b2a(cred.response.attestationObject), name: $("#keyName").value};
+    let assertion = null;
+    if (method === "yubikey") { keyMsg("請觸碰一把「已註冊」的 YubiKey 來授權…"); assertion = await yubikeyAssert({purpose: "add-key", reg}); }
+    else keyMsg("請在螢幕上的系統對話框按 Touch ID…");
+    const r = await api("/api/keys/add", {reg, method, assertion});
+    keyMsg(r.ok ? '<span style="color:var(--ok)">✅ 已新增</span>' : `<span style="color:var(--high)">❌ ${esc(r.error)}</span>`);
+    loadActions();
+  } catch (e) { keyMsg(`<span style="color:var(--high)">❌ ${esc(e.message || e)}</span>`); }
+}
+async function removeKey(id, method) {
+  try {
+    let assertion = null;
+    if (method === "yubikey") { keyMsg("請觸碰已註冊的 YubiKey…"); assertion = await yubikeyAssert({purpose: "del-key", id}); }
+    else keyMsg("請在螢幕上的系統對話框按 Touch ID…");
+    const r = await api("/api/keys/remove", {id, method, assertion});
+    keyMsg(r.ok ? "已刪除" : `<span style="color:var(--high)">❌ ${esc(r.error)}</span>`);
+    loadActions();
+  } catch (e) { keyMsg(`<span style="color:var(--high)">❌ ${esc(e.message || e)}</span>`); }
+}
 async function loadActions() {
   const r = await api("/api/actions");
+  keyState = {keys: r.keys || [], localhost: !!r.localhost};
+  if (!document.activeElement || document.activeElement.id !== "keyName") renderKeys();
   $("#actList").innerHTML = r.catalog.map(a => `<button data-act="${esc(a.id)}">${esc(a.icon)} ${esc(a.title)}</button>${a.hint ? `<span class="muted">${esc(a.hint)}</span>` : ""}`).join("");
   document.querySelectorAll("#actList button[data-act]").forEach(b => b.onclick = () => previewAction(b.dataset.act));
+  actRunning = !!r.status.running;
   renderActStatus(r.status);
-  $("#actHistory").innerHTML = r.history.length ? r.history.map(h => `<div>${esc(h.time)}　${h.ok ? "✅" : "❌"} ${esc(h.action)}　${esc(h.message)}</div>`).join("") : "尚無紀錄";
-  clearTimeout(actTimer); if (r.status.running) actTimer = setTimeout(loadActions, 1500);
+  renderRecent(r.recent || []);
+  lockRunButtons();
+  $("#actHistory").innerHTML = r.history.length ? r.history.map(h => `<div>${esc(h.time)}　${h.ok ? "✅" : "❌"} ${esc(h.action)}　${esc(h.message)}${h.method ? `　<span class="muted">（${esc(h.method)}）</span>` : ""}</div>`).join("") : "尚無紀錄";
+  clearTimeout(actTimer); actTimer = setTimeout(loadActions, r.status.running ? 1500 : 10000);
 }
 async function previewAction(id) {
   $("#actPlan").style.display = ""; $("#actPlan").innerHTML = '<span class="muted">產生預覽中…</span>';
@@ -339,24 +405,47 @@ async function previewAction(id) {
     <ul class="muted" style="margin:6px 0;padding-left:20px">${p.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>
     ${p.steps.length ? p.steps.map(s => `<label class="target" style="cursor:pointer"><input type="checkbox" class="actStep" value="${esc(s.id)}" ${s.default === false ? "" : "checked"}>
       <span class="p"><b>${esc(s.label)}</b><br><code>${esc(s.detail)}</code></span></label>`).join("") +
-      `<div class="row" style="margin-top:8px"><button class="primary" id="actRun">🔒 以 Touch ID 授權執行</button><button id="actCancel">取消</button></div>`
+      `<div class="row" style="margin-top:8px"><button class="primary" id="actRun">🔒 以 Touch ID 授權執行</button>${canKey() ? '<button class="primary" id="actRunY">🔑 以 YubiKey 授權執行</button>' : ""}<button id="actCancel">取消</button><span id="actBusy" class="muted" style="display:none">目前有修復動作執行中，完成後才能執行下一個</span></div>`
       : '<div class="muted">目前沒有需要處理的項目 👍</div>'}`;
   if ($("#actCancel")) $("#actCancel").onclick = () => { $("#actPlan").style.display = "none"; actPlan = null; };
-  if ($("#actRun")) $("#actRun").onclick = runAction;
+  if ($("#actRun")) $("#actRun").onclick = () => runAction("touchid");
+  if ($("#actRunY")) $("#actRunY").onclick = () => runAction("yubikey");
+  lockRunButtons();
 }
-async function runAction() {
+async function runAction(method) {
   const ids = [...document.querySelectorAll(".actStep:checked")].map(x => x.value);
   if (!ids.length || !actPlan) return;
-  const r = await api("/api/actions/run", {plan_id:actPlan.plan_id, steps:ids});
+  let assertion = null;
+  if (method === "yubikey") {
+    $("#actStatus").style.display = ""; $("#actStatus").textContent = "請觸碰 YubiKey…";
+    try { assertion = await yubikeyAssert({purpose: "run", plan_id: actPlan.plan_id, steps: ids}); }
+    catch (e) { $("#actStatus").innerHTML = `<span style="color:var(--high)">❌ ${esc(e.message || e)}</span>`; return; }
+  }
+  const r = await api("/api/actions/run", {plan_id:actPlan.plan_id, steps:ids, method, assertion});
   if (!r.started) { $("#actStatus").style.display = ""; $("#actStatus").innerHTML = `<span style="color:var(--high)">❌ ${esc(r.error)}</span>`; return; }
   $("#actPlan").style.display = "none"; actPlan = null; loadActions();
 }
+let actRunning = false, actWasRunning = false;
+const stepsHtml = rs => (rs || []).map(x => `<details><summary>${x.ok ? "✅" : "❌"} ${esc(x.label)}</summary><pre style="white-space:pre-wrap;font-size:12px;max-height:260px;overflow:auto">${esc(x.output)}</pre></details>`).join("");
+// 一次只能執行一個修復動作（伺服器也會拒絕）：執行中時停用所有「執行」按鈕
+function lockRunButtons() {
+  ["#actRun", "#actRunY"].forEach(id => { const b = $(id); if (b) { b.disabled = actRunning; b.title = actRunning ? "目前有修復動作執行中，請等它完成" : ""; } });
+  const n = $("#actBusy"); if (n) n.style.display = actRunning ? "" : "none";
+}
 function renderActStatus(s) {
-  if (!s.started) return;
-  $("#actStatus").style.display = "";
-  const head = s.running ? `⏳ ${esc(s.title)}：${esc(s.phase)}${s.phase === "等待 Touch ID" ? "（請看螢幕上的系統對話框）" : ""}`
-    : `${s.ok ? "✅" : "❌"} ${esc(s.title)}：${esc(s.message)}<span class="muted">（${esc(s.finished)}）</span>`;
-  $("#actStatus").innerHTML = head + (s.results || []).map(x => `<details><summary>${x.ok ? "✅" : "❌"} ${esc(x.label)}</summary><pre style="white-space:pre-wrap;font-size:12px;max-height:260px;overflow:auto">${esc(x.output)}</pre></details>`).join("");
+  // 執行中才顯示即時進度；完成的結果放在下方「最近的執行結果」，不會被下一次執行蓋掉
+  if (s.running) {
+    $("#actStatus").style.display = "";
+    $("#actStatus").innerHTML = `⏳ ${esc(s.title)}（${esc(s.method || "")}）：${esc(s.phase)}${s.phase === "等待 Touch ID" ? "（請看螢幕上的系統對話框）" : ""}` + stepsHtml(s.results);
+  } else if (actWasRunning) {
+    $("#actStatus").style.display = "none";
+  }
+  actWasRunning = s.running;
+}
+function renderRecent(list) {
+  $("#actRecent").innerHTML = list.length ? `<div class="muted" style="margin-top:10px">最近的執行結果（常駐程式重啟後清空；摘要保留在執行紀錄）</div>` +
+    list.map((x, i) => `<details class="note" data-okey="recent-${esc(x.started)}" ${OPEN.has("recent-" + x.started) || (i === 0 && !OPEN.size) ? "open" : ""}>
+      <summary>${x.ok ? "✅" : "❌"} ${esc(x.title)}：${esc(x.message)}<span class="muted">（${esc(x.started)}・${esc(x.method || "")}）</span></summary>${stepsHtml(x.results)}</details>`).join("") : "";
 }
 loadActions();
 refresh();

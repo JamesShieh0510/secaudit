@@ -5,6 +5,8 @@ import os
 import re
 import secrets
 import subprocess
+import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -60,6 +62,7 @@ def next_settings(engine, cfg):
 
 def make_handler(engine: Engine, token: str, port: int):
     allowed_hosts = {"127.0.0.1:%d" % port, "localhost:%d" % port}
+    codes, codes_lock = {}, threading.Lock()
 
     class H(BaseHTTPRequestHandler):
         server_version = "secaudit"
@@ -90,6 +93,15 @@ def make_handler(engine: Engine, token: str, port: int):
         def do_GET(self):
             u = urllib.parse.urlparse(self.path)
             qs = urllib.parse.parse_qs(u.query)
+            if u.path == "/" and qs.get("c") and self.headers.get("Host") in allowed_hosts:
+                with codes_lock:
+                    t0 = codes.pop(qs["c"][0], None)
+                if t0 and time.time() - t0 < 60:
+                    # 不能用 303：這次瀏覽是從 127.0.0.1（別的網站）跳過來的，轉址後的請求不會帶 SameSite=Strict 的 cookie。
+                    # 改成回傳一頁，由 localhost 自己的頁面再跳轉，對瀏覽器來說就是同站。
+                    return self._send(200, '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=/">'
+                                           '<p>登入中… <a href="/">繼續</a></p>', "text/html; charset=utf-8",
+                                      {"Set-Cookie": "sa=%s; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000" % token})
             if u.path == "/" and qs.get("t") and self.headers.get("Host") in allowed_hosts:
                 if secrets.compare_digest(qs["t"][0], token):
                     self.send_response(303)
@@ -119,8 +131,11 @@ def make_handler(engine: Engine, token: str, port: int):
                                 "ollama": bool(os.environ.get("OLLAMA_API_KEY"))},
                 })
             if u.path == "/api/actions":
-                from . import actions
-                return self._send(200, {"catalog": actions.catalog(), "status": actions.status, "history": actions.history()})
+                from . import actions, webauthn
+                return self._send(200, {"catalog": actions.catalog(), "status": actions.status, "history": actions.history(),
+                                        "recent": actions.recent,
+                                        "keys": webauthn.public_keys(),
+                                        "localhost": self.headers.get("Host") == "localhost:%d" % port})
             if u.path == "/sop":
                 from .report import CSS
                 from .sop import build_sop, to_html as sop_html
@@ -246,8 +261,41 @@ def make_handler(engine: Engine, token: str, port: int):
                 # 會修改系統：伺服器端一定先跳 Touch ID，通過後才執行預覽過的步驟
                 from . import actions
                 ids = [str(x) for x in body.get("steps", [])][:500]
-                ok, msg = actions.start(str(body.get("plan_id", "")), ids)
+                ok, msg = actions.start(str(body.get("plan_id", "")), ids, method=str(body.get("method", "touchid")),
+                                        assertion=body.get("assertion") if isinstance(body.get("assertion"), dict) else None,
+                                        port=port)
                 return self._send(200 if ok else 409, {"started": ok, "error": msg})
+            if path == "/api/auth/options":
+                # YubiKey 授權用的 challenge，綁定這次要授權的內容（某份預覽的某些步驟 / 某把要新增或刪除的金鑰）
+                from . import actions, webauthn
+                purpose = body.get("purpose")
+                if purpose == "run":
+                    opts = actions.yubikey_options(str(body.get("plan_id", "")), [str(x) for x in body.get("steps", [])][:500])
+                elif purpose == "add-key" and isinstance(body.get("reg"), dict):
+                    opts = webauthn.request_options("add-key", actions.key_add_binding(body["reg"]))
+                elif purpose == "del-key":
+                    opts = webauthn.request_options("del-key", "del|" + str(body.get("id", "")))
+                else:
+                    return self._send(400, {"error": "bad purpose"})
+                return self._send(200 if opts else 409, opts or {"error": "沒有已註冊的 YubiKey，或預覽已過期"})
+            if path == "/api/keys/create-options":
+                from . import webauthn
+                return self._send(200, webauthn.creation_options(port))
+            if path in ("/api/keys/add", "/api/keys/remove"):
+                from . import actions
+                method = str(body.get("method", "touchid"))
+                asr = body.get("assertion") if isinstance(body.get("assertion"), dict) else None
+                if path == "/api/keys/add":
+                    ok, msg = actions.key_add(body.get("reg") if isinstance(body.get("reg"), dict) else {}, method, asr, port)
+                else:
+                    ok, msg = actions.key_remove(str(body.get("id", "")), method, asr, port)
+                return self._send(200 if ok else 409, {"ok": ok, "error": msg})
+            if path == "/api/switch-host":
+                # 一次性、60 秒有效的登入碼，用來從 127.0.0.1 切到 localhost（WebAuthn 不接受 IP 位址），不把 token 交給網頁
+                code = secrets.token_urlsafe(24)
+                with codes_lock:
+                    codes[code] = time.time()
+                return self._send(200, {"url": "http://localhost:%d/?c=%s" % (port, code)})
             if path == "/api/test-telegram":
                 from .notify import telegram_send
                 return self._send(200, {"ok": telegram_send("🛡 secaudit 測試訊息：Telegram 警示設定成功。")})
@@ -260,4 +308,5 @@ def serve(engine: Engine, port: int):
     token = get_token()
     srv = ThreadingHTTPServer(("127.0.0.1", port), make_handler(engine, token, port))
     print("[secaudit] Web UI：http://127.0.0.1:%d/?t=%s" % (port, token), flush=True)
+    print("[secaudit] 要用 YubiKey 授權時請改用：http://localhost:%d/?t=%s" % (port, token), flush=True)
     srv.serve_forever()

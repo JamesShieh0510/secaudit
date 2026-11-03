@@ -8,7 +8,7 @@ WATCH_SECTIONS = {
     "MCP 伺服器", "Claude Code hooks", "Claude Code 允許清單", "使用者 LaunchAgent", "全域 LaunchAgent",
     "LaunchDaemon（root 權限）", "crontab", "shell 啟動檔", "Telegram channel", "plugin marketplaces",
     "AI 指令檔", "有漏洞的套件", "瀏覽器擴充功能", "~/.ssh 檔案", "authorized_keys 公鑰",
-    "可疑位置的執行檔", "勒索軟體跡象",
+    "可疑位置的執行檔", "勒索軟體跡象", "secaudit 授權金鑰",
 }
 
 

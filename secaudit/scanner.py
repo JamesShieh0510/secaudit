@@ -89,6 +89,15 @@ def walk_target(ctx: ScanContext, t: Target, lockfiles: list, ransom=None, pins=
                 ctx.stats["errors"] += 1
 
 
+def _check_auth_keys(ctx):
+    """把授權修復動作用的 YubiKey 列進清單快照：新增 / 更換金鑰會變成 ⚠️ 變動（不論是不是從 Web UI 改的）。"""
+    import hashlib
+    from .app import DATA, _read
+    for k in _read(os.path.join(DATA, "webauthn.json"), {}).get("keys", []):
+        ctx.inv("secaudit 授權金鑰", "%s（%s）" % (k.get("name", ""), str(k.get("id", ""))[:12]),
+                hashlib.sha256(str(k.get("pem", "")).encode()).hexdigest()[:16])
+
+
 def run_scan(targets, mode="full", cache=None, progress=None, cancel=None, online=True):
     """mode: full = 全部；quick = 只做固定位置檢查（給常駐程式頻繁執行）。"""
     cache = cache if cache is not None else {}
@@ -108,6 +117,7 @@ def run_scan(targets, mode="full", cache=None, progress=None, cancel=None, onlin
         fn(ctx)
     if not ctx.cancel.is_set():
         checks_ai.check_transcripts(ctx, cache.setdefault("transcripts", {}))
+        _check_auth_keys(ctx)
 
     lockfiles = []
     ransom = checks_threats.RansomTracker()
