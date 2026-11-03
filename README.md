@@ -42,6 +42,7 @@
   - 🔑 遮罩 AI 對話紀錄裡的金鑰：只處理最近一次報告列出、位於 `~/.claude` / `~/.codex` 的檔案；用等長的 `[REDACTED]***` 直接覆寫，不換掉檔案，正在寫入的程式不受影響。
   - ⬆️ 升級執行環境：Homebrew 的修補版、`rustup update stable`、`bun upgrade`、pnpm。會跨版本線的 Homebrew 升級（例如 `node` 24 → 26）會標示出來，預設不勾選。
   - 🧹 清除比本機 Go 舊的 toolchain 快取。
+  - 📦 / 🔐 含機密的檔案 → 加密 DMG 或 1Password：處理最近一次報告中「檔案裡寫死了機密」與明文 `.env` 的檔案。DMG：產生隨機密碼並先存進 1Password（讀回確認一致）→ `hdiutil` 建立 AES-256 加密 DMG（預設在 `~/Secure/`）→ 掛載後逐檔比對 sha256 → 刪除原檔。1Password：`op document create` 存成文件 → 下載回來比對 sha256 → 刪除原檔。任何一步驗證沒過就不刪原檔；預覽之後被改過的檔案會略過；已提交到 git 的檔案預設不勾選。密碼只經由 stdin 傳遞，op / hdiutil 的輸出不寫進任何紀錄；Touch ID 對話框只顯示固定文字。vault 與 DMG 資料夾可在 Web UI 設定。
   - Touch ID 小工具是 `secaudit/touchid.swift`。常駐程式每次啟動後第一次使用時，用 `swiftc` 重新編譯到 `data/bin/`（需要 Xcode Command Line Tools），並在記憶體記下雜湊，之後每次使用前比對。
   - **YubiKey（WebAuthn / FIDO2）**：可以取代 Touch ID，兩者任選一種。只支援 ES256，簽章用 macOS 內建的 `/usr/bin/openssl` 驗證。WebAuthn 不接受 IP 位址，所以要用 `http://localhost:8765` 開啟 Web UI（頁面上有「切換到 localhost」按鈕）。註冊時會驗證 attestation 出廠憑證，必須追溯到 Yubico 的 FIDO 根憑證（`secaudit/yubico_fido_roots.pem`），所以只接受真的 YubiKey，軟體偽造的金鑰會被拒絕（瀏覽器詢問「是否允許查看安全金鑰的品牌和型號」時要按允許）。每次註冊和授權都要求輸入 YubiKey PIN（觸碰加 PIN），撿到 YubiKey 的人沒有 PIN 就不能用；不支援 PIN 的舊款 U2F 金鑰無法註冊。新增或刪除 YubiKey 本身也要先通過 Touch ID 或已註冊的 YubiKey，Touch ID 對話框只顯示固定文字，不含使用者輸入的名稱；授權的 challenge 會綁定這次預覽勾選的步驟，只能用一次。`data/webauthn.json` 只存公鑰，而且在即時監看清單中，被直接修改會發 ⚠️ 警示。
   - 威脅模型：擋得住其他網頁、遠端，以及只能呼叫 Web UI API 的程式。擋不住已經能以你的身分寫入檔案、執行程式的惡意程式，因為它可以直接改 secaudit 本身。

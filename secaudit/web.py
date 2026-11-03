@@ -130,7 +130,7 @@ def make_handler(engine: Engine, token: str, port: int):
                     "acks": acks_mod.items(),
                     "config": {k: cfg.get(k) for k in ("quick_interval_min", "full_scan_hour", "online", "llm_enabled",
                                                        "ollama_host", "ollama_model", "vulnfeed_hours", "reminder_enabled",
-                                                       "reminder_weekday", "reminder_hour", "escalate_days")},
+                                                       "reminder_weekday", "reminder_hour", "escalate_days", "secure_vault", "secure_dir")},
                     "secrets": {"telegram": bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID")),
                                 "ollama": bool(os.environ.get("OLLAMA_API_KEY"))},
                 })
@@ -300,6 +300,11 @@ def make_handler(engine: Engine, token: str, port: int):
                 with codes_lock:
                     codes[code] = time.time()
                 return self._send(200, {"url": "http://localhost:%d/?c=%s" % (port, code)})
+            if path == "/api/secure-settings":
+                # 封存用的 vault / DMG 資料夾決定機密被送去哪裡：一般的「儲存設定」不能改，要另外通過 Touch ID
+                from . import actions
+                ok, msg = actions.secure_settings_update(str(body.get("vault", ""))[:100], str(body.get("dir", ""))[:500])
+                return self._send(200 if ok else 409, {"ok": ok, "error": msg})
             if path in ("/api/ack", "/api/unack"):
                 # 「已確認無害」會降低警示，所以每次新增 / 取消都發 Telegram，讓使用者知道
                 from . import acks

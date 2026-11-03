@@ -120,6 +120,10 @@ label.cfg{display:flex;justify-content:space-between;align-items:center;gap:8px;
             <option value="4">星期五</option><option value="5">星期六</option><option value="6">星期日</option></select>
           <input type="number" id="c_rh" min="0" max="23" style="width:60px"> 點</span></label>
         <label class="cfg">高風險超過幾天未處理 → 每天提醒<input type="number" id="c_esc" min="1" max="90" style="width:80px"></label>
+        <label class="cfg">封存機密檔案用的 1Password vault<input type="text" id="c_vault" style="max-width:160px"></label>
+        <label class="cfg">加密 DMG 存放資料夾<input type="text" id="c_sdir" style="max-width:160px"></label>
+        <div class="row" style="justify-content:flex-end"><button type="button" id="saveSecure">🔒 儲存封存設定（需要 Touch ID）</button></div>
+        <div id="secureMsg" class="muted" style="text-align:right">這兩項決定機密檔案被送去哪裡，修改需要 Touch ID，並會發 Telegram 通知。</div>
       </div>
       <div>
         <label class="cfg">AI 摘要<input type="checkbox" id="c_llm"></label>
@@ -237,6 +241,7 @@ function renderConfig(c, s) {
     $("#c_quick").value = c.quick_interval_min; $("#c_hour").value = c.full_scan_hour;
     $("#c_online").checked = c.online; $("#c_llm").checked = c.llm_enabled; $("#c_feed").value = c.vulnfeed_hours ?? 6;
     $("#c_rem").checked = c.reminder_enabled ?? true; $("#c_wd").value = c.reminder_weekday ?? 0; $("#c_rh").value = c.reminder_hour ?? 9; $("#c_esc").value = c.escalate_days ?? 7;
+    $("#c_vault").value = c.secure_vault || "Private"; $("#c_sdir").value = c.secure_dir || "~/Secure";
     $("#c_host").value = c.ollama_host; $("#c_model").value = c.ollama_model; cfgLoaded = true; hostHint();
   }
   const ok = v => v ? '<span style="color:var(--ok)">✓ 已設定</span>' : '<span style="color:var(--medium)">✗ 未設定</span>';
@@ -338,6 +343,13 @@ $("#testOllama").onclick = async () => {
   $("#ollamaMsg").innerHTML = r.ok
     ? `<span style="color:var(--ok)">✅ 連線成功，模型回覆「${esc(r.reply)}」（${r.seconds} 秒）</span>・主機上有 ${r.models.length} 個模型，點「模型」欄可選擇。記得按「儲存設定」。`
     : `<span style="color:var(--high)">❌ ${esc(r.error || "失敗")}</span>${(r.models || []).length ? `・主機上有：${r.models.slice(0, 6).map(esc).join("、")}${r.models.length > 6 ? "…" : ""}` : ""}`;
+};
+$("#saveSecure").onclick = async () => {
+  $("#saveSecure").disabled = true; $("#secureMsg").textContent = "請看螢幕上的 Touch ID 對話框…";
+  const r = await api("/api/secure-settings", {vault:$("#c_vault").value, dir:$("#c_sdir").value});
+  $("#saveSecure").disabled = false;
+  $("#secureMsg").innerHTML = r.ok ? '<span style="color:var(--ok)">✅ 已儲存</span>' : `<span style="color:var(--high)">❌ ${esc(r.error || "失敗")}</span>`;
+  cfgLoaded = false;
 };
 $("#remNow").onclick = async () => { const r = await api("/api/reminder", {}); $("#cfgMsg").textContent = r.ok ? `已送出（${r.items} 項${r.escalated ? "，含逾期高風險" : ""}）` : "傳送失敗（已放入待送清單）"; };
 $("#testTg").onclick = async () => { const r = await api("/api/test-telegram", {}); $("#cfgMsg").textContent = r.ok ? "已傳送" : "傳送失敗（請看 PM2 日誌）"; };

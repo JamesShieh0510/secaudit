@@ -29,6 +29,8 @@ DEFAULT_CONFIG = {
     "reminder_weekday": 0,          # 0 = 星期一
     "reminder_hour": 9,
     "escalate_days": 7,             # 高風險超過幾天未處理 → 改成每天提醒
+    "secure_vault": "Private",      # 封存含機密的檔案時用的 1Password vault
+    "secure_dir": "~/Secure",       # 加密 DMG 存放的資料夾
     "watch_enabled": True,          # 關鍵位置即時監看
     "watch_interval_sec": 10,        # 第一次建立基準時也通知一次
     "report_keep_days": 30,         # 一般報告保留天數

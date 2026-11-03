@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -375,18 +376,395 @@ def _rm(p):
         os.remove(p)
 
 
+# ---------------------------------------------------------------- 動作 4 / 5：含機密的檔案 → 加密 DMG 或 1Password
+# 來源是最近一次報告的 file-secrets（文件、程式裡寫死的 token / 連線字串）與 plaintext-env（明文 .env）。
+# 安全原則：
+#   - 密碼與 op / hdiutil 的輸出都不寫進 status、recent、actions.jsonl（只記結果摘要）
+#   - 密碼只經由 stdin 傳給 op / hdiutil，不放在指令參數（ps 看得到）
+#   - 每一步都驗證（1Password 讀回比對、DMG 掛載後逐檔比對 sha256），任何一步沒通過就不刪原檔
+#   - 刪除前再比對一次 sha256 與修改時間，預覽之後被改過的檔案不刪
+SECURE_RULES = ("file-secrets", "plaintext-env")
+SECURE_TMP = os.path.join(DATA, "tmp")
+SECURE_MAX = 50 * 1024 * 1024
+
+
+def _op_env():
+    """只給 op 用：在 _env() 之外放行 1Password CLI 需要的 OP_* 變數（例如 OP_SESSION_*、OP_SERVICE_ACCOUNT_TOKEN）。"""
+    env = _env()
+    env.update({k: v for k, v in os.environ.items() if k.startswith("OP_")})
+    return env
+
+
+def _quiet(argv, stdin_bytes=None, timeout=300, env=None):
+    """執行但不保留輸出到任何紀錄：回傳 (成功與否, stdout bytes)。呼叫端只能用來解析或比對，不能存起來。"""
+    try:
+        r = subprocess.run(argv, input=stdin_bytes if stdin_bytes is not None else b"", capture_output=True,
+                           timeout=timeout, env=env or _env())
+    except (OSError, subprocess.TimeoutExpired):
+        return False, b""
+    return r.returncode == 0, r.stdout
+
+
+def _file_state(p):
+    """(sha256, mtime_ns, size)；不是一般檔案或是 symlink 時回傳 None。"""
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode) or st.st_size > SECURE_MAX:
+        return None
+    return _sha(p), st.st_mtime_ns, st.st_size
+
+
+_VAULT_RE = re.compile(r"^[\w][\w .\-]{0,79}$")      # 不能以 - 開頭，避免被 op 當成參數
+_ME = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _inside(rp, base):
+    base = os.path.realpath(base)
+    return rp == base or rp.startswith(base + os.sep)
+
+
+def _secure_ok(p):
+    """允許處理的檔案：真實路徑在家目錄或 /Volumes 底下的一般檔案；不處理 secaudit 自己的資料與程式。"""
+    rp = os.path.realpath(p)
+    if os.path.islink(p) or not os.path.isfile(rp):
+        return False
+    if not (_inside(rp, HOME) or rp.startswith("/Volumes/")):
+        return False
+    return not (_inside(rp, DATA) or _inside(rp, _ME))
+
+
+def secure_dir_ok(d):
+    """DMG 存放資料夾：正規化後必須在家目錄或 /Volumes 底下，而且不是 secaudit 自己的資料或程式資料夾。"""
+    rp = os.path.realpath(os.path.expanduser(d or ""))
+    return bool(d) and (_inside(rp, HOME) or rp.startswith("/Volumes/")) and rp != os.path.realpath(HOME) \
+        and not (_inside(rp, DATA) or _inside(rp, _ME))
+
+
+def vault_ok(v):
+    return bool(_VAULT_RE.match(v or ""))
+
+
+def _vault_private(vault):
+    """執行前確認 vault 只有自己能存取：個人 vault（Private / Personal）直接通過；其他 vault 必須只有自己一個使用者、
+    沒有任何群組。回傳 (通過, 原因)。"""
+    ok, out = _quiet(["op", "vault", "get", vault, "--format", "json"], env=_op_env(), timeout=180)
+    if not ok:
+        return False, "讀不到 vault「%s」（可能沒有授權，或 vault 不存在）" % vault, ""
+    try:
+        info = json.loads(out.decode())
+    except ValueError:
+        return False, "無法解析 vault 資訊", ""
+    vid = str(info.get("id", ""))
+    if not re.match(r"^[a-z0-9]{10,40}$", vid):
+        return False, "無法取得 vault id", ""
+    if str(info.get("type", "")).upper() in ("PERSONAL", "PRIVATE"):
+        return True, "", vid
+    # 之後都用 id 查詢，避免檢查和使用之間 vault 被改名或換成同名的
+    ok_u, users = _quiet(["op", "vault", "user", "list", vid, "--format", "json"], env=_op_env(), timeout=120)
+    ok_g, groups = _quiet(["op", "vault", "group", "list", vid, "--format", "json"], env=_op_env(), timeout=120)
+    if not ok_u or not ok_g:    # 查不到就當作不安全（fail closed），不能把「列不出來」當成「沒有」
+        return False, "無法確認 vault「%s」的%s存取權，為安全起見不處理" % (vault, "使用者" if not ok_u else "群組"), ""
+    try:
+        users, groups = json.loads(users.decode()), json.loads(groups.decode())
+    except ValueError:
+        return False, "無法解析 vault「%s」的存取權資訊，為安全起見不處理" % vault, ""
+    if not isinstance(users, list) or not isinstance(groups, list) or len(users) != 1 or groups:
+        return False, "vault「%s」不是只有你能存取（%s 位使用者、%s 個群組）。請改用個人 vault，或在「常駐監控設定」更換" % (
+            vault, len(users) if isinstance(users, list) else "?", len(groups) if isinstance(groups, list) else "?"), ""
+    return True, "", vid
+
+
+def _secure_plan(kind):
+    from .app import load_config
+    from .checks_secrets import _git_state
+    cfg = load_config()
+    vault = cfg.get("secure_vault", "Private")
+    out_dir = os.path.realpath(os.path.expanduser(cfg.get("secure_dir", "~/Secure")))
+    bad_cfg = "" if vault_ok(vault) and secure_dir_ok(out_dir) else "設定的 1Password vault 或 DMG 資料夾不合法，請到「常駐監控設定」重新設定"
+    name, fs = _latest_findings()
+    seen, steps = set(), []
+    for f in fs if not bad_cfg else []:
+        if f.get("rule") not in SECURE_RULES or not f.get("path"):
+            continue
+        p = os.path.expanduser(f["path"])
+        if p in seen or not _secure_ok(p):
+            continue
+        seen.add(p)
+        st = _file_state(p)
+        if not st:
+            continue
+        git = _git_state(p)
+        where = ("加密 DMG（%s/）" % home_rel(out_dir)) if kind == "dmg" else "1Password 文件"
+        notes = [f.get("title", ""), "目的地：" + where, "⚠️ 驗證成功後會刪除原檔（無法復原）"]
+        if git == "tracked":
+            notes.append("⚠️ 已提交到 git：刪除只會從目前版本消失，git 歷史仍有，預設不勾選")
+        steps.append({"id": "f%d" % len(steps), "label": home_rel(p), "detail": "；".join(notes), "kind": "secure-" + kind,
+                      "path": p, "state": st, "default": git != "tracked"})
+    title = "把含機密的檔案加密封存成 DMG，並刪除原檔" if kind == "dmg" else "把含機密的檔案存進 1Password，並刪除原檔"
+    head = ["🔐 1Password vault：「%s」（%s）。執行前會確認這個 vault 只有你能存取，不是的話整個動作會中止。"
+            "要更換請到「常駐監控設定」，修改需要 Touch ID。" % (vault, "DMG 的密碼存在這裡" if kind == "dmg" else "檔案存在這裡")]
+    if bad_cfg:
+        head.insert(0, "⚠️ " + bad_cfg)
+    common = ["只處理最近一次報告列出、而且還沒標記為已確認無害的檔案；預覽之後檔案被改過的會略過，不會刪除。",
+              "原檔直接刪除、不進垃圾桶。APFS / SSD 無法保證刪除的資料完全無法復原，請確認已開啟 FileVault。",
+              "這些機密如果曾經提交到 git、同步到雲端或分享過，封存不等於安全，仍要到各服務撤銷、換新。",
+              "執行時 1Password 也會跳出自己的授權視窗。"]
+    if kind == "dmg":
+        body = ["會產生一組隨機密碼，先存進 1Password 並讀回確認，再建立空的 AES-256 加密 DMG、掛載後把檔案直接複製進去"
+                "（不會在磁碟上留下明文暫存副本），卸載後以唯讀方式重新掛載逐檔比對 sha256，全部一致才刪除原檔。"
+                "所有勾選的檔案放進同一個 DMG，依 home/、volumes/ 保留原本的資料夾結構。"]
+    else:
+        body = ["每個檔案分別用 op document create 存成 1Password 文件，再下載回來比對 sha256，一致才刪除原檔。"]
+    return {"title": title, "report": name, "steps": steps, "notes": head + body + common,
+            # Touch ID 對話框的文字寫死，不放檔名或 vault 名稱，避免被拿來塞誤導文字
+            "reason": "執行 secaudit 修復：%s（共 %d 個檔案）" % (title, len(steps)), "vault": vault, "secure_dir": out_dir}
+
+
+def plan_secure_dmg():
+    return _secure_plan("dmg")
+
+
+def plan_secure_1p():
+    return _secure_plan("1p")
+
+
+def _still_same(s):
+    """刪除前確認：檔案還是預覽時那一份（sha256、修改時間、大小都相同）。"""
+    return _secure_ok(s["path"]) and _file_state(s["path"]) == tuple(s["state"])
+
+
+def _op_item_create_password(vault, title, password, note):
+    """用 JSON template（stdin）建立密碼項目，回傳項目 id；密碼不出現在指令參數。
+    op 的輸出含有密碼明文，只拿來取 id，不存、不放進任何錯誤訊息。"""
+    tpl = {"title": title, "category": "PASSWORD", "tags": ["secaudit"],
+           "fields": [{"id": "password", "type": "CONCEALED", "purpose": "PASSWORD", "label": "password", "value": password},
+                      {"id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain", "value": note}]}
+    ok, out = _quiet(["op", "item", "create", "--vault", vault, "--format", "json", "-"],
+                     json.dumps(tpl).encode(), env=_op_env())
+    iid = ""
+    if ok:
+        try:
+            iid = str(json.loads(out.decode()).get("id", ""))
+        except ValueError:
+            iid = ""
+    del out
+    return iid if re.match(r"^[a-z0-9]{10,40}$", iid) else ""
+
+
+def _dmg_rel(path):
+    """DMG 內的相對路徑：home/… 或 volumes/…，一定在掛載點底下，不會有 ..。"""
+    rp = os.path.realpath(path)
+    if _inside(rp, HOME):
+        rel = os.path.join("home", os.path.relpath(rp, os.path.realpath(HOME)))
+    elif rp.startswith("/Volumes/"):
+        rel = os.path.join("volumes", os.path.relpath(rp, "/Volumes"))
+    else:
+        raise ValueError("路徑不在允許範圍")
+    if rel.startswith("..") or "/../" in rel or os.path.isabs(rel):
+        raise ValueError("路徑不在允許範圍")
+    return rel
+
+
+def _detach(mnt):
+    ok, _ = _quiet(["hdiutil", "detach", mnt], timeout=120)
+    if not ok:
+        ok, _ = _quiet(["hdiutil", "detach", mnt, "-force"], timeout=120)
+    if not ok:
+        _notify("⚠️ secaudit：加密 DMG 解密後的磁碟區沒有成功卸載（%s），請手動退出。" % home_rel(mnt))
+    return ok
+
+
+def _secure_dmg(plan, steps):
+    """回傳 [(step, ok, 摘要)]。全程不在磁碟上產生明文暫存副本。"""
+    import secrets as _secrets
+    import tempfile
+    vault, out_dir = plan["vault"], plan["secure_dir"]
+    if not (vault_ok(vault) and secure_dir_ok(out_dir)):
+        return [(s, False, "設定的 vault 或 DMG 資料夾不合法，沒有處理") for s in steps]
+    files = [s for s in steps if _still_same(s)]
+    res = [(s, False, "略過：預覽之後檔案被修改或移動了，沒有處理") for s in steps if s not in files]
+    if not files:
+        return res
+    try:
+        rels = {s["id"]: _dmg_rel(s["path"]) for s in files}
+    except ValueError as e:
+        return res + [(s, False, "%s，沒有處理" % e) for s in files]
+    if len(set(rels.values())) != len(rels):
+        return res + [(s, False, "有兩個檔案會對到 DMG 裡的同一個路徑，沒有處理") for s in files]
+    status["phase"] = "確認 1Password vault 只有你能存取（請留意 1Password 的授權視窗）"
+    ok, why, vid = _vault_private(vault)
+    if not ok:
+        return res + [(s, False, why + "；沒有處理") for s in files]
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dmg = os.path.join(out_dir, "secaudit-secrets-%s.dmg" % stamp)
+    title = "secaudit 封存 DMG %s" % stamp
+    left = []    # 失敗時要告訴使用者手動清理的東西
+    fail = lambda why: res + [(s, False, why + "；原檔沒有刪除" + ("（留下：%s）" % "、".join(left) if left else "")) for s in files]
+    pw = _secrets.token_urlsafe(32)
+
+    status["phase"] = "把 DMG 密碼存進 1Password"
+    iid = _op_item_create_password(vid, title, pw, "secaudit 自動封存的加密 DMG：%s\n內容：\n%s" % (
+        home_rel(dmg), "\n".join(home_rel(s["path"]) for s in files)))
+    if not iid:
+        return fail("無法把密碼存進 1Password（可能沒有授權）")
+    left.append("1Password 項目「%s」" % title)
+    ok, got = _quiet(["op", "item", "get", iid, "--vault", vid, "--fields", "label=password", "--reveal"], env=_op_env())
+    same = ok and got.decode().strip() == pw
+    del got
+    if not same:
+        return fail("1Password 讀回的密碼和產生的不一致")
+
+    os.makedirs(SECURE_TMP, mode=0o700, exist_ok=True)
+    os.makedirs(out_dir, mode=0o700, exist_ok=True)
+    size_mb = int(sum(s["state"][2] for s in files) * 1.2 / (1 << 20)) + 20
+    status["phase"] = "建立空的加密 DMG"
+    ok, _ = _quiet(["hdiutil", "create", "-size", "%dm" % size_mb, "-fs", "APFS", "-encryption", "AES-256", "-stdinpass",
+                    "-volname", "secaudit-secrets", dmg], pw.encode(), timeout=600)
+    if not ok or not os.path.isfile(dmg):
+        return fail("建立 DMG 失敗")
+    os.chmod(dmg, 0o600)
+    left.append("DMG %s" % home_rel(dmg))
+    mnt = tempfile.mkdtemp(prefix="mnt-", dir=SECURE_TMP)
+    try:
+        status["phase"] = "把檔案複製進加密 DMG"
+        ok, _ = _quiet(["hdiutil", "attach", dmg, "-stdinpass", "-nobrowse", "-noautoopen", "-mountpoint", mnt], pw.encode(), timeout=300)
+        if not ok:
+            return fail("掛載新建的 DMG 失敗")
+        _quiet(["mdutil", "-i", "off", mnt], timeout=60)      # 不讓 Spotlight 在 DMG 裡建立內容索引
+        try:
+            for s in files:
+                dst = os.path.join(mnt, rels[s["id"]])
+                os.makedirs(os.path.dirname(dst), mode=0o700, exist_ok=True)
+                if not _inside(os.path.realpath(os.path.dirname(dst)), mnt):
+                    raise OSError("目的地不在 DMG 內")
+                fd = os.open(s["path"], os.O_RDONLY | os.O_NOFOLLOW)   # 檔案若在檢查後被換成 symlink，直接失敗
+                with os.fdopen(fd, "rb") as fi, open(dst, "wb") as fo:
+                    shutil.copyfileobj(fi, fo)
+                    st = os.fstat(fi.fileno())
+                os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns))
+        except OSError as e:
+            _detach(mnt)
+            return fail("複製進 DMG 失敗：%s" % e)
+        if not _detach(mnt):
+            return fail("卸載 DMG 失敗")
+        status["phase"] = "唯讀掛載 DMG，逐檔比對"
+        ok, _ = _quiet(["hdiutil", "attach", dmg, "-stdinpass", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mnt],
+                       pw.encode(), timeout=300)
+        if not ok:
+            return fail("用 1Password 裡的密碼重新掛載 DMG 失敗")
+        try:
+            bad = [s for s in files if _sha(os.path.join(mnt, rels[s["id"]])) != s["state"][0]]
+        except OSError:
+            bad = files
+        if not _detach(mnt):
+            return fail("驗證後卸載 DMG 失敗（解密的磁碟區可能還掛著，請手動退出）")
+        if bad:
+            return fail("DMG 裡有 %d 個檔案和原檔不一致" % len(bad))
+    finally:
+        try:
+            os.rmdir(mnt)
+        except OSError:
+            pass
+    status["phase"] = "刪除原檔"
+    for s in files:
+        if not _still_same(s):
+            res.append((s, False, "已封存進 DMG，但驗證期間原檔被修改，沒有刪除"))
+            continue
+        try:
+            os.remove(s["path"])
+            res.append((s, True, "已封存進 %s 並刪除原檔" % home_rel(dmg)))
+        except OSError as e:
+            res.append((s, False, "已封存，但刪除原檔失敗：%s" % e))
+    plan["_summary"] = "DMG：%s；密碼在 1Password「%s」（vault %s）" % (home_rel(dmg), title, vault)
+    return res
+
+
+def _secure_1p(plan, s):
+    """單一檔案存成 1Password 文件；回傳 (ok, 摘要)。"""
+    vault = plan["vault"]
+    if not vault_ok(vault):
+        return False, "設定的 vault 不合法，沒有處理"
+    if not _still_same(s):
+        return False, "略過：預覽之後檔案被修改或移動了"
+    if not plan.get("_vault_id"):
+        status["phase"] = "確認 1Password vault 只有你能存取（請留意 1Password 的授權視窗）"
+        ok, why, vid = _vault_private(vault)
+        if not ok:
+            return False, why + "；沒有處理"
+        plan["_vault_id"] = vid
+    vid = plan["_vault_id"]
+    title = "secaudit：%s" % home_rel(s["path"])
+    status["phase"] = "存進 1Password：%s" % os.path.basename(s["path"])
+    ok, out = _quiet(["op", "document", "create", s["path"], "--vault", vid, "--title", title, "--tags", "secaudit",
+                      "--format", "json"], env=_op_env())
+    did = ""
+    if ok:
+        try:
+            meta = json.loads(out.decode())
+            did = str(meta.get("uuid") or meta.get("id") or "")
+        except ValueError:
+            pass
+    if not re.match(r"^[a-z0-9]{10,40}$", did):
+        return False, "存進 1Password 失敗（可能沒有授權）；原檔沒有刪除"
+    ok, data = _quiet(["op", "document", "get", did, "--vault", vid], env=_op_env())
+    same = ok and hashlib.sha256(data).hexdigest() == s["state"][0]
+    del data
+    if not same:
+        return False, "1Password 文件「%s」下載回來和原檔不一致；原檔沒有刪除（1Password 裡的文件請手動檢查）" % title
+    if not _still_same(s):
+        return False, "已存進 1Password「%s」，但驗證期間原檔被修改，沒有刪除" % title
+    try:
+        os.remove(s["path"])
+    except OSError as e:
+        return False, "已存進 1Password「%s」，但刪除原檔失敗：%s" % (title, e)
+    return True, "已存進 1Password「%s」（vault %s）並刪除原檔" % (title, vault)
+
+
+def secure_settings_update(vault, out_dir):
+    """更換封存用的 vault / DMG 資料夾：會改變機密被送去哪裡，所以要 Touch ID。回傳 (成功, 訊息)。"""
+    from .app import load_config, save_config
+    vault = (vault or "").strip()
+    out_dir = (out_dir or "").strip()
+    if not vault_ok(vault):
+        return False, "vault 名稱只能用英數字、空白、底線、點、減號，最多 80 字，而且不能以 - 開頭"
+    if not secure_dir_ok(out_dir):
+        return False, "DMG 資料夾必須在家目錄（不能是家目錄本身）或 /Volumes 底下，而且不能是 secaudit 自己的資料夾"
+    cfg = load_config()
+    if cfg.get("secure_vault") == vault and os.path.realpath(os.path.expanduser(cfg.get("secure_dir", ""))) == \
+            os.path.realpath(os.path.expanduser(out_dir)):
+        return True, ""
+    ok, msg, how = _key_auth("touchid", None, "secure-cfg", "", 0, "更換 secaudit 封存機密檔案用的 1Password vault 或 DMG 資料夾")
+    if not ok:
+        return False, msg
+    cfg["secure_vault"] = vault
+    cfg["secure_dir"] = home_rel(os.path.realpath(os.path.expanduser(out_dir)))
+    save_config(cfg)
+    _log({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "action": "secure-settings", "ok": True, "method": how,
+          "message": "封存設定改為 vault「%s」、DMG 資料夾 %s" % (vault, cfg["secure_dir"]), "steps": []})
+    _notify("🔐 secaudit 封存設定已更換：vault「%s」、DMG 資料夾 %s（以 %s 授權）。不是你做的話請立即改回。" % (vault, cfg["secure_dir"], how))
+    return True, ""
+
+
 # ---------------------------------------------------------------- 對外介面
 ACTIONS = {
     "redact-transcripts": ("🔑", "遮罩 AI 對話紀錄裡的金鑰", plan_redact),
     "upgrade-runtimes": ("⬆️", "升級執行環境（同一版本線）", plan_upgrade),
     "clean-go-toolchains": ("🧹", "清除舊的 Go toolchain 快取", plan_go_cache),
+    "secure-files-dmg": ("📦", "含機密的檔案 → 加密 DMG", plan_secure_dmg),
+    "secure-files-1p": ("🔐", "含機密的檔案 → 1Password", plan_secure_1p),
 }
 
 
 def catalog():
     _, fs = _latest_findings()
     n_tr = sum(1 for f in fs if f.get("rule", "").startswith("transcript-"))
-    hints = {"redact-transcripts": "最近一次報告有 %d 項對話紀錄金鑰" % n_tr if n_tr else "最近一次報告沒有發現"}
+    n_sf = len({f.get("path") for f in fs if f.get("rule") in SECURE_RULES})
+    hints = {"redact-transcripts": "最近一次報告有 %d 項對話紀錄金鑰" % n_tr if n_tr else "最近一次報告沒有發現",
+             "secure-files-dmg": "最近一次報告有 %d 個含機密的檔案" % n_sf if n_sf else "最近一次報告沒有發現",
+             "secure-files-1p": "最近一次報告有 %d 個含機密的檔案" % n_sf if n_sf else "最近一次報告沒有發現"}
     return [{"id": k, "icon": v[0], "title": v[1], "hint": hints.get(k, "")} for k, v in ACTIONS.items()]
 
 
@@ -462,7 +840,7 @@ def _execute(plan, steps, key_name=None):
     results = []
     try:
         labels = "、".join(s["label"] for s in steps[:4]) + ("…等 %d 項" % len(steps) if len(steps) > 4 else "")
-        reason = "執行 secaudit 修復「%s」：%s" % (plan["title"], labels)
+        reason = plan.get("reason") or "執行 secaudit 修復「%s」：%s" % (plan["title"], labels)
         if key_name:
             _notify("🔑 secaudit 已用 YubiKey「%s」授權並開始執行：%s。不是你做的話請立即檢查。" % (key_name, reason))
         else:
@@ -489,8 +867,13 @@ def _execute(plan, steps, key_name=None):
                 for s in go:
                     results.append({"id": s["id"], "label": s["label"], "ok": ok, "output": out})
             status["results"] = results
+        dmg = [s for s in steps if s["kind"] == "secure-dmg"]
+        if dmg:
+            for s, okk, msg in _secure_dmg(plan, dmg):
+                results.append({"id": s["id"], "label": s["label"], "ok": okk, "output": msg})
+            status["results"] = results
         for s in steps:
-            if s["kind"] == "brew":
+            if s["kind"] in ("brew", "secure-dmg"):
                 continue
             status["phase"] = s["label"]
             if s["kind"] == "redact":
@@ -503,6 +886,8 @@ def _execute(plan, steps, key_name=None):
                                                             if skipped else ""))
                     except OSError as e:
                         r = (False, str(e))
+            elif s["kind"] == "secure-1p":
+                r = _secure_1p(plan, s)
             elif s["kind"] == "cmd":
                 r = _run_cmd(s["argv"])
             elif s["kind"] == "cmds":       # 依序執行，前一個失敗就停
@@ -530,7 +915,12 @@ def _execute(plan, steps, key_name=None):
             results.append({"id": s["id"], "label": s["label"], "ok": r[0], "output": r[1]})
             status["results"] = results
         fails = sum(1 for r in results if not r["ok"])
-        status.update(ok=not fails, message="完成，%d 個步驟%s" % (len(results), "，%d 個失敗" % fails if fails else "全部成功"))
+        status.update(ok=not fails, message="完成，%d 個步驟%s%s" % (len(results), "，%d 個失敗" % fails if fails else "全部成功",
+                                                                ("。" + plan["_summary"]) if plan.get("_summary") else ""))
+        if plan["action"].startswith("secure-files"):
+            done = sum(1 for r in results if r["ok"])
+            _notify("🔐 secaudit 封存結果：%d 個檔案已處理並刪除原檔，%d 個沒有處理。%s" % (
+                done, len(results) - done, plan.get("_summary", "")))
     except Exception as e:   # 背景執行緒不能讓例外消失
         status.update(ok=False, message="%s: %s" % (type(e).__name__, str(e)[:300]))
     finally:

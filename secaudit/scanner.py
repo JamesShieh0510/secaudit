@@ -91,6 +91,14 @@ def walk_target(ctx: ScanContext, t: Target, lockfiles: list, ransom=None, pins=
                 ctx.stats["errors"] += 1
 
 
+def _check_secure_settings(ctx):
+    """封存機密檔案的目的地（vault、DMG 資料夾）決定機密被送去哪裡：繞過 Web UI 直接改設定檔也要出現 ⚠️ 變動。"""
+    from .app import load_config
+    cfg = load_config()
+    ctx.inv("secaudit 封存設定", "1Password vault", str(cfg.get("secure_vault", "")))
+    ctx.inv("secaudit 封存設定", "DMG 資料夾", str(cfg.get("secure_dir", "")))
+
+
 def _check_auth_keys(ctx):
     """把授權修復動作用的 YubiKey 列進清單快照：新增 / 更換金鑰會變成 ⚠️ 變動（不論是不是從 Web UI 改的）。"""
     import hashlib
@@ -126,6 +134,7 @@ def run_scan(targets, mode="full", cache=None, progress=None, cancel=None, onlin
     if not ctx.cancel.is_set():
         checks_ai.check_transcripts(ctx, cache.setdefault("transcripts", {}))
         _check_auth_keys(ctx)
+        _check_secure_settings(ctx)
 
     lockfiles = []
     ransom = checks_threats.RansomTracker()
