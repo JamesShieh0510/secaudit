@@ -96,6 +96,12 @@ def _check_auth_keys(ctx):
     for k in _read(os.path.join(DATA, "webauthn.json"), {}).get("keys", []):
         ctx.inv("secaudit 授權金鑰", "%s（%s）" % (k.get("name", ""), str(k.get("id", ""))[:12]),
                 hashlib.sha256(str(k.get("pem", "")).encode()).hexdigest()[:16])
+    roots = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yubico_fido_roots.pem")
+    try:
+        with open(roots, "rb") as fh:
+            ctx.inv("secaudit 授權金鑰", "Yubico 根憑證（yubico_fido_roots.pem）", hashlib.sha256(fh.read()).hexdigest()[:16])
+    except OSError:
+        ctx.inv("secaudit 授權金鑰", "Yubico 根憑證（yubico_fido_roots.pem）", "檔案不存在")
 
 
 def run_scan(targets, mode="full", cache=None, progress=None, cancel=None, online=True):

@@ -33,6 +33,8 @@ OPENSSL = "/usr/bin/openssl"
 _lock = threading.Lock()
 _store_lock = threading.Lock()
 _challenges = {}      # challenge(b64url) -> {"purpose", "binding", "created"}
+# DER：OID 1.3.6.1.4.1.45724.1.1.4，可能接 critical BOOLEAN，再接 OCTET STRING 包著 16 bytes 的 OCTET STRING
+_AAGUID_EXT = re.compile(re.escape(bytes.fromhex("060b2b0601040182e51c010104")) + rb"(?:\x01\x01[\x00\xff])?\x04\x12\x04\x10(.{16})", re.S)
 
 
 def b64u(b):
@@ -184,6 +186,13 @@ def _verify_attestation(att, ad_raw, ad, cdh, x, y):
     code, out = _openssl(args + ["@leaf.pem"], files)
     if code != 0 or not re.search(r":\s*OK\s*$", out.strip()):
         raise ValueError("這把金鑰的出廠憑證不是 Yubico 簽發的（只接受 YubiKey）")
+    code, text = _openssl(["x509", "-in", "@leaf.pem", "-noout", "-text"], {"leaf.pem": leaf})
+    if code != 0 or re.search(r"CA\s*:\s*TRUE", text):
+        raise ValueError("出廠憑證不能是 CA 憑證")
+    # FIDO 的 AAGUID 延伸欄位（1.3.6.1.4.1.45724.1.1.4）：有的話必須和 authenticatorData 的 aaguid 一致
+    m = _AAGUID_EXT.search(x5c[0])
+    if m and fmt == "packed" and m.group(1) != ad.get("aaguid"):
+        raise ValueError("出廠憑證的 AAGUID 和金鑰回報的不一致")
     code, subj = _openssl(["x509", "-in", "@leaf.pem", "-noout", "-subject"], {"leaf.pem": leaf})
     return (subj.split("CN=")[-1].strip() if "CN=" in subj else "")[:80]
 

@@ -145,6 +145,7 @@ _PK_HEAD = re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----")
 _PK_END = re.compile(rb"-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----")
 _PK_BODY = re.compile(rb"(?:(?<=\\n)|(?<=\\r)|(?<=\s))[A-Za-z0-9+/=]+")
 _LABEL = b"[REDACTED]"
+_UNESCAPED_QUOTE = re.compile(rb'(?:^|[^\\])(?:\\\\)*"')   # 前面是偶數個反斜線（含 0 個）的引號
 
 
 def _transcript_path_ok(p):
@@ -175,13 +176,14 @@ def redact_file(path):
         data = fh.read()
         buf = bytearray(data)          # 所有遮罩先套在記憶體副本上，規則範圍重疊也不會互相干擾
         changed = bytearray(len(data))
+        hits = []
         for rid, rx in _BRULES:
             for m in rx.finditer(data):
                 start, end = m.span()
                 if rid == "private-key":   # 正規式只比對到前面的長行，延伸到 END 標記，才能遮到最後一行
                     e = _PK_END.search(data, end, end + 4096)
                     # 只在同一個 JSON 字串裡延伸：中間出現沒有跳脫的 " 就代表跨到別的欄位了
-                    if e and not re.search(rb'(?<!\\)"', data[end:e.start()]):
+                    if e and not _UNESCAPED_QUOTE.search(data[end:e.start()]):
                         end = e.end()
                 raw = data[start:end]
                 rep = _mask(raw, rid)
@@ -191,8 +193,10 @@ def redact_file(path):
                         buf[start + i] = rep[i]
                         changed[start + i] = 1
                         hit = True
-                n += hit
+                if hit:
+                    hits.append((start, end))
         # 合併連續的修改範圍，每段寫入前重讀比對原始內容
+        failed = bytearray(len(data))
         i = 0
         while i < len(changed):
             if not changed[i]:
@@ -207,7 +211,11 @@ def redact_file(path):
                 fh.write(bytes(buf[i:j]))
             else:
                 skipped += 1
+                for k in range(i, j):
+                    failed[k] = 1
             i = j
+        # 只計算完整寫入的那幾處，有任何部分被略過的不算
+        n = sum(1 for a_, b_ in hits if not any(failed[a_:b_]))
         fh.flush()
         os.fsync(fh.fileno())
     return n, skipped
@@ -262,8 +270,16 @@ def plan_upgrade():
                 brew.setdefault(f, set()).add("%s → %s" % (x["version"], latest))
         elif x["source"] == "rustup" and x["where"] == "rustup stable" and "rustup" not in seen:
             seen.add("rustup")
-            steps.append({"id": "rustup", "label": "rustup update stable", "detail": "Rust %s → 最新 stable（只更新 stable，不動 1.69 / 1.70 這類釘選的 toolchain）" % x["version"],
-                          "kind": "cmd", "argv": [os.path.join(HOME, ".cargo", "bin", "rustup"), "update", "stable"]})
+            rustup = os.path.join(HOME, ".cargo", "bin", "rustup")
+            # 已停止發布的元件（rls、rust-analysis）還裝著的話，rustup update 會整個失敗，要先移除
+            ok, out = _run_cmd([rustup, "component", "list", "--toolchain", "stable", "--installed"], timeout=60)
+            dead = sorted({ln.strip() for ln in out.splitlines() if ok and re.match(r"^(?:rls|rls-preview|rust-analysis)(?:-|$)", ln.strip())})
+            cmds = ([[rustup, "component", "remove", "--toolchain", "stable"] + dead] if dead else []) + [[rustup, "update", "stable"]]
+            detail = "Rust %s → 最新 stable（只更新 stable，不動 1.69 / 1.70 這類釘選的 toolchain）" % x["version"]
+            if dead:
+                detail += "；會先移除已停止發布、會讓更新失敗的元件：%s（rls 已由 rust-analyzer 取代）" % "、".join(dead)
+            steps.append({"id": "rustup", "label": "rustup update stable" + ("（先移除 %d 個停用元件）" % len(dead) if dead else ""),
+                          "detail": detail, "kind": "cmds", "cmds": cmds})
         elif x["product"] == "bun" and x["source"] == "官方安裝程式" and "bun" not in seen:
             seen.add("bun")
             steps.append({"id": "bun", "label": "bun upgrade", "detail": "Bun %s → %s" % (x["version"], latest),
@@ -487,6 +503,14 @@ def _execute(plan, steps, key_name=None):
                         r = (False, str(e))
             elif s["kind"] == "cmd":
                 r = _run_cmd(s["argv"])
+            elif s["kind"] == "cmds":       # 依序執行，前一個失敗就停
+                outs, okk = [], True
+                for argv in s["cmds"]:
+                    okk, out = _run_cmd(argv)
+                    outs.append("$ %s\n%s" % (" ".join(os.path.basename(argv[0]) if i == 0 else a for i, a in enumerate(argv)), out))
+                    if not okk:
+                        break
+                r = (okk, "\n\n".join(outs)[-4000:])
             elif s["kind"] == "rm":
                 done, errs = 0, []
                 for p in s["paths"]:
