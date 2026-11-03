@@ -96,7 +96,8 @@ def authorize(reason):
 
 
 # ---------------------------------------------------------------- 共用
-_SECRETISH = re.compile(r"KEY|TOKEN|SECRET|PASSW|PWD|CREDENTIAL|AUTH|COOKIE|SESSION|PRIVATE|CHAT_ID", re.I)
+_SECRETISH = re.compile(r"KEY|TOKEN|SECRET|PASSW|PWD|CREDENTIAL|AUTH|COOKIE|SESSION|PRIVATE|CHAT_ID|DSN|DATABASE|"
+                        r"_URI$|_URL$|(?:^|_)SK(?:_|$)|WEBHOOK|SIGNING|SALT", re.I)
 _ENV_KEEP = {"PWD", "OLDPWD", "SSH_AUTH_SOCK"}
 
 
@@ -172,25 +173,41 @@ def redact_file(path):
     n = skipped = 0
     with open(path, "r+b") as fh:
         data = fh.read()
-        edits = []
+        buf = bytearray(data)          # 所有遮罩先套在記憶體副本上，規則範圍重疊也不會互相干擾
+        changed = bytearray(len(data))
         for rid, rx in _BRULES:
             for m in rx.finditer(data):
-                start, raw = m.start(), m.group()
+                start, end = m.span()
                 if rid == "private-key":   # 正規式只比對到前面的長行，延伸到 END 標記，才能遮到最後一行
-                    e = _PK_END.search(data, m.end(), m.end() + 4096)
-                    if e:
-                        raw = data[start:e.end()]
+                    e = _PK_END.search(data, end, end + 4096)
+                    # 只在同一個 JSON 字串裡延伸：中間出現沒有跳脫的 " 就代表跨到別的欄位了
+                    if e and not re.search(rb'(?<!\\)"', data[end:e.start()]):
+                        end = e.end()
+                raw = data[start:end]
                 rep = _mask(raw, rid)
-                if rep != raw:
-                    edits.append((start, raw, rep))
-        for start, raw, rep in edits:
-            fh.seek(start)
-            if fh.read(len(raw)) != raw:
-                skipped += 1
+                hit = False
+                for i in range(len(raw)):
+                    if rep[i] != raw[i]:   # 只改有遮罩的位元組，已經被其他規則遮掉的部分保持遮掉
+                        buf[start + i] = rep[i]
+                        changed[start + i] = 1
+                        hit = True
+                n += hit
+        # 合併連續的修改範圍，每段寫入前重讀比對原始內容
+        i = 0
+        while i < len(changed):
+            if not changed[i]:
+                i += 1
                 continue
-            fh.seek(start)
-            fh.write(rep)
-            n += 1
+            j = i
+            while j < len(changed) and changed[j]:
+                j += 1
+            fh.seek(i)
+            if fh.read(j - i) == data[i:j]:
+                fh.seek(i)
+                fh.write(bytes(buf[i:j]))
+            else:
+                skipped += 1
+            i = j
         fh.flush()
         os.fsync(fh.fileno())
     return n, skipped
@@ -409,7 +426,7 @@ def start(plan_id, step_ids, method="touchid", assertion=None, port=0):
         from . import webauthn
         try:
             key_name = webauthn.verify_assertion(assertion or {}, "run", _binding(plan_id, step_ids), port)
-        except (ValueError, KeyError, TypeError) as e:
+        except Exception as e:
             return False, "YubiKey 驗證失敗：%s" % e
     elif method != "touchid":
         return False, "未知的授權方式"
@@ -530,11 +547,11 @@ def _key_auth(method, assertion, purpose, binding, port, reason):
     if method == "yubikey":
         try:
             return True, "", "YubiKey「%s」" % webauthn.verify_assertion(assertion or {}, purpose, binding, port)
-        except (ValueError, KeyError, TypeError) as e:
+        except Exception as e:
             return False, "YubiKey 驗證失敗：%s" % e, ""
     if method != "touchid":
         return False, "未知的授權方式", ""
-    _notify("🔒 secaudit 正在請求 Touch ID：%s。不是你按的話請按取消。" % reason)
+    _notify("🔒 secaudit 正在請求 Touch ID：%s。不是你在 Web UI 按的話請按取消。" % reason)
     ok, msg = authorize(reason)
     return ok, msg, "Touch ID"
 
@@ -548,10 +565,10 @@ def key_add(reg, method, assertion, port):
     from . import webauthn
     try:
         entry = webauthn.check_registration(reg or {}, port)
-    except (ValueError, KeyError, TypeError, IndexError) as e:
+    except Exception as e:
         return False, "註冊資料無效：%s" % e
     ok, msg, how = _key_auth(method, assertion, "add-key", key_add_binding(reg), port,
-                             "新增 YubiKey「%s」為 secaudit 的授權金鑰" % entry["name"])
+                             "新增一把 secaudit 授權金鑰（之後可以不用 Touch ID 執行修復動作）")
     if not ok:
         return False, msg
     webauthn.add_key(entry)
@@ -563,10 +580,10 @@ def key_add(reg, method, assertion, port):
 
 def key_remove(kid, method, assertion, port):
     from . import webauthn
-    k = next((x for x in webauthn.keys() if x["id"] == kid), None)
+    k = webauthn.find_key(kid)
     if not k:
         return False, "找不到這把金鑰"
-    ok, msg, how = _key_auth(method, assertion, "del-key", "del|" + kid, port, "從 secaudit 移除 YubiKey「%s」" % k["name"])
+    ok, msg, how = _key_auth(method, assertion, "del-key", "del|" + kid, port, "移除一把 secaudit 授權金鑰")
     if not ok:
         return False, msg
     webauthn.remove_key(kid)

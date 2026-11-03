@@ -335,12 +335,14 @@ async function yubikeyAssert(body) {
   return {id: cred.id, challenge: o.challenge, clientDataJSON: b2a(cred.response.clientDataJSON),
           authenticatorData: b2a(cred.response.authenticatorData), signature: b2a(cred.response.signature)};
 }
-const canKey = () => keyState.localhost && keyState.keys.length && window.PublicKeyCredential;
+const validKeys = () => keyState.keys.filter(k => k.valid);
+const canKey = () => keyState.localhost && validKeys().length && window.PublicKeyCredential;
 function keyMsg(html) { $("#keyMsg").innerHTML = html; }
 function renderKeys() {
   const k = keyState.keys;
-  let h = `<b>🔑 YubiKey</b>　` + (k.length ? `已註冊 ${k.length} 把` : "尚未註冊（目前只能用 Touch ID 授權）");
-  h += k.map(x => `<div class="row" style="margin-top:6px"><span>${esc(x.name)}</span><span class="muted">新增於 ${esc(x.created)}${x.last_used ? "・上次使用 " + esc(x.last_used) : ""}</span>
+  let h = `<b>🔑 YubiKey</b>　` + (validKeys().length ? `已註冊 ${validKeys().length} 把` : "尚未註冊（目前只能用 Touch ID 授權）") +
+    `<div class="muted">只接受真的 YubiKey：註冊時會驗證 Yubico 的出廠憑證。瀏覽器問「是否允許查看安全金鑰的品牌和型號」時請按允許。</div>`;
+  h += k.map(x => `<div class="row" style="margin-top:6px"><span>${esc(x.name)}</span>${x.valid ? (x.model ? `<span class="kind">${esc(x.model)}</span>` : "") : '<span style="color:var(--high)">⚠️ 舊版未驗證出廠憑證，已停用，請刪除後重新註冊</span>'}<span class="muted">新增於 ${esc(x.created)}${x.last_used ? "・上次使用 " + esc(x.last_used) : ""}</span>
     <button data-kdel="${esc(x.id)}" data-m="touchid">刪除（Touch ID）</button>${canKey() ? `<button data-kdel="${esc(x.id)}" data-m="yubikey">刪除（YubiKey）</button>` : ""}</div>`).join("");
   if (!keyState.localhost) {
     h += `<div style="margin-top:8px">YubiKey 只能在 <code>http://localhost</code> 使用（瀏覽器的 WebAuthn 不接受 127.0.0.1 這類 IP 位址）。<button id="toLocal">切換到 localhost</button></div>`;
@@ -348,7 +350,7 @@ function renderKeys() {
     h += `<div style="margin-top:8px">這個瀏覽器不支援 WebAuthn。</div>`;
   } else {
     h += `<div class="row" style="margin-top:8px"><input type="text" id="keyName" placeholder="這把金鑰的名稱，例如 YubiKey 5C" style="max-width:260px">
-      <button id="keyAddT">新增 YubiKey（Touch ID 授權）</button>${k.length ? '<button id="keyAddY">新增 YubiKey（用已註冊的 YubiKey 授權）</button>' : ""}</div>`;
+      <button id="keyAddT">新增 YubiKey（Touch ID 授權）</button>${validKeys().length ? '<button id="keyAddY">新增 YubiKey（用已註冊的 YubiKey 授權）</button>' : ""}</div>`;
   }
   h += `<div id="keyMsg" class="muted" style="margin-top:6px"></div>`;
   $("#keyBox").innerHTML = h;

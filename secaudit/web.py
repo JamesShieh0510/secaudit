@@ -96,6 +96,8 @@ def make_handler(engine: Engine, token: str, port: int):
             if u.path == "/" and qs.get("c") and self.headers.get("Host") in allowed_hosts:
                 with codes_lock:
                     t0 = codes.pop(qs["c"][0], None)
+                    for k in [k for k, v in codes.items() if time.time() - v > 60]:   # 順便清掉過期的
+                        del codes[k]
                 if t0 and time.time() - t0 < 60:
                     # 不能用 303：這次瀏覽是從 127.0.0.1（別的網站）跳過來的，轉址後的請求不會帶 SameSite=Strict 的 cookie。
                     # 改成回傳一頁，由 localhost 自己的頁面再跳轉，對瀏覽器來說就是同站。
