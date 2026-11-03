@@ -118,6 +118,9 @@ def make_handler(engine: Engine, token: str, port: int):
                     "secrets": {"telegram": bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID")),
                                 "ollama": bool(os.environ.get("OLLAMA_API_KEY"))},
                 })
+            if u.path == "/api/actions":
+                from . import actions
+                return self._send(200, {"catalog": actions.catalog(), "status": actions.status, "history": actions.history()})
             if u.path == "/sop":
                 from .report import CSS
                 from .sop import build_sop, to_html as sop_html
@@ -230,6 +233,21 @@ def make_handler(engine: Engine, token: str, port: int):
                 if not text:
                     return self._send(400, {"ok": False})
                 return self._send(200, {"ok": telegram_send("🔔 " + _h.escape(text))})
+            if path == "/api/actions/plan":
+                # 只產生預覽，不修改任何東西
+                from . import actions
+                try:
+                    return self._send(200, actions.make_plan(str(body.get("action", ""))))
+                except KeyError:
+                    return self._send(404, {"error": "未知的動作"})
+                except Exception as e:
+                    return self._send(500, {"error": "%s: %s" % (type(e).__name__, str(e)[:200])})
+            if path == "/api/actions/run":
+                # 會修改系統：伺服器端一定先跳 Touch ID，通過後才執行預覽過的步驟
+                from . import actions
+                ids = [str(x) for x in body.get("steps", [])][:500]
+                ok, msg = actions.start(str(body.get("plan_id", "")), ids)
+                return self._send(200 if ok else 409, {"started": ok, "error": msg})
             if path == "/api/test-telegram":
                 from .notify import telegram_send
                 return self._send(200, {"ok": telegram_send("🛡 secaudit 測試訊息：Telegram 警示設定成功。")})

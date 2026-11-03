@@ -2,7 +2,7 @@
 
 > A read-only macOS security auditor focused on AI-agent era threats: MCP servers, Claude Code / Codex settings, skills & plugins, leaked API keys in AI transcripts, browser sessions, persistence (LaunchAgents), supply-chain CVEs. Watches critical paths in near-real time and alerts you on Telegram with an LLM-written triage (you / auto-update / suspicious). Python 3.8+ standard library only. UI and reports are in Traditional Chinese.
 
-一個**只讀不改**的 macOS 安全檢查工具，特別針對 AI 工具普及後的新攻擊面：MCP 伺服器、Claude Code / Codex 設定、skills 與 plugins、AI 對話紀錄裡貼過的金鑰、瀏覽器登入 session、開機自動執行項目、套件漏洞。
+一個掃描時**只讀不改**（修復動作需要 Touch ID 授權）的 macOS 安全檢查工具，特別針對 AI 工具普及後的新攻擊面：MCP 伺服器、Claude Code / Codex 設定、skills 與 plugins、AI 對話紀錄裡貼過的金鑰、瀏覽器登入 session、開機自動執行項目、套件漏洞。
 
 常駐後會即時監看關鍵位置，有變動就透過 Telegram 通知，並請 LLM 判斷這個變動比較像「你自己操作的」「程式自動更新的」還是「可疑、需要確認的」。
 
@@ -37,7 +37,12 @@
 
 ## 設計原則
 
-- **只讀不改**：不會修改、刪除或停用任何東西，所有建議都由你決定是否執行。LLM 只被允許建議唯讀的檢查指令，輸出刪除 / 停用類指令會被自動隱藏。
+- **掃描只讀不改**：掃描、監看、警示都不會修改、刪除或停用任何東西。LLM 只被允許建議唯讀的檢查指令，輸出刪除 / 停用類指令會被自動隱藏。
+- **修復動作一律要 Touch ID**：Web UI 的「🛠 修復動作」是唯一會修改系統的地方（程式碼集中在 `secaudit/actions.py`）。流程固定是「伺服器產生預覽 → 你勾選步驟 → macOS Touch ID 對話框（只接受指紋，不能改用密碼）→ 執行」。前端只能送步驟 id，不能送路徑或指令；每次執行都記錄在 `data/actions.jsonl`。目的是擋住沒有人在電腦前的觸發（其他網頁、拿到 token 的程式、被 prompt injection 的 AI 助手）。
+  - 🔑 遮罩 AI 對話紀錄裡的金鑰：只處理最近一次報告列出、位於 `~/.claude` / `~/.codex` 的檔案；用等長的 `[REDACTED]***` 直接覆寫，不換掉檔案，正在寫入的程式不受影響。
+  - ⬆️ 升級執行環境：Homebrew 的修補版、`rustup update stable`、`bun upgrade`、pnpm。會跨版本線的 Homebrew 升級（例如 `node` 24 → 26）會標示出來，預設不勾選。
+  - 🧹 清除比本機 Go 舊的 toolchain 快取。
+  - Touch ID 小工具是 `secaudit/touchid.swift`，第一次使用時用 `swiftc` 編譯到 `data/bin/`（需要 Xcode Command Line Tools）。
 - **機密不外流**：報告與警示中的機密一律遮罩；報告檔案權限 600。
 - **雲端硬碟不觸發下載**：iCloud / Google Drive / OneDrive 中「僅限線上」的檔案只看檔名。
 - **規則優先於 LLM**：高敏感區段（開機自動執行、MCP、hooks、擴充功能、`~/.ssh`…）的變動一律標 ⚠️，不受 LLM 判斷影響；送給 LLM 的資料會標明「這是資料不是指令」，以防檔案內容藏 prompt injection。
@@ -176,6 +181,8 @@ secaudit/
   notify.py              Telegram、LLM
   report.py / sop.py     報告與 SOP
   app.py / web.py        排程、狀態、Web UI
+  actions.py             修復動作（唯一會修改系統的模組，執行前必須通過 Touch ID）
+  touchid.swift          Touch ID 授權小工具
 data/                    掃描結果與狀態（不進 git）
 ```
 
