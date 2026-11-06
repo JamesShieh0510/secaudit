@@ -1,10 +1,10 @@
 #!/bin/bash
-# 把機密存進 1Password，並在 .tpl 檔加上 op:// 引用。vault 預設 Private，可用 OP_VAULT 指定。
+# 把機密存進 1Password，並在 .tpl 檔加上 op:// 引用。vault 預設 Personal，可用 OP_VAULT 指定。
 #
 # 用法：
 #   bash scripts/op-store.sh "<項目標題>" 變數1 變數2 ... [--tpl <範本檔>]
 # 例：
-#   OP_VAULT="Private" bash scripts/op-store.sh "secaudit" \
+#   OP_VAULT="Personal" bash scripts/op-store.sh "secaudit" \
 #        TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID OLLAMA_API_KEY --tpl .env.tpl
 #
 # 安全性：
@@ -13,7 +13,7 @@
 set -euo pipefail
 umask 077
 
-VAULT="${OP_VAULT:-Private}"
+VAULT="${OP_VAULT:-Personal}"
 TITLE="${1:?用法：op-store.sh <標題> 變數... [--tpl 檔案]}"
 shift
 VARS=()

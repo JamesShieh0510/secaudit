@@ -91,6 +91,24 @@ def make_handler(engine: Engine, token: str, port: int):
             c = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
             return "sa" in c and secrets.compare_digest(c["sa"].value, token)
 
+        def _live_report(self, name, fmt):
+            """報告依目前的標記重新產生；JSON 讀不到或產生失敗就退回原本存好的檔案。"""
+            from . import report as _report
+            from .sop import build_sop
+            try:
+                with open(os.path.join(REPORTS, name + ".json"), encoding="utf-8") as fh:
+                    payload = json.load(fh)
+                sop = None
+                if not payload.get("sop"):
+                    cfg = load_config()
+                    sop = build_sop(cfg, [{"path": t.path, "display": home_rel(t.path), "label": t.label,
+                                           "enabled": t.enabled} for t in load_targets(cfg)])
+                return _report.render_live(payload, name, sop, fmt).encode("utf-8")
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                return None
+
         def do_GET(self):
             u = urllib.parse.urlparse(self.path)
             qs = urllib.parse.parse_qs(u.query)
@@ -159,11 +177,15 @@ def make_handler(engine: Engine, token: str, port: int):
                 p = os.path.join(REPORTS, "%s.%s" % m.groups())
                 if not os.path.isfile(p):
                     return self._send(404, {"error": "not found"})
-                with open(p, "rb") as fh:
-                    body = fh.read()
+                body = None
+                if m.group(2) in ("html", "md"):
+                    body = self._live_report(m.group(1), m.group(2))
+                if body is None:
+                    with open(p, "rb") as fh:
+                        body = fh.read()
                 ctype = {"html": "text/html; charset=utf-8", "md": "text/markdown; charset=utf-8",
                          "json": "application/json; charset=utf-8"}[m.group(2)]
-                extra = {"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"}
+                extra = {"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'"}
                 if qs.get("dl"):
                     extra["Content-Disposition"] = 'attachment; filename="security-%s.%s"' % m.groups()
                 return self._send(200, body, ctype, extra)
@@ -182,6 +204,13 @@ def make_handler(engine: Engine, token: str, port: int):
                 mode = "quick" if body.get("mode") == "quick" else "full"
                 ok = engine.scan_async(mode, notify_user=bool(body.get("notify", False)))
                 return self._send(200 if ok else 409, {"started": ok})
+            if path == "/api/recheck":
+                # 重新檢查舊報告：只讀取、不修改任何檔案，所以不需要授權
+                name = str(body.get("report", ""))[:32]
+                if not name.replace("-", "").isdigit() or not os.path.isfile(os.path.join(REPORTS, name + ".json")):
+                    return self._send(404, {"started": False, "error": "找不到這份報告"})
+                ok = engine.recheck_async(name)
+                return self._send(200 if ok else 409, {"started": ok, "error": "" if ok else "目前有掃描在進行，請等它完成"})
             if path == "/api/reminder":
                 ok, n, esc = engine.send_reminder(force=True)
                 return self._send(200, {"ok": ok, "items": n, "escalated": esc})
@@ -256,11 +285,23 @@ def make_handler(engine: Engine, token: str, port: int):
                 # 只產生預覽，不修改任何東西
                 from . import actions
                 try:
-                    return self._send(200, actions.make_plan(str(body.get("action", ""))))
+                    return self._send(200, actions.make_plan(str(body.get("action", "")), str(body.get("report", ""))[:32],
+                                                                str(body.get("focus", ""))[:2000]))
                 except KeyError:
                     return self._send(404, {"error": "未知的動作"})
                 except Exception as e:
                     return self._send(500, {"error": "%s: %s" % (type(e).__name__, str(e)[:200])})
+            if path == "/api/actions/all-md":
+                # 全部修復動作的預覽彙整（只讀）
+                from . import actions
+                return self._send(200, {"markdown": actions.all_plans_markdown(str(body.get("report", ""))[:32])})
+            if path == "/api/actions/plan-md":
+                # 修復預覽彙整成 Markdown（只讀）
+                from . import actions
+                text = actions.plan_markdown(str(body.get("plan_id", "")), [str(x) for x in body.get("steps", [])][:5000])
+                if text is None:
+                    return self._send(404, {"error": "預覽已過期，請重新預覽"})
+                return self._send(200, {"markdown": text})
             if path == "/api/actions/run":
                 # 會修改系統：伺服器端一定先跳 Touch ID，通過後才執行預覽過的步驟
                 from . import actions
@@ -277,6 +318,9 @@ def make_handler(engine: Engine, token: str, port: int):
                     opts = actions.yubikey_options(str(body.get("plan_id", "")), [str(x) for x in body.get("steps", [])][:500])
                 elif purpose == "add-key" and isinstance(body.get("reg"), dict):
                     opts = webauthn.request_options("add-key", actions.key_add_binding(body["reg"]))
+                elif purpose == "secure-cfg":
+                    opts = webauthn.request_options("secure-cfg", actions.secure_cfg_binding(
+                        str(body.get("vault", ""))[:100], str(body.get("dir", ""))[:500]))
                 elif purpose == "del-key":
                     opts = webauthn.request_options("del-key", "del|" + str(body.get("id", "")))
                 else:
@@ -303,7 +347,10 @@ def make_handler(engine: Engine, token: str, port: int):
             if path == "/api/secure-settings":
                 # 封存用的 vault / DMG 資料夾決定機密被送去哪裡：一般的「儲存設定」不能改，要另外通過 Touch ID
                 from . import actions
-                ok, msg = actions.secure_settings_update(str(body.get("vault", ""))[:100], str(body.get("dir", ""))[:500])
+                ok, msg = actions.secure_settings_update(str(body.get("vault", ""))[:100], str(body.get("dir", ""))[:500],
+                                                         method=str(body.get("method", "touchid")),
+                                                         assertion=body.get("assertion") if isinstance(body.get("assertion"), dict) else None,
+                                                         port=port)
                 return self._send(200 if ok else 409, {"ok": ok, "error": msg})
             if path in ("/api/ack", "/api/unack"):
                 # 「已確認無害」會降低警示，所以每次新增 / 取消都發 Telegram，讓使用者知道

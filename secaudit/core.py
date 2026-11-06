@@ -8,6 +8,16 @@ from typing import Callable, Dict, List, Optional
 
 HOME = os.path.expanduser("~")
 
+# 測試 / 範例 / 第三方套件目錄：裡面的金鑰、token 幾乎都是假資料或套件作者的測試資料，降為低風險
+FIXTURE_RE = re.compile(
+    r"/(?:tests?|testdata|testing|__tests__|fixtures?|_samples|samples?|examples?|spec|mocks?|vendor|third_party|"
+    r"\.gritmodules|wp-includes|wp-admin|wp-content/(?:plugins|themes)|bower_components|[\w-]+_tests?)/"
+    r"|\.(?:test|spec)\.[a-z]+$|_test\.(?:go|py|rb)$|/test_[^/]+\.py$", re.I)
+
+
+def is_fixture_path(path: str) -> bool:
+    return bool(FIXTURE_RE.search(path or ""))
+
 SEVERITIES = ["high", "medium", "low", "info"]
 SEV_LABEL = {"high": "高", "medium": "中", "low": "低", "info": "資訊"}
 

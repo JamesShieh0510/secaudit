@@ -29,7 +29,7 @@ DEFAULT_CONFIG = {
     "reminder_weekday": 0,          # 0 = 星期一
     "reminder_hour": 9,
     "escalate_days": 7,             # 高風險超過幾天未處理 → 改成每天提醒
-    "secure_vault": "Private",      # 封存含機密的檔案時用的 1Password vault
+    "secure_vault": "Personal",      # 封存含機密的檔案時用的 1Password vault
     "secure_dir": "~/Secure",       # 加密 DMG 存放的資料夾
     "watch_enabled": True,          # 關鍵位置即時監看
     "watch_interval_sec": 10,        # 第一次建立基準時也通知一次
@@ -250,7 +250,8 @@ class Engine:
             "mode": mode, "source": source, "notify": bool(notify_user), "online": bool(online),
             "llm": bool(cfg.get("llm_enabled")) and bool(notify_user), "model": cfg.get("ollama_model"),
             "targets": [{"label": t.label, "path": home_rel(t.path), "exists": os.path.isdir(t.path)} for t in ts] if mode == "full" else [],
-            "targets_note": "" if mode == "full" else "快速掃描不遍歷資料夾，掃描範圍只套用在完整掃描",
+            "targets_note": "" if mode == "full" else
+            "重新檢查只看舊報告提過的檔案與專案，不遍歷資料夾" if mode == "recheck" else "快速掃描不遍歷資料夾，掃描範圍只套用在完整掃描",
             "trigger": trigger or [],
             "quick_interval_min": cfg.get("quick_interval_min"), "full_scan_hour": cfg.get("full_scan_hour"),
         }
@@ -275,6 +276,70 @@ class Engine:
                 left.append(item)
         _write_private(path, left)
         self.status["outbox"] = len(left)
+
+    def recheck(self, name):
+        """重新檢查舊報告：只看舊報告提過的問題、套用目前的規則，存成一份新的報告（模式 recheck）。
+        不更新比對基準（state.json），因為它不是完整掃描，不能拿來判斷「沒有出現的東西就是消失了」。"""
+        if not name.replace("-", "").isdigit():
+            return None
+        old = _read(os.path.join(REPORTS, name + ".json"), None)
+        if not old:
+            self.status["last_error"] = "找不到報告 %s" % name
+            return None
+        if not self.lock.acquire(blocking=False):
+            return None
+        try:
+            self.cancel.clear()
+            cfg = load_config()
+            self.status.update(running=True, mode="recheck", phase="重新檢查 %s" % name, current="",
+                               started=time.strftime("%H:%M:%S"), last_error="")
+            cache = _read(os.path.join(DATA, "cache.json"), {})
+            from .scanner import run_recheck
+            online = cfg.get("online", True)
+            result = run_recheck(old, cache=cache, progress=self._progress, cancel=self.cancel, online=online)
+            _write_private(os.path.join(DATA, "cache.json"), cache)
+            if result["cancelled"]:
+                self.status["phase"] = "已取消"
+                return None
+            excluded_carry = result.pop("_excluded_carry", [])
+            result["settings"] = self.settings_snapshot(cfg, "recheck", "manual", False, online)
+            from . import acks
+            from .diff import finding_key
+            from .recheck import compare as rc_compare
+            from .reminders import age_days
+            acks.apply(result)
+            state = _read(os.path.join(DATA, "state.json"), {})
+            backfill_first_seen(state)
+            for f in result["findings"]:
+                ent = ((state.get("findings") or {}).get(f.get("scope"), {}) or {}).get(finding_key(f))
+                if ent and ent.get("first_seen"):
+                    f["first_seen"] = ent["first_seen"]
+                    f["age_days"] = age_days(ent["first_seen"])
+            result["recheck"] = dict(rc_compare(old, result, excluded_carry), of=name, of_started=old.get("started", ""),
+                                     of_mode=old.get("mode", ""))
+            from .core import home_rel
+            sop = build_sop(cfg, [{"path": t.path, "display": home_rel(t.path), "label": t.label, "enabled": t.enabled}
+                                  for t in load_targets(cfg)])
+            new_name = report.save_reports(result, REPORTS, None, "", sop)
+            self._prune_reports(cfg)
+            c = result["recheck"]["counts"]
+            self.status.update(last_report=new_name, last_check=time.strftime("%H:%M:%S"),
+                               phase="完成：已改善 %d、規則排除 %d、等級改變 %d、仍存在 %d、新出現 %d" % (
+                                   c["resolved"], c["excluded"], c["reclassified"], c["still"], c["new"]))
+            return new_name
+        except Exception as e:
+            self.status["last_error"] = "%s: %s" % (type(e).__name__, str(e)[:200])
+            traceback.print_exc()
+            return None
+        finally:
+            self.status["running"] = False
+            self.lock.release()
+
+    def recheck_async(self, name):
+        if self.status["running"]:
+            return False
+        threading.Thread(target=self.recheck, args=(name,), daemon=True).start()
+        return True
 
     def scan_async(self, mode, notify_user=True):
         if self.status["running"]:

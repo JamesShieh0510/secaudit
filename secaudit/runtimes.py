@@ -44,8 +44,15 @@ def _run_version(path, args, cache):
         st = os.stat(path)
     except OSError:
         return ""
-    key = "%s|%s|%d" % (path, " ".join(args), int(st.st_mtime))
-    if key in cache:
+    rp = os.path.realpath(path)
+    try:
+        mt = int(max(st.st_mtime, os.stat(rp).st_mtime))
+    except OSError:
+        mt = int(st.st_mtime)
+    key = "%s|%s|%d" % (path, " ".join(args), mt)
+    # 代理程式（corepack 的 pnpm/yarn、rustup 的 rustc/cargo、pyenv/asdf 的 shims）本身不會變，實際版本由背後設定決定：不快取
+    proxy = any(m in rp for m in ("/corepack/", "/.cargo/bin/", "/shims/", "/.rustup/")) or rp.endswith("/rustup")
+    if key in cache and not proxy:
         return cache[key]
     try:
         out = subprocess.run([path] + args, capture_output=True, text=True, timeout=10, env=safe_env())

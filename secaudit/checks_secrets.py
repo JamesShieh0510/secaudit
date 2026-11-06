@@ -4,7 +4,7 @@ import os
 import re
 import stat
 
-from .core import (HOME, Finding, ScanContext, file_fingerprint, home_rel, lstat_safe, mask, mode_str,
+from .core import (HOME, Finding, is_fixture_path, ScanContext, file_fingerprint, home_rel, lstat_safe, mask, mode_str,
                    group_or_world_readable, read_text)
 from .rules import SECRET_RULES, GENERIC_ASSIGN, is_placeholder
 
@@ -13,7 +13,8 @@ CAT = "機密與憑證"
 
 _WEAK_PW = {"postgres", "password", "pass", "root", "admin", "secret", "example", "test", "changeme", "mysql", "redis",
             "guest", "user", "dev", "local", "123456", "pw"}
-_LOCAL_HOST = re.compile(r"^(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal|db|database|postgres|mysql|redis|mongo|mongodb)(?::\d+)?(?:/|$)", re.I)
+# 主機名稱後面可能直接接著程式碼的符號（例如 shell 的 ${DB:-postgres://…@localhost:5436}、markdown 的反引號）
+_LOCAL_HOST = re.compile(r"^(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal|db|database|postgres|mysql|redis|mongo|mongodb)(?::\d+)?(?:[/?#}`'\",;)\]\s]|$)", re.I)
 _DB_PARTS = re.compile(r"^([\w+.-]+://)([^:/@]+):([^@]+)@(.*)$")
 
 
@@ -26,8 +27,15 @@ def _db_url(raw):
     if is_placeholder(pw) or re.match(r"^[%$]|^\*+$", pw):
         return True, "", ""
     local = bool(_LOCAL_HOST.match(rest))
-    sev = "low" if local and (pw.lower() in _WEAK_PW or pw.lower() == user.lower()) else "high"
+    # 連到本機 / docker 內部主機的帳密只在開發環境有效，外人連不到 → 低風險（仍列出，提醒別沿用到正式環境）
+    sev = "low" if local else "high"
     return False, sev, "%s%s:****@%s" % (scheme, user, rest[:60])
+
+
+def _random_enough(v: str) -> bool:
+    """真的 API 金鑰是隨機字元：一定同時有大寫、小寫和數字。"""
+    body = v.split("-", 2)[-1] if v.startswith(("sk-proj-", "sk-svcacct-", "sk-ant-")) else v[3:]
+    return bool(re.search(r"[A-Z]", body) and re.search(r"[a-z]", body) and re.search(r"\d", body))
 
 
 def find_secrets(text: str, generic: bool = False):
@@ -35,6 +43,8 @@ def find_secrets(text: str, generic: bool = False):
     hits = {}
     for rid, name, rx, sev in SECRET_RULES:
         for m in rx.finditer(text):
+            if rid in ("openai-key", "anthropic-key") and not _random_enough(m.group(0)):
+                continue     # 例如網址裡的「nvidia-sk-hynix-…」：全小寫的單字串，不是金鑰
             ev = "（私鑰內容不顯示）" if rid == "private-key" else mask(m.group(0))
             s = sev
             if rid == "db-url":
@@ -92,6 +102,11 @@ def _git_state(path):
     return ""
 
 
+CODE_EXTS = {".go", ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rs", ".java", ".kt", ".rb", ".php", ".cs",
+             ".swift", ".c", ".cc", ".cpp", ".h", ".sh", ".zsh", ".bash", ".ini", ".toml", ".yml", ".yaml", ".sql", ".vue",
+             ".svelte", ".dart", ".scala", ".ex", ".exs", ".gradle", ".tf", ".hcl", ".json", ".xml", ".plist"}
+
+
 def report_file_secrets(ctx: ScanContext, path: str, text: str):
     """遍歷到的一般檔案：同一個檔案裡的所有機密彙整成一筆，附上處理方式。"""
     hits = find_secrets(text)
@@ -105,21 +120,39 @@ def report_file_secrets(ctx: ScanContext, path: str, text: str):
     git = _git_state(path)
     cloud = any(c in path for c in CLOUD_MARKERS)
     notes = []
+    fixture = is_fixture_path(path)
+    if fixture:
+        sev = "low"
+        notes.append("位在測試／範例／第三方套件目錄，多半是假資料；確認不是真的金鑰即可標記無害")
     if git == "tracked":
         notes.append("⚠️ 這個檔案已經提交到 git：就算刪掉，機密仍留在 git 歷史，push 過的話也在遠端")
-        sev = "high" if sev != "low" else "medium"
+        if sev == "medium":
+            sev = "high"
     elif git == "untracked":
         notes.append("在 git 專案裡但沒有提交，請確認它在 .gitignore 裡")
     if cloud:
         notes.append("⚠️ 位在雲端硬碟，已經同步到雲端")
     rel = home_rel(path)
     fix = ("① 改存 1Password：用 scripts/op-store.sh 或 1Password App 建立項目，原本的值改成 op:// 引用；"
-           "整份文件要保留的話，可用 op document create '%s' --vault Private 存成 1Password 文件。"
+           "整份文件要保留的話，可用 op document create '%s' --vault Personal 存成 1Password 文件。"
            "② 只是要封存：hdiutil create -encryption AES-256 -stdinpass -srcfolder '%s' -volname secrets ~/Secure/secrets.dmg"
            "（密碼存 1Password），確認能開啟後刪除原檔並清空垃圾桶。"
            "③ 這些機密如果曾經外流（提交到 git、同步到雲端、分享過），先到各服務撤銷並更換。" % (path, os.path.dirname(path)))
     if git == "tracked":
         fix += "④ 從 git 歷史移除：git filter-repo --invert-paths --path '%s'（會改寫歷史，先和團隊確認）。" % os.path.relpath(path, os.path.dirname(path))
+    code = os.path.splitext(path)[1].lower() in CODE_EXTS
+    if sev == "low":
+        fix = ("多半是測試資料、範例或本機開發用帳密：確認後在報告標記為已確認無害即可；正式環境不要沿用同一組帳密。"
+               "如果其實是真的機密，再照下面處理：" + fix)
+    elif code or git == "tracked":
+        # 程式碼 / 已提交的檔案：封存刪檔會讓專案壞掉，也清不掉 git 歷史，真正的處理是撤銷 + 改讀環境變數
+        fix = ("① 到服務後台撤銷並更換這個機密%s。"
+               "② 程式改成從環境變數讀取，新值放進 .env.tpl 的 op:// 引用（bash ~/op-env-run.sh 執行時注入）。"
+               "不要把整個檔案封存或刪除：%s。" % (
+                   "（已提交到 git，歷史裡永遠有舊值）" if git == "tracked" else "",
+                   "這是程式碼／設定檔，刪掉專案就無法執行" if code else "已提交到 git，刪掉也清不掉歷史")) + \
+              ("③ 從 git 歷史移除（選擇性）：git filter-repo --invert-paths --path '%s'（會改寫歷史，先和團隊確認）。" %
+               os.path.relpath(path, os.path.dirname(path)) if git == "tracked" else "")
     ctx.inv("散落的機密檔案", rel, "%s | %s" % (",".join(sorted(hits)), file_fingerprint(path)))
     ctx.add(Finding(
         rule="file-secrets", severity=sev, category=CAT,
@@ -156,15 +189,16 @@ def check_private_key_file(ctx: ScanContext, path: str):
         return
     encrypted = key_is_encrypted(text)
     in_ssh = path.startswith(os.path.join(HOME, ".ssh") + os.sep)
+    fixture = is_fixture_path(path)
     if group_or_world_readable(st):
         ctx.add(Finding(
-            rule="key-perm", severity="high", category=CAT, title="私鑰權限過寬",
+            rule="key-perm", severity="low" if fixture else "high", category=CAT, title="私鑰權限過寬",
             path=home_rel(path), detail="目前權限 %s，其他使用者可讀。" % mode_str(st),
             why="私鑰應只有自己可讀。", fix="chmod 600 '%s'" % path))
     if encrypted is False:
         ctx.add(Finding(
-            rule="key-unencrypted", severity="medium" if in_ssh else "high", category=CAT,
-            title="私鑰沒有密碼保護" + ("" if in_ssh else "（且不在 ~/.ssh）"),
+            rule="key-unencrypted", severity="low" if fixture else ("medium" if in_ssh else "high"), category=CAT,
+            title="私鑰沒有密碼保護" + ("（測試／範例／第三方套件目錄）" if fixture else "" if in_ssh else "（且不在 ~/.ssh）"),
             path=home_rel(path),
             why="沒有密碼保護的私鑰，被複製走就能直接使用。",
             fix="ssh-keygen -p -f '%s'（加上密碼），或改用 1Password SSH Agent。" % path))

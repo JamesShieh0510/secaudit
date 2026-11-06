@@ -108,7 +108,7 @@ P=~/Library/LaunchAgents/pm2.$(whoami).plist; cp "$P" /tmp/pm2.plist && rm -f "$
 
 ```bash
 # 逐一隱藏輸入、建立 1Password 項目，並產生 .env.tpl（只含 op:// 引用）
-OP_VAULT="Private" bash scripts/op-store.sh "secaudit" \
+OP_VAULT="Personal" bash scripts/op-store.sh "secaudit" \
      TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID OLLAMA_API_KEY --tpl .env.tpl
 ```
 
@@ -159,7 +159,7 @@ TELEGRAM_BOT_TOKEN={{ op://<vault>/<item>/TELEGRAM_BOT_TOKEN }}
 | 機密格式、可疑指令規則 | `secaudit/rules.py` | |
 | 視為可信任的 plugin marketplace | `secaudit/checks_ai.py` 的 `TRUSTED_MARKETPLACES` | 只檢查高風險隱藏字元，減少官方說明文件的誤報 |
 | 即時監看的位置 | `secaudit/watch.py` 的 `build_watch_list()` | |
-| 1Password vault | `OP_VAULT` 環境變數（`scripts/op-store.sh`） | 預設 `Private` |
+| 1Password vault | `OP_VAULT` 環境變數（`scripts/op-store.sh`） | 預設 `Personal`（個人帳號的預設 vault） |
 
 ## 限制
 

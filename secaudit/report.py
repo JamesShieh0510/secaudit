@@ -1,5 +1,6 @@
 """輸出 Markdown（給其他 AI 處理）與 HTML（給人看）報告。"""
 import html
+import urllib.parse
 import json
 import math
 import os
@@ -13,6 +14,89 @@ CAT_ORDER = ["入侵跡象", "AI 與 Agent", "機密與憑證", "瀏覽器", "�
 
 
 SOURCE_LABEL = {"manual": "手動", "scheduler": "排程", "watch": "即時監看"}
+
+
+FIX_LABEL = {"secure-files-1p": "🔧 修復：存進 1Password", "secure-files-dmg": "🔧 修復：加密封存 DMG",
+             "fix-key-perms": "🔧 修復：權限改成 600", "redact-transcripts": "🔧 修復：遮罩對話紀錄",
+             "upgrade-runtimes": "🔧 修復：升級執行環境"}
+
+
+def _actions_for(rule, path="", detail=""):
+    try:
+        from .actions import actions_for
+        return actions_for(rule, path, detail)
+    except Exception:
+        return []
+
+
+def _batch_fix(result, name, e):
+    """報告右上角：每種修復動作一顆「批次修復」按鈕（帶到 Web UI 預覽全部項目，勾選後授權執行）。"""
+    if not name:
+        return ""
+    cnt = {}
+    for f in result.get("findings", []):
+        for a in _actions_for(f.get("rule", ""), f.get("path", ""), f.get("detail", "")):
+            cnt[a] = cnt.get(a, 0) + 1
+    if not cnt:
+        return ""
+    order = ["secure-files-1p", "secure-files-dmg", "fix-key-perms", "redact-transcripts", "upgrade-runtimes"]
+    btns = "".join('<a class="btn fixbatch" target="_blank" href="/?fix=%s&amp;report=%s" title="預覽這份報告裡所有可以這樣修的項目，勾選後授權執行">%s（%d 項）</a> ' % (
+        e(a), e(name), e(FIX_LABEL.get(a, a).replace("🔧 修復：", "🔧 批次：")), cnt[a]) for a in order if a in cnt)
+    btns += '<a class="btn fixbatch" target="_blank" href="/?allmd=1&amp;report=%s" title="所有修復動作的預覽＋需要手動處理的問題，彙整成一份 Markdown（只讀）">⬇ 全部修復預覽 Markdown</a>' % e(name)
+    return '<div class="fixbatchrow" style="margin:6px 0;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">%s</div>' % btns
+
+
+MODE_LABEL = {"full": "完整掃描", "quick": "快速掃描", "recheck": "重新檢查舊報告"}
+RC_LABEL = [("resolved", "✅ 已改善", "舊報告之後檔案有變動（修改、刪除、升級），問題已經不見"),
+            ("excluded", "🧹 規則更新後排除", "檔案沒變，但目前的規則不再判定為問題（誤報已修正）"),
+            ("reclassified", "↕️ 風險等級改變", "問題還在，目前的規則給了不同的等級"),
+            ("new", "🆕 新出現", "舊報告沒有，這次才看到")]
+SEV_SHORT = {"high": "高", "medium": "中", "low": "低", "info": "資訊"}
+
+
+def _recheck_md(rc):
+    c = rc["counts"]
+    out = ["## 重新檢查結果（對照報告 %s）" % rc.get("of", ""), "",
+           "- 已改善 %d ・ 規則更新後排除 %d ・ 風險等級改變 %d ・ 仍存在 %d ・ 新出現 %d" % (
+               c["resolved"], c["excluded"], c["reclassified"], c["still"], c["new"]), ""]
+    for k, label, why in RC_LABEL:
+        if not rc.get(k):
+            continue
+        out += ["### %s（%d）" % (label, c[k]), "", "> " + why, "", "| 等級 | 問題 | 路徑 |", "|---|---|---|"]
+        for f in rc[k][:300]:
+            sev = SEV_SHORT.get(f.get("severity"), "")
+            if f.get("old_severity"):
+                sev = "%s→%s" % (SEV_SHORT.get(f["old_severity"], ""), sev)
+            out.append("| %s | %s | %s |" % (sev, _md(f.get("title")), _md(f.get("path"))))
+        if c[k] > 300:
+            out.append("| | …另外 %d 項 | |" % (c[k] - 300))
+        out.append("")
+    return out
+
+
+def _recheck_html(rc, e):
+    c = rc["counts"]
+    p = ['<div class="card" style="margin-top:12px;border-left:4px solid var(--ok)"><b>🔁 重新檢查結果</b>'
+         '<span class="muted">　對照報告 <a href="/reports/%s.html">%s</a>（%s）</span>'
+         '<div style="margin-top:6px">✅ 已改善 <b>%d</b> ・ 🧹 規則更新後排除 <b>%d</b> ・ ↕️ 等級改變 <b>%d</b> ・ 仍存在 <b>%d</b> ・ 🆕 新出現 <b>%d</b></div>'
+         '<div class="muted" style="margin-top:4px">只重新檢查舊報告提過的檔案與專案（固定位置全部重跑），並套用目前的規則；'
+         '勒索軟體這類要統計整個資料夾的問題沿用舊結果，需完整掃描才能重新確認。</div>' % (
+             e(rc.get("of")), e(rc.get("of")), e(rc.get("of_started")),
+             c["resolved"], c["excluded"], c["reclassified"], c["still"], c["new"])]
+    for k, label, why in RC_LABEL:
+        if not rc.get(k):
+            continue
+        rows = []
+        for f in rc[k]:
+            sev = e(SEV_SHORT.get(f.get("severity"), ""))
+            if f.get("old_severity"):
+                sev = "%s→%s" % (e(SEV_SHORT.get(f["old_severity"], "")), sev)
+            rows.append('<tr class="row"><td>%s</td><td>%s</td><td><code>%s</code></td></tr>' % (sev, e(f.get("title")), e(f.get("path"))))
+        p.append('<details class="cat" style="margin-top:8px"><summary><b>%s</b>（%d）<span class="muted">　%s</span></summary>'
+                 '<table><thead><tr><th>等級</th><th>問題</th><th>路徑</th></tr></thead><tbody class="pg" data-size="50">%s</tbody></table></details>'
+                 % (label, c[k], e(why), "".join(rows)))
+    p.append('</div>')
+    return "".join(p)
 
 
 def _sorted(findings):
@@ -44,10 +128,12 @@ def to_markdown(result, changes=None, summary="", sop=None):
         "- 統計：讀取 %(files_read)d 個檔案，略過 %(dataless_skipped)d 個雲端僅限線上的檔案，錯誤 %(errors)d" % result["stats"],
         "- 結果：高 %d、中 %d、低 %d、資訊 %d" % (c["high"], c["medium"], c["low"], c["info"]), "",
     ]
+    if result.get("recheck"):
+        out += _recheck_md(result["recheck"])
     st = result.get("settings")
     if st:
         out += ["## 本次套用的設定", "",
-                "- 模式：%s（%s觸發）" % ("完整掃描" if st["mode"] == "full" else "快速掃描", SOURCE_LABEL.get(st["source"], st["source"])),
+                "- 模式：%s（%s觸發）" % (MODE_LABEL.get(st["mode"], st["mode"]), SOURCE_LABEL.get(st["source"], st["source"])),
                 "- 掃描範圍：%s" % ("；".join("%s（%s）%s" % (t["label"], t["path"], "" if t["exists"] else "⚠️未掛載") for t in st["targets"])
                                   or st.get("targets_note") or "—"),
                 "- 連網查詢 CVE / 版本：%s ・ Telegram 通知：%s ・ AI 摘要：%s" % (
@@ -83,7 +169,10 @@ def to_markdown(result, changes=None, summary="", sop=None):
                 out.append("- **已存在**：%d 天（第一次出現 %s）" % (f.get("age_days", 0), f["first_seen"][:10]))
             for label, k in (("規則", "rule"), ("路徑", "path"), ("細節", "detail"), ("證據（已遮罩）", "evidence"),
                              ("風險", "why"), ("建議", "fix")):
-                if f.get(k):
+                if f.get(k) and k == "detail" and "\n" in f[k]:
+                    out.append("- **%s**：" % label)
+                    out += ["  - %s" % _md(x.strip().lstrip("•").strip()) for x in f[k].splitlines() if x.strip()]
+                elif f.get(k):
                     out.append("- **%s**：%s" % (label, _md(f[k])))
             out.append("")
     if sop:
@@ -111,7 +200,7 @@ details{background:var(--card);border:1px solid var(--line);border-left:4px soli
 summary{cursor:pointer;font-weight:600;list-style:none}summary::-webkit-details-marker{display:none}
 .tag{display:inline-block;font-size:12px;padding:1px 8px;border-radius:10px;background:var(--code);color:var(--muted);margin-right:6px;font-weight:500}
 code,.ev{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;background:var(--code);padding:1px 6px;border-radius:5px;word-break:break-all}
-dl{display:grid;grid-template-columns:90px 1fr;gap:4px 12px;margin:10px 0 0;font-size:14px}dt{color:var(--muted)}dd{margin:0;word-break:break-word}
+dl{display:grid;grid-template-columns:90px 1fr;gap:4px 12px;margin:10px 0 0;font-size:14px}dt{color:var(--muted)}dd{margin:0;word-break:break-word}dd.ml{white-space:pre-wrap}
 table{width:100%;border-collapse:collapse;font-size:13px;background:var(--card);border-radius:10px;overflow:hidden}
 td,th{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top;word-break:break-word}
 .filter{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0;position:sticky;top:0;background:var(--bg);padding:8px 0;z-index:2}
@@ -158,12 +247,30 @@ const RPT=document.body.dataset.report||'';
 document.querySelectorAll('.ackbtn').forEach(b=>{
  if(location.protocol!=='http:'||!RPT){b.parentElement.style.display='none';return;}
  b.onclick=async()=>{const msg=b.nextElementSibling;
-  if(!confirm('確定這個問題是無害的嗎？\n\n標記後它會移到「已確認無害」，不再計入風險；若是檔案，內容一改變標記就會失效。\n這個操作會發 Telegram 通知。'))return;
+  // 不用 confirm()：瀏覽器可能會靜默擋掉對話框，看起來就像按鈕沒反應。改成再按一次確認
+  if(!b.dataset.arm){b.dataset.arm='1';b.dataset.label=b.textContent;b.textContent='確定無害？再按一次';
+   msg.textContent='標記後移到「已確認無害」、不計入風險；檔案內容一改變標記就失效。會發 Telegram 通知。';
+   clearTimeout(b._t);b._t=setTimeout(()=>{delete b.dataset.arm;b.textContent=b.dataset.label;msg.textContent='';},8000);return;}
+  clearTimeout(b._t);delete b.dataset.arm;b.textContent=b.dataset.label;
   b.disabled=true;msg.textContent='處理中…';
   try{const r=await fetch('/api/ack',{method:'POST',headers:{'Content-Type':'application/json','X-Secaudit':'1'},
     body:JSON.stringify({report:RPT,key:b.dataset.key})});const j=await r.json();
-   msg.textContent=j.ok?'已標記，下一次掃描起生效（可在 Web UI 取消）':'失敗：'+(j.error||r.status);if(!j.ok)b.disabled=false;}
+   msg.textContent=j.ok?'已標記，重新整理頁面就會移到「已確認無害」（可在 Web UI 取消）':'失敗：'+(j.error||r.status);if(!j.ok)b.disabled=false;}
   catch(e){msg.textContent='失敗：'+e;b.disabled=false;}};});
+if(location.protocol!=='http:'||!RPT)document.querySelectorAll('.fixbatchrow').forEach(x=>x.style.display='none');
+const rb=document.getElementById('recheckBtn');
+if(rb){if(location.protocol!=='http:'||!RPT){rb.style.display='none';}else rb.onclick=async()=>{const m=document.getElementById('recheckMsg');
+ rb.disabled=true;m.textContent='送出中…';
+ try{const r=await fetch('/api/recheck',{method:'POST',headers:{'Content-Type':'application/json','X-Secaudit':'1'},body:JSON.stringify({report:RPT})});
+  const j=await r.json();if(!j.started){m.textContent='無法開始：'+(j.error||r.status);rb.disabled=false;return;}
+  // 重新檢查的結果是「另一份新報告」，這一頁不會變：輪詢進度，完成後給新報告的連結
+  m.textContent='重新檢查中…';
+  const poll=async()=>{try{const st=(await (await fetch('/api/state')).json()).status||{};
+    if(st.running){m.textContent='重新檢查中…'+(st.phase?'（'+st.phase+(st.current?'：'+st.current:'')+'）':'');return setTimeout(poll,2000);}
+    if(st.last_error){m.textContent='失敗：'+st.last_error;rb.disabled=false;return;}
+    const n=st.last_report;m.innerHTML=n&&n!==RPT?'✅ 完成：'+(st.phase||'')+'　<a class="btn" href="/reports/'+encodeURIComponent(n)+'.html">開啟新報告 '+n+' →</a>'
+      :'完成，請到 Web UI 的報告清單查看';rb.disabled=false;}catch(e){setTimeout(poll,3000);}};
+  setTimeout(poll,1500);}catch(e){m.textContent='失敗：'+e;rb.disabled=false;}};}
 document.querySelectorAll('.pg').forEach(paginate);
 """
 
@@ -204,7 +311,10 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
          '<title>安全掃描報告</title><style>%s</style></head><body data-report="%s"><div class="wrap">' % (CSS, e(name)),
          '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">'
          '<div><h1>🛡 安全掃描報告</h1><div class="muted">%s ・ %s ・ 耗時 %s 秒 ・ 模式 %s</div></div><div>%s</div></div>' % (
-             e(result["host"]), e(result["started"]), e(result["duration_sec"]), e(result["mode"]), md_button)]
+             e(result["host"]), e(result["started"]), e(result["duration_sec"]), e(MODE_LABEL.get(result["mode"], result["mode"])),
+             md_button + _batch_fix(result, name, e) + (' <button type="button" class="tool" id="recheckBtn" title="只重新檢查這份報告提過的問題，並套用目前的規則">'
+                          '🔁 重新檢查這份報告</button><div class="muted" id="recheckMsg" style="font-size:12px;margin-top:4px"></div>'
+                          if name and result["mode"] in ("full", "recheck") else ""))]
     overdue = sum(1 for f in fs if f["severity"] == "high" and (f.get("age_days") or 0) >= 7)
     if overdue:
         p.append('<div class="card" style="margin-top:12px;border-left:4px solid var(--high)">⏰ <b>%d 個高風險已超過 7 天未處理</b>，'
@@ -226,6 +336,8 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
              '讀取 %d 個檔案 ・ 略過 %d 個雲端僅限線上檔案 ・ 錯誤 %d</div></div></div>' % (
                  "<br>".join("%s<br><code>%s</code>" % (e(t["label"]), e(t["path"])) for t in result["targets"]) or "固定位置檢查（快速模式）",
                  st["files_read"], st["dataless_skipped"], st["errors"]))
+    if result.get("recheck"):
+        p.append(_recheck_html(result["recheck"], e))
     st = result.get("settings")
     if st:
         tl = "".join('<div>%s <code>%s</code>%s</div>' % (e(t["label"]), e(t["path"]), "" if t["exists"] else ' <b class="att">未掛載</b>')
@@ -234,7 +346,7 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
         p.append('<div class="card" style="margin-top:12px"><b>本次套用的設定</b>'
                  '<div class="muted" style="margin:4px 0 8px">%s ・ %s觸發%s ・ 連網查詢 %s ・ Telegram %s ・ AI 摘要 %s</div>'
                  '<div style="font-size:13px">%s</div></div>' % (
-                     "完整掃描" if st["mode"] == "full" else "快速掃描", e(SOURCE_LABEL.get(st["source"], st["source"])),
+                     MODE_LABEL.get(st["mode"], st["mode"]), e(SOURCE_LABEL.get(st["source"], st["source"])),
                      ("（%s）" % e("、".join(st["trigger"][:3]))) if st.get("trigger") else "",
                      on(st["online"]), on(st["notify"]), on(st["llm"]), tl))
     if changes is not None:
@@ -266,9 +378,13 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
         for label, k in (("路徑", "path"), ("細節", "detail"), ("證據", "evidence"), ("為什麼危險", "why"), ("建議", "fix")):
             if f.get(k):
                 val = '<span class="ev">%s</span>' % e(f[k]) if k in ("path", "evidence") else e(f[k])
-                out.append('<dt>%s</dt><dd>%s</dd>' % (label, val))
+                out.append('<dt>%s</dt><dd%s>%s</dd>' % (label, ' class="ml"' if "\n" in str(f[k]) else "", val))
+        fixes = "".join(
+            '<a class="btn" target="_blank" href="/?fix=%s&amp;report=%s&amp;path=%s" title="到 Web UI 預覽修復步驟，授權後才會執行">%s</a>' % (
+                e(a), e(name), e(urllib.parse.quote(f.get("path") or "")), e(FIX_LABEL.get(a, a)))
+            for a in (_actions_for(f.get("rule", ""), f.get("path", ""), f.get("detail", "")) if name else []))
         out.append('</dl><div class="ackrow"><button type="button" class="ackbtn tool" data-key="%s">✅ 標記為已確認無害</button>'
-                   '<span class="muted ackmsg"></span></div></details>' % e(finding_key(f)))
+                   '<span class="muted ackmsg"></span>%s</div></details>' % (e(finding_key(f)), fixes))
         return "".join(out)
 
     # 依重要性分段收合：高風險展開；中 / 低風險收合，且同分類超過 3 項再分一層
@@ -328,7 +444,7 @@ def save_reports(result, reports_dir, changes=None, summary="", sop=None):
     os.makedirs(reports_dir, mode=0o700, exist_ok=True)
     name = result["started"].replace("-", "").replace(":", "").replace(" ", "-")
     base = os.path.join(reports_dir, name)
-    payload = dict(result, changes=changes, summary=summary)
+    payload = dict(result, changes=changes, summary=summary, sop=sop)
     md = to_markdown(result, changes, summary, sop)
     for ext, content in ((".json", json.dumps(payload, ensure_ascii=False, indent=1)), (".md", md),
                          (".html", to_html(result, changes, summary, sop, md_text=md, name=name))):
@@ -336,3 +452,14 @@ def save_reports(result, reports_dir, changes=None, summary="", sop=None):
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(content)
     return name
+
+
+def render_live(payload, name, sop=None, fmt="html"):
+    """用報告的 JSON 重新產生 HTML / Markdown，並套用目前的「已確認無害」標記。"""
+    from . import acks
+    d = acks.live_view(payload)
+    sop = payload.get("sop") or sop
+    md = to_markdown(d, d.get("changes"), d.get("summary", ""), sop)
+    if fmt == "md":
+        return md
+    return to_html(d, d.get("changes"), d.get("summary", ""), sop, md_text=md, name=name)

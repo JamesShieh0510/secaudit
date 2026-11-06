@@ -3,7 +3,7 @@ import os
 import re
 import stat
 
-from .core import HOME, Finding, ScanContext, file_fingerprint, home_rel, lstat_safe, is_dataless
+from .core import HOME, Finding, is_fixture_path, ScanContext, file_fingerprint, home_rel, lstat_safe, is_dataless
 from .checks_persistence import _signature
 
 CAT = "入侵跡象"
@@ -100,6 +100,13 @@ RANSOM_NOTE = re.compile(
     r"(?i)^(?:_readme\.txt|!+\s*read[_\- ]?me\s*!+.*|.*(?:decrypt|ransom|recover[_\- ]?(?:my|your|all)?[_\- ]?files|"
     r"restore[_\- ]?(?:my|your|all)?[_\- ]?files|unlock[_\- ]?(?:my|your)?[_\- ]?files|how[_\- ]?to[_\- ]?(?:back|get|return|recover)|"
     r"your[_\- ]?files[_\- ]?(?:are|were)?[_\- ]?encrypted).*\.(?:txt|html?|hta|rtf|png|url))$")
+# 工具固定產生的同名檔（例如 Sui / Move 的鎖定檔 Move.locked），不是被加密的檔案
+BENIGN_NAMES = {"move.locked"}
+# 「原副檔名.xxx」裡常見的正常後綴：壓縮、程式碼產生檔、測試期望值、備份
+BENIGN_EXT = {"gz", "bz2", "xz", "zst", "zstd", "lz4", "deflate", "br", "zip", "7z", "tar", "tgz", "z",
+              "go", "ts", "js", "py", "rs", "rb", "java", "kt", "swift", "dart", "tmpl", "tpl", "j2", "erb", "liquid",
+              "want", "golden", "expected", "out", "snap", "orig", "bak", "old", "tmp", "swp", "map", "lock",
+              "gpg", "asc", "sig", "sha256", "md5", "part", "crdownload", "download", "icloud", "meta", "license"}
 RANSOM_EXT = {"locked", "encrypted", "crypted", "crypt", "lockbit", "ryk", "wncry", "wcry", "cerber", "locky", "zepto",
               "djvu", "makop", "phobos", "eking", "devos", "dharma", "onion", "rhysida", "akira", "8base", "medusa",
               "kraken", "hive", "conti", "babuk", "lockfile", "encrypt", "enc1", "cryptolocker", "darkness", "nochance"}
@@ -117,14 +124,20 @@ class RansomTracker:
         if RANSOM_NOTE.match(fn):
             self.notes.append(os.path.join(dp, fn))
             return
-        parts = fn.lower().rsplit(".", 2)
-        if len(parts) == 3 and parts[1] in DOC_EXT and parts[2] not in DOC_EXT:
-            ext = parts[2]
-            d = self.dirs.setdefault((dp, ext), [0, fn])
-            d[0] += 1
-        elif len(parts) >= 2 and parts[-1] in RANSOM_EXT:
-            d = self.dirs.setdefault((dp, "*" + parts[-1]), [0, fn])
-            d[0] += 1
+        low = fn.lower()
+        if low in BENIGN_NAMES or is_fixture_path(dp + "/"):
+            return
+        parts = low.rsplit(".", 2)
+        if len(parts) >= 2 and parts[-1] in RANSOM_EXT:      # 已知勒索副檔名優先（門檻較低）
+            key = (dp, "*" + parts[-1])
+        elif len(parts) == 3 and parts[1] in DOC_EXT and parts[2] not in DOC_EXT and parts[2] not in BENIGN_EXT:
+            key = (dp, parts[2])
+        else:
+            return
+        d = self.dirs.setdefault(key, [0, fn, set()])
+        d[0] += 1
+        if len(d[2]) < 10:
+            d[2].add(low)
 
     def report(self, ctx: ScanContext):
         for p in self.notes[:50]:
@@ -135,13 +148,18 @@ class RansomTracker:
                 fix="立刻中斷網路（Wi-Fi、拔網路線、退出 NAS 掛載），不要關機、不要付款；"
                     "用另一台裝置查看這個檔案的內容與檔案修改時間，並確認備份是否完好。"))
         by_ext = {}
-        for (dp, ext), (n, sample) in self.dirs.items():
-            e = by_ext.setdefault(ext, [0, 0, sample, dp])
+        for (dp, ext), (n, sample, names) in self.dirs.items():
+            e = by_ext.setdefault(ext, [0, 0, sample, dp, set()])
             e[0] += n
             e[1] += 1
-        for ext, (n, ndirs, sample, dp) in by_ext.items():
+            if len(e[4]) < 10:
+                e[4].update(names)
+        for ext, (n, ndirs, sample, dp, names) in by_ext.items():
             known = ext.startswith("*")
             if n < (5 if known else 30) or (not known and ndirs < 3):
+                continue
+            # 勒索軟體加密的是各式各樣的檔案；全部都叫同一個名字（每個專案一份 xxx.locked）是工具產生的，不算
+            if len(names) < 3:
                 continue
             ctx.inv("勒索軟體跡象", "副檔名 .%s" % ext.lstrip("*"), "%d 個檔案 / %d 個資料夾" % (n, ndirs))
             ctx.add(Finding(

@@ -94,3 +94,19 @@ def apply(result):
         moved.append(f)
     result["findings"] = keep
     result["acknowledged"] = moved
+
+
+def live_view(payload):
+    """看報告時套用「現在」的標記：報告存檔後才標記的問題移到已確認無害，取消標記的移回來。
+    不改報告檔本身，只回傳新的一份（給 Web UI 顯示用）。"""
+    import copy
+    d = copy.deepcopy(payload)
+    pool = list(d.get("findings") or [])
+    for f in d.get("acknowledged") or []:
+        f = dict(f)
+        f.pop("ack", None)
+        pool.append(f)
+    d["findings"] = pool
+    d["acknowledged"] = []
+    apply(d)
+    return d

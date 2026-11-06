@@ -1,4 +1,5 @@
 """比對兩次掃描的差異，並依規則先標記「需要注意」的變動（不依賴 LLM 判斷）。"""
+import os
 import re
 import subprocess
 import time
@@ -62,10 +63,41 @@ def compare(prev_state: dict, result: dict):
             if k not in cur_find:
                 changes.append({"type": "resolved", "section": "已解決", "key": f["title"], "severity": f["severity"],
                                 "old": f["path"], "scope": scope})
+    try:
+        prev_ts = time.mktime(time.strptime(prev_state.get("updated", ""), "%Y-%m-%d %H:%M:%S"))
+    except (ValueError, OverflowError):
+        prev_ts = 0
+    for c in changes:
+        if c["type"] == "added" and prev_ts:
+            mt = _item_mtime(c)
+            if mt and mt < prev_ts - 300:
+                # 檔案在上次掃描前就存在，只是這次才被掃到（掃描範圍或規則改了、上次掃描沒跑完）
+                c["type"] = "first_seen"
+                c["file_mtime"] = time.strftime("%Y-%m-%d %H:%M", time.localtime(mt))
+                c["new"] = ("檔案修改時間 %s（早於上次掃描），" % c["file_mtime"]) + (c.get("new") or "")
     for c in changes:
         c["attention"] = (c["type"] in ("added", "changed") and c["section"] in WATCH_SECTIONS) or \
                          (c["type"] == "new_finding" and c.get("severity") in ("high", "medium"))
     return changes, new_state, baseline
+
+
+def _item_mtime(c):
+    """變動項目對應檔案的修改時間：先看清單裡記錄的 mtime，沒有就用項目路徑（「路徑 ▸ 內容」的前半）去查。"""
+    m = re.search(r"mtime=(\d{4}-\d\d-\d\d \d\d:\d\d)", c.get("new") or "")
+    if m:
+        try:
+            return time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M"))
+        except ValueError:
+            pass
+    p = (c.get("key") or "").split(" ▸ ")[0].strip()
+    if p.startswith("~/"):
+        p = os.path.expanduser(p)
+    if p.startswith("/"):
+        try:
+            return os.stat(p).st_mtime
+        except OSError:
+            return None
+    return None
 
 
 def machine_context() -> dict:
@@ -82,7 +114,7 @@ def machine_context() -> dict:
     return ctx
 
 
-TYPE_LABEL = {"added": "新增", "removed": "移除", "changed": "修改", "new_finding": "新問題", "resolved": "已解決"}
+TYPE_LABEL = {"first_seen": "首次掃到", "added": "新增", "removed": "移除", "changed": "修改", "new_finding": "新問題", "resolved": "已解決"}
 
 
 def changes_to_text(changes, limit=80) -> str:

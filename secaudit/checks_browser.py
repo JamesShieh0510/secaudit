@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import time
 import urllib.parse
+import urllib.request
 
 from .core import HOME, Finding, ScanContext, home_rel, safe_env, truncate
 
@@ -241,22 +242,177 @@ def check_extensions(ctx: ScanContext):
             fix="不認得或用不到就移除；需要保留的，在 chrome://extensions 把「網站存取權」改成「點擊時」。"))
 
 
+AUTOMATION_HINTS = [
+    (r"chrome-devtools-mcp", "chrome-devtools-mcp（AI 助理的瀏覽器工具）"),
+    (r"playwright|ms-playwright|--disable-field-trial-config", "Playwright"),
+    (r"puppeteer", "Puppeteer"),
+    (r"selenium|chromedriver", "Selenium / ChromeDriver"),
+    (r"\bclaude\b|claude-code|@anthropic-ai", "Claude Code"),
+    (r"\bcursor\b|Cursor\.app", "Cursor"),
+    (r"\bcodex\b", "Codex"),
+    (r"\bmcp\b|mcp-server|modelcontextprotocol", "MCP 伺服器"),
+    (r"browser-use|browserbase|stagehand", "瀏覽器代理工具"),
+]
+
+
+# 執行檔本身是瀏覽器（排除指令列裡剛好帶著瀏覽器指令的 shell / node 程序）
+BROWSER_EXE = re.compile(r"^(?:Google Chrome(?: for Testing| Canary)?|Chromium|Brave Browser|Microsoft Edge|Arc|Vivaldi"
+                         r"|chrome|chromium|chrome-headless-shell|headless_shell)$")
+
+
+def _ps_info(pid):
+    """回傳 {ppid, user, start, etime, exe, cmd}；程序不存在回傳 None。"""
+    try:
+        out = subprocess.run(["ps", "-o", "ppid=,user=,lstart=,etime=,comm=", "-p", str(pid)], capture_output=True,
+                             text=True, timeout=5, env=safe_env()).stdout.strip()
+        cmd = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, timeout=5,
+                             env=safe_env()).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    t = out.split(None, 8)
+    if len(t) < 9:
+        return None
+    try:
+        start = time.strftime("%Y-%m-%d %H:%M:%S", time.strptime(" ".join(t[2:7]), "%a %b %d %H:%M:%S %Y"))
+    except ValueError:
+        start = " ".join(t[2:7])
+    return {"ppid": int(t[0]), "user": t[1], "start": start, "etime": t[7], "exe": t[8], "cmd": cmd}
+
+
+def _proc_label(info):
+    exe = info["exe"]
+    m = re.search(r"([^/]+)\.app/", exe)
+    name = m.group(1) if m else os.path.basename(exe)
+    hints = [h for rx, h in AUTOMATION_HINTS if re.search(rx, info["cmd"], re.I)]
+    return name + ("（%s）" % "、".join(dict.fromkeys(hints)) if hints else "")
+
+
+def _etime_zh(et):
+    """ps 的 etime（[[天-]時:]分:秒）→ 中文。"""
+    m = re.match(r"(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$", et)
+    if not m:
+        return et
+    d, h, mi = int(m.group(1) or 0), int(m.group(2) or 0), int(m.group(3))
+    return ("%d 天 " % d if d else "") + ("%d 小時 " % h if h else "") + "%d 分鐘" % mi
+
+
+def _lsof(args):
+    try:
+        return subprocess.run(["lsof", "-nP"] + args, capture_output=True, text=True, timeout=10, env=safe_env()).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _debug_detail(pid, line):
+    """整理遠端除錯瀏覽器的時間軸與細節，回傳 (細節文字, 是否為暫時設定檔, 是否對外開放)。"""
+    rows = []
+    info = _ps_info(pid)
+    if info:
+        rows.append("啟動時間：%s（已執行 %s，執行身分 %s）" % (info["start"], _etime_zh(info["etime"]), info["user"]))
+    m = re.search(r"--user-data-dir=(\S+)", line)
+    udd = m.group(1) if m else ""
+    default_dirs = [os.path.join(APP_SUPPORT, d) for _, d in CHROMIUM_BROWSERS]
+    temp_profile = bool(udd) and os.path.realpath(udd) not in [os.path.realpath(d) for d in default_dirs]
+    if udd:
+        rows.append("設定檔：%s%s" % (home_rel(udd), "（暫時 / 獨立的設定檔，不是你平常用的瀏覽器資料）" if temp_profile
+                                      else "（⚠️ 你平常用的瀏覽器資料，裡面有你的登入狀態）"))
+        try:
+            rows.append("開始遠端除錯：%s（DevToolsActivePort 檔案的時間）" % time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(os.stat(os.path.join(udd, "DevToolsActivePort")).st_mtime)))
+        except OSError:
+            pass
+    else:
+        rows.append("設定檔：沒有指定 --user-data-dir，使用的是你平常的瀏覽器資料（⚠️ 裡面有你的登入狀態）")
+    if "--headless" in line:
+        rows.append("模式：無視窗（headless），畫面上看不到這個瀏覽器")
+    # 由誰啟動：往上追父程序
+    chain, p, seen = [], info["ppid"] if info else 0, set()
+    while p > 1 and p not in seen and len(chain) < 8:
+        seen.add(p)
+        pi = _ps_info(p)
+        if not pi:
+            break
+        chain.append("%s［pid %d，%s 啟動］" % (_proc_label(pi), p, pi["start"]))
+        p = pi["ppid"]
+    if chain:
+        rows.append("由誰啟動（由近到遠）：" + " ← ".join(chain))
+    exposed = False
+    port = re.search(r"--remote-debugging-port=(\d+)", line)
+    if port and port.group(1) != "0":
+        port = port.group(1)
+        listen = _lsof(["-a", "-p", str(pid), "-iTCP:%s" % port, "-sTCP:LISTEN"])
+        addrs = sorted(set(re.findall(r"TCP (\S+):%s \(LISTEN\)" % port, listen)))
+        if addrs:
+            exposed = any(a in ("*", "0.0.0.0", "[::]") for a in addrs)
+            rows.append("監聽位址：%s%s" % ("、".join("%s:%s" % (a, port) for a in addrs),
+                                         "（⚠️ 對整個網路開放，同網段的其他電腦也能連進來）" if exposed else "（只限本機）"))
+        clients = {}
+        for l in _lsof(["-iTCP:%s" % port, "-sTCP:ESTABLISHED"]).splitlines()[1:]:
+            c = l.split()
+            if len(c) > 1 and c[1].isdigit() and int(c[1]) != pid:
+                clients[int(c[1])] = True
+        if clients:
+            labels = []
+            for cp in sorted(clients)[:5]:
+                ci = _ps_info(cp)
+                if ci:
+                    labels.append("%s［pid %d，%s 啟動］" % (_proc_label(ci), cp, ci["start"]))
+            rows.append("目前正在控制它的程式：" + "、".join(labels))
+        else:
+            rows.append("目前正在控制它的程式：掃描當下沒有程式連線")
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:%s/json/list" % port, timeout=3) as r:
+                tabs = json.loads(r.read(200000).decode("utf-8", "replace"))
+            pages = [t for t in tabs if t.get("type") == "page"]
+            if pages:
+                rows.append("開著的分頁（%d 個，網址已去掉參數）：" % len(pages))
+                for t in pages[:10]:
+                    u = urllib.parse.urlsplit(t.get("url", ""))
+                    rows.append("  • %s — %s" % (truncate(t.get("title", "") or "（無標題）", 60),
+                                                 truncate(urllib.parse.urlunsplit((u.scheme, u.netloc, u.path, "", "")), 100)))
+            else:
+                rows.append("開著的分頁：沒有")
+        except (OSError, ValueError):
+            pass
+    elif "--remote-debugging-pipe" in line:
+        rows.append("連線方式：pipe（只有啟動它的程式能控制，其他程式連不進來）")
+    return "\n".join(rows), temp_profile, exposed
+
+
 def check_debug_and_theft(ctx: ScanContext):
     ctx.report(CAT, "遠端除錯與 cookie 外流跡象")
     try:
         ps = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=10, env=safe_env()).stdout
     except (OSError, subprocess.TimeoutExpired):
         ps = ""
+    exes = {}
+    try:
+        for l in subprocess.run(["ps", "-axo", "pid=,comm="], capture_output=True, text=True, timeout=10, env=safe_env()).stdout.splitlines():
+            t = l.split(None, 1)
+            if len(t) == 2:
+                exes[t[0]] = t[1].strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
     for line in ps.splitlines():
-        if re.search(r"--remote-debugging-(?:port|pipe)", line) and re.search(r"Chrome|Chromium|Brave|Edge|Arc|chrome", line):
+        if re.search(r"--remote-debugging-(?:port|pipe)", line) and BROWSER_EXE.match(os.path.basename(exes.get(line.split(None, 1)[0], ""))):
+            if "--type=" in line:
+                continue        # 分頁 / GPU 等子程序，只看主程序
+            pid = int(line.split(None, 1)[0])
             m = re.search(r"--remote-debugging-port=(\d+)", line)
+            detail, temp_profile, exposed = _debug_detail(pid, line)
+            pipe_only = not m and "--remote-debugging-pipe" in line
+            low_risk = temp_profile and not exposed
             ctx.add(Finding(
-                rule="browser-remote-debug", severity="high", category=CAT,
-                title="瀏覽器正以遠端除錯模式執行%s" % ("（port %s）" % m.group(1) if m else ""),
-                evidence=truncate(line, 160),
-                why="開著遠端除錯時，本機任何程式都能透過它讀出所有 cookie 和登入狀態，竊密程式常用這招繞過 cookie 加密。"
-                    "如果是你自己在用的 AI 瀏覽器自動化工具（例如 chrome-devtools-mcp），用完請關閉。",
-                fix="關閉這個瀏覽器程序；若不是你啟動的，檢查開機自動執行項目和最近安裝的程式。"))
+                rule="browser-remote-debug", severity="medium" if low_risk or pipe_only and temp_profile else "high",
+                category=CAT,
+                title="瀏覽器正以遠端除錯模式執行%s" % ("（port %s）" % m.group(1) if m else "（pipe）"),
+                detail=detail, evidence=truncate(line, 160),
+                why="開著遠端除錯時，本機任何程式都能透過它讀出這個瀏覽器設定檔裡的所有 cookie 和登入狀態，竊密程式常用這招繞過 cookie 加密。"
+                    + ("這次用的是獨立的暫時設定檔，你平常瀏覽器的登入狀態不在裡面，但在它裡面登入的帳號仍可能被讀走。" if temp_profile else "")
+                    + "如果是你自己在用的 AI 瀏覽器自動化工具（例如 chrome-devtools-mcp、Playwright），用完請關閉。",
+                fix="對照「啟動時間」和「由誰啟動」，回想當時是不是在用 AI 助理、跑自動化測試或爬蟲；"
+                    "是的話用完關閉即可。若時間點你不在電腦前、或啟動它的程式你不認得，"
+                    "先結束這個瀏覽器程序，再檢查開機自動執行項目和最近安裝的程式。"))
     names = {"Cookies", "Login Data", "Cookies.binarycookies", "cookies.sqlite", "key4.db", "logins.json", "Local State", "Web Data"}
     for base in ("/tmp", "/private/var/tmp", "/Users/Shared", os.path.join(HOME, "Downloads"), os.path.join(HOME, "Desktop")):
         for dp, dns, fns in os.walk(base):

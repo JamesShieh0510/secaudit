@@ -18,6 +18,37 @@ LOCKFILES = {"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock
              "poetry.lock", "uv.lock", "Pipfile.lock", "go.mod", "Cargo.lock", "Gemfile.lock", "composer.lock"}
 
 
+
+_YARN_HEAD = re.compile(r'^"?((?:@[^/@\s"]+/)?[^@\s",]+)@[^\n]*:\s*$')
+_YARN_ALIAS = re.compile(r'@npm:((?:@[^/@\s"]+/)?[^@\s",]+)@')
+_YARN_VER = re.compile(r'^\s+version:?\s+"?([^"\s]+)"?')
+
+
+def _yarn_lock(text):
+    """逐行解析 yarn.lock（v1 與 berry）。以前用一條跨行 regex，遇到沒有 version 的段落會指數級回溯、把整個程式卡死。"""
+    out, name = [], None
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        if not line[0].isspace():
+            m = _YARN_HEAD.match(line)
+            name = m.group(1) if m else None
+            a = _YARN_ALIAS.search(line)        # 別名 "typescript3@npm:typescript@^3.9.7"：實際套件是 typescript
+            if name and a:
+                name = a.group(1)
+        elif name:
+            m = _YARN_VER.match(line)
+            if m:
+                out.append(("npm", name, m.group(1)))
+                name = None
+    return out
+
+
+def _npm_alias(eco, n, v):
+    """package-lock 的別名寫法：名稱 typescript3、版本 npm:typescript@3.9.7 → (typescript, 3.9.7)。"""
+    m = re.match(r"^npm:((?:@[^/@]+/)?[^@]+)@(.+)$", v or "") if eco == "npm" else None
+    return (eco, m.group(1), m.group(2)) if m else (eco, n, v)
+
 def _http_json(url, payload=None, timeout=30):
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(url, data=data, headers=UA, method="POST" if data else "GET")
@@ -47,8 +78,7 @@ def parse_lockfile(path: str):
                             walk(v.get("dependencies"))
                 walk(d.get("dependencies"))
         elif name == "yarn.lock":
-            for m in re.finditer(r'^"?((?:@[^/@\s"]+/)?[^@\s",]+)@[^\n]*:\n(?:\s+.*\n)*?\s+version:?\s+"?([^"\s]+)"?', text, re.M):
-                out.append(("npm", m.group(1), m.group(2)))
+            out.extend(_yarn_lock(text))
         elif name == "pnpm-lock.yaml":
             for m in re.finditer(r"^\s{2}'?/?((?:@[^/@\s']+/)?[^@\s'/(]+)[@/](\d[^:'(\s]*)", text, re.M):
                 out.append(("npm", m.group(1), m.group(2)))
@@ -80,7 +110,9 @@ def parse_lockfile(path: str):
                 out.append(("Packagist", p.get("name"), str(p.get("version", "")).lstrip("v")))
     except (ValueError, AttributeError):
         return []
-    return [(e, n, v) for e, n, v in out if n and v]
+    # x.y.z-security 是 npm 官方把惡意套件下架後放的空殼（沒有程式碼），不算風險
+    out = [_npm_alias(e, n, v) for e, n, v in out]
+    return [(e, n, v) for e, n, v in out if n and v and not (e == "npm" and v.endswith("-security"))]
 
 
 # ---------------------------------------------------------------- OSV 查詢
@@ -138,9 +170,16 @@ def check_dependencies(ctx: ScanContext, lockfiles, cache: dict):
     if not lockfiles:
         return
     ctx.report(CAT, "查詢 OSV 漏洞資料庫（%d 個 lockfile）" % len(lockfiles))
-    where = {}
+    where, dormant = {}, set()
     for lf in lockfiles:
         proj = home_rel(os.path.dirname(lf))
+        # 備份碟裡的複本、超過一年沒動的專案：程式不會被執行，漏洞只有重新安裝 / 執行時才有影響
+        try:
+            old = time.time() - os.stat(lf).st_mtime > 365 * 86400
+        except OSError:
+            old = False
+        if old or lf.startswith("/Volumes/"):
+            dormant.add(proj)
         pk = parse_lockfile(lf)
         for p in pk:
             where.setdefault(p, set()).add(proj)
@@ -167,13 +206,17 @@ def check_dependencies(ctx: ScanContext, lockfiles, cache: dict):
         fix = fix_all(ver, name, infos)
         cves = sorted({c for x in infos for c in x.get("cves", [])})
         projs = sorted(where[(eco, name, ver)])
+        idle = not mal and all(p in dormant for p in projs)
+        if idle:
+            sev = "low"
         label = ", ".join(cves[:4]) or ", ".join(ids[:4])
         ctx.inv("有漏洞的套件", "%s %s@%s" % (eco, name, ver), ",".join(sorted(ids)))
         ctx.add(Finding(
             rule="dep-malicious" if mal else "dep-vuln", severity="high" if mal else sev, category=CAT,
             title=("⚠️ 已知惡意套件 %s@%s" if mal else "%s@%s 有 %d 個已知漏洞" % ("%s", "%s", len(ids))) % (name, ver),
             path="；".join(projs[:5]) + (" 等 %d 個專案" % len(projs) if len(projs) > 5 else ""),
-            detail="%s：%s" % (label, "；".join(truncate(x.get("summary", ""), 80) for x in infos[:3])),
+            detail=("（封存專案：在備份碟或超過一年沒更新，降為低風險；要再使用前先升級）" if idle else "") +
+                   "%s：%s" % (label, "；".join(truncate(x.get("summary", ""), 80) for x in infos[:3])),
             evidence="%s 套件" % eco,
             why="這個版本被公開通報有漏洞，攻擊方法通常也已公開。" if not mal else
                 "OSV 把這個版本列為惡意套件（例如被盜帳號發佈的木馬版本）。安裝過就應假設機器已被入侵。",

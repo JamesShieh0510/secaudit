@@ -93,6 +93,7 @@ label.cfg{display:flex;justify-content:space-between;align-items:center;gap:8px;
     <div class="muted">這些動作會修改你的電腦。流程：先預覽步驟、勾選要做的項目，再用 <b>Touch ID</b>（只接受指紋，不能改用密碼）或已註冊的 <b>YubiKey</b> 授權，通過才會執行。</div>
     <div id="keyBox" class="note"></div>
     <div id="actList" class="row" style="margin-top:10px"></div>
+    <div class="row" style="margin-top:6px"><button id="allMd" title="所有修復動作的預覽（預設勾選）＋需要手動處理的問題，彙整成一份 Markdown。只讀，不會執行任何動作">⬇ 下載全部修復預覽 Markdown</button><span class="muted" id="allMdMsg"></span></div>
     <div id="actPlan" style="display:none;margin-top:12px"></div>
     <div id="actStatus" class="note" style="display:none"></div>
     <div id="actRecent"></div>
@@ -122,7 +123,7 @@ label.cfg{display:flex;justify-content:space-between;align-items:center;gap:8px;
         <label class="cfg">高風險超過幾天未處理 → 每天提醒<input type="number" id="c_esc" min="1" max="90" style="width:80px"></label>
         <label class="cfg">封存機密檔案用的 1Password vault<input type="text" id="c_vault" style="max-width:160px"></label>
         <label class="cfg">加密 DMG 存放資料夾<input type="text" id="c_sdir" style="max-width:160px"></label>
-        <div class="row" style="justify-content:flex-end"><button type="button" id="saveSecure">🔒 儲存封存設定（需要 Touch ID）</button></div>
+        <div class="row" style="justify-content:flex-end"><button type="button" id="saveSecure">🔒 儲存封存設定（Touch ID）</button><button type="button" id="saveSecureY" style="display:none">🔑 用 YubiKey 儲存封存設定</button></div>
         <div id="secureMsg" class="muted" style="text-align:right">這兩項決定機密檔案被送去哪裡，修改需要 Touch ID，並會發 Telegram 通知。</div>
       </div>
       <div>
@@ -191,7 +192,7 @@ function renderStatus(st) {
   $("#prog").style.display = st.running ? "" : "none";
   $("#cancel").style.display = st.running ? "" : "none";
   $("#full").disabled = $("#quick").disabled = st.running;
-  $("#stTitle").textContent = st.running ? `掃描中（${st.mode === "full" ? "完整" : "快速"}）` : "狀態";
+  $("#stTitle").textContent = st.running ? `掃描中（${{full:"完整",quick:"快速",recheck:"重新檢查舊報告"}[st.mode] || st.mode}）` : "狀態";
   let t = st.running ? `${esc(st.phase)}　<code>${esc(st.current)}</code>` :
           (st.last_report ? `上次報告 ${esc(st.last_report)}，與前次相比 ${st.last_changes} 項變動` : "尚未掃描") +
           (st.last_check ? `　・ 上次檢查 ${esc(st.last_check)}（沒有變動的排程掃描不另存報告）` : "");
@@ -227,13 +228,21 @@ function renderReports(rp) {
   PG.reports = rp.page || 1;
   $("#reportsNav").innerHTML = navHtml("reports", rp.page || 1, rp.pages || 1, rp.total || 0);
   $("#reports").innerHTML = rs.map(r => `<tr>
-    <td>${esc(r.started)}</td><td class="hide-sm">${r.mode === "full" ? "完整" : "快速"}${r.source ? `<br><span class="muted">${{manual:"手動",scheduler:"排程",watch:"即時監看"}[r.source] || esc(r.source)}${r.notify === false ? "・不通知" : ""}</span>` : ""}</td>
+    <td>${esc(r.started)}</td><td class="hide-sm">${{full:"完整",quick:"快速",recheck:"重新檢查"}[r.mode] || esc(r.mode)}${r.source ? `<br><span class="muted">${{manual:"手動",scheduler:"排程",watch:"即時監看"}[r.source] || esc(r.source)}${r.notify === false ? "・不通知" : ""}</span>` : ""}</td>
     <td class="hide-sm muted" title="${esc((r.targets || []).join("\n"))}">${r.mode === "full" ? `${(r.targets || []).length} 個資料夾` : "—"}</td>
     <td>${pill(r.counts.high,"high")} ${pill(r.counts.medium,"medium")} ${pill(r.counts.low,"low")}</td>
     <td>${r.changes ? `${r.changes}${r.attention ? ` <b style="color:var(--high)">⚠️${r.attention}</b>` : ""}` : "—"}</td>
     <td style="white-space:nowrap"><a class="btn" href="/reports/${esc(r.name)}.html" target="_blank" rel="noopener">檢視</a>
-        <a class="btn" href="/reports/${esc(r.name)}.md?dl=1">MD</a></td></tr>`).join("") ||
+        <a class="btn" href="/reports/${esc(r.name)}.md?dl=1">MD</a>
+        ${r.mode === "full" || r.mode === "recheck" ? `<button class="btn" data-recheck="${esc(r.name)}" title="只重新檢查這份報告提過的問題，並套用目前的規則">🔁 重新檢查</button>` : ""}</td></tr>`).join("") ||
     `<tr><td colspan="6" class="muted">還沒有報告</td></tr>`;
+  document.querySelectorAll("#reports button[data-recheck]").forEach(b => b.onclick = () => recheckReport(b.dataset.recheck, b));
+}
+async function recheckReport(name, b) {
+  if (b) b.disabled = true;
+  const r = await api("/api/recheck", {report: name});
+  if (!r.started && b) { b.textContent = "⏳ " + (r.error || "目前有掃描在進行"); setTimeout(() => { b.disabled = false; b.textContent = "🔁 重新檢查"; }, 4000); }
+  refresh();
 }
 
 function renderConfig(c, s) {
@@ -241,7 +250,8 @@ function renderConfig(c, s) {
     $("#c_quick").value = c.quick_interval_min; $("#c_hour").value = c.full_scan_hour;
     $("#c_online").checked = c.online; $("#c_llm").checked = c.llm_enabled; $("#c_feed").value = c.vulnfeed_hours ?? 6;
     $("#c_rem").checked = c.reminder_enabled ?? true; $("#c_wd").value = c.reminder_weekday ?? 0; $("#c_rh").value = c.reminder_hour ?? 9; $("#c_esc").value = c.escalate_days ?? 7;
-    $("#c_vault").value = c.secure_vault || "Private"; $("#c_sdir").value = c.secure_dir || "~/Secure";
+    $("#c_vault").value = c.secure_vault || "Personal"; $("#c_sdir").value = c.secure_dir || "~/Secure";
+    savedSecure = {vault: $("#c_vault").value, dir: $("#c_sdir").value}; secureDirty();
     $("#c_host").value = c.ollama_host; $("#c_model").value = c.ollama_model; cfgLoaded = true; hostHint();
   }
   const ok = v => v ? '<span style="color:var(--ok)">✓ 已設定</span>' : '<span style="color:var(--medium)">✗ 未設定</span>';
@@ -314,12 +324,23 @@ $("#add").onclick = async () => {
   targets.push({path:p, label:p.split("/").filter(Boolean).pop() || p, kind:"custom", enabled:true});
   $("#newPath").value = ""; await saveTargets(true);
 };
+let savedSecure = {vault: "", dir: ""};
+const secureChanged = () => $("#c_vault").value.trim() !== savedSecure.vault || $("#c_sdir").value.trim() !== savedSecure.dir;
+function secureDirty() {
+  // vault / DMG 資料夾改了但還沒按「🔒 儲存封存設定」：提示，避免以為按一般的「儲存設定」就生效
+  if (secureChanged()) $("#secureMsg").innerHTML = '<span style="color:var(--medium)">⚠️ vault 或 DMG 資料夾已修改、還沒儲存：請按上面的「🔒 儲存封存設定」（需要 Touch ID）</span>';
+  else if (/還沒儲存/.test($("#secureMsg").textContent)) $("#secureMsg").textContent = "這兩項決定機密檔案被送去哪裡，修改需要 Touch ID，並會發 Telegram 通知。";
+}
+$("#c_vault").addEventListener("input", secureDirty); $("#c_sdir").addEventListener("input", secureDirty);
 $("#saveCfg").onclick = async () => {
+  const pendingSecure = secureChanged();
   const r = await api("/api/config", {quick_interval_min:+$("#c_quick").value, full_scan_hour:+$("#c_hour").value, online:$("#c_online").checked,
     llm_enabled:$("#c_llm").checked, ollama_host:$("#c_host").value, ollama_model:$("#c_model").value, vulnfeed_hours:+$("#c_feed").value,
     reminder_enabled:$("#c_rem").checked, reminder_weekday:+$("#c_wd").value, reminder_hour:+$("#c_rh").value, escalate_days:+$("#c_esc").value});
   if (r.error) { $("#cfgMsg").innerHTML = `<span style="color:var(--high)">❌ ${esc(r.error)}</span>`; return; }
-  $("#cfgMsg").textContent = "已儲存，下一次 AI 摘要開始套用"; setTimeout(() => $("#cfgMsg").textContent = "", 3000); cfgLoaded = false;
+  $("#cfgMsg").textContent = "已儲存，下一次 AI 摘要開始套用"; setTimeout(() => $("#cfgMsg").textContent = "", 3000);
+  if (pendingSecure) { await saveSecure(); return; }   // 一般設定存好後，vault / DMG 資料夾另外走 Touch ID
+  cfgLoaded = false;
 };
 function hostHint() {
   const h = $("#c_host").value.trim();
@@ -344,13 +365,23 @@ $("#testOllama").onclick = async () => {
     ? `<span style="color:var(--ok)">✅ 連線成功，模型回覆「${esc(r.reply)}」（${r.seconds} 秒）</span>・主機上有 ${r.models.length} 個模型，點「模型」欄可選擇。記得按「儲存設定」。`
     : `<span style="color:var(--high)">❌ ${esc(r.error || "失敗")}</span>${(r.models || []).length ? `・主機上有：${r.models.slice(0, 6).map(esc).join("、")}${r.models.length > 6 ? "…" : ""}` : ""}`;
 };
-$("#saveSecure").onclick = async () => {
-  $("#saveSecure").disabled = true; $("#secureMsg").textContent = "請看螢幕上的 Touch ID 對話框…";
-  const r = await api("/api/secure-settings", {vault:$("#c_vault").value, dir:$("#c_sdir").value});
+async function saveSecure(method) {
+  method = method === "yubikey" ? "yubikey" : "touchid";
+  const vault = $("#c_vault").value.trim(), dir = $("#c_sdir").value.trim();
+  let assertion = null;
+  $("#saveSecure").disabled = true;
+  if (method === "yubikey") {
+    $("#secureMsg").textContent = "請觸碰 YubiKey…";
+    try { assertion = await yubikeyAssert({purpose: "secure-cfg", vault, dir}); }
+    catch (e) { $("#saveSecure").disabled = false; $("#secureMsg").innerHTML = `<span style="color:var(--high)">❌ ${esc(e.message || e)}（設定沒有改變）</span>`; return; }
+  } else $("#secureMsg").textContent = "請看螢幕上的 Touch ID 對話框（修改 1Password vault / DMG 資料夾）…";
+  const r = await api("/api/secure-settings", {vault, dir, method, assertion});
   $("#saveSecure").disabled = false;
-  $("#secureMsg").innerHTML = r.ok ? '<span style="color:var(--ok)">✅ 已儲存</span>' : `<span style="color:var(--high)">❌ ${esc(r.error || "失敗")}</span>`;
-  cfgLoaded = false;
-};
+  $("#secureMsg").innerHTML = r.ok ? `<span style="color:var(--ok)">✅ 已儲存：vault「${esc($("#c_vault").value.trim())}」</span>` : `<span style="color:var(--high)">❌ ${esc(r.error || "失敗")}（設定沒有改變）</span>`;
+  if (r.ok) cfgLoaded = false;   // 失敗時保留輸入框內容，不要被舊設定蓋回去
+}
+$("#saveSecure").onclick = () => saveSecure("touchid");
+$("#saveSecureY").onclick = () => saveSecure("yubikey");
 $("#remNow").onclick = async () => { const r = await api("/api/reminder", {}); $("#cfgMsg").textContent = r.ok ? `已送出（${r.items} 項${r.escalated ? "，含逾期高風險" : ""}）` : "傳送失敗（已放入待送清單）"; };
 $("#testTg").onclick = async () => { const r = await api("/api/test-telegram", {}); $("#cfgMsg").textContent = r.ok ? "已傳送" : "傳送失敗（請看 PM2 日誌）"; };
 // ---------------- 修復動作（預覽 → Touch ID → 執行）
@@ -419,6 +450,7 @@ async function removeKey(id, method) {
 async function loadActions() {
   const r = await api("/api/actions");
   keyState = {keys: r.keys || [], localhost: !!r.localhost};
+  if ($("#saveSecureY")) $("#saveSecureY").style.display = canKey() ? "" : "none";
   if (!document.activeElement || document.activeElement.id !== "keyName") renderKeys();
   $("#actList").innerHTML = r.catalog.map(a => `<button data-act="${esc(a.id)}">${esc(a.icon)} ${esc(a.title)}</button>${a.hint ? `<span class="muted">${esc(a.hint)}</span>` : ""}`).join("");
   document.querySelectorAll("#actList button[data-act]").forEach(b => b.onclick = () => previewAction(b.dataset.act));
@@ -429,19 +461,37 @@ async function loadActions() {
   $("#actHistory").innerHTML = r.history.length ? r.history.map(h => `<div>${esc(h.time)}　${h.ok ? "✅" : "❌"} ${esc(h.action)}　${esc(h.message)}${h.method ? `　<span class="muted">（${esc(h.method)}）</span>` : ""}</div>`).join("") : "尚無紀錄";
   clearTimeout(actTimer); actTimer = setTimeout(loadActions, r.status.running ? 1500 : 10000);
 }
-async function previewAction(id) {
+async function previewAction(id, report, focus) {
   $("#actPlan").style.display = ""; $("#actPlan").innerHTML = '<span class="muted">產生預覽中…</span>';
-  const p = await api("/api/actions/plan", {action:id});
+  const p = await api("/api/actions/plan", {action:id, report: report || "", focus: focus || ""});
   if (p.error) { $("#actPlan").innerHTML = `<span style="color:var(--high)">❌ ${esc(p.error)}</span>`; return; }
   actPlan = p;
   $("#actPlan").innerHTML = `<b>${esc(p.title)}</b>${p.report ? `<span class="muted">（依據報告 ${esc(p.report)}）</span>` : ""}
     <ul class="muted" style="margin:6px 0;padding-left:20px">${p.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>
-    ${p.steps.length ? p.steps.map(s => `<label class="target" style="cursor:pointer"><input type="checkbox" class="actStep" value="${esc(s.id)}" ${s.default === false ? "" : "checked"}>
+    ${p.steps.length > 1 ? `<div class="row" style="margin:6px 0"><button type="button" id="selRec">只選建議項目</button><button type="button" id="selAll">全選</button><button type="button" id="selNone">全不選</button><span class="muted" id="selCount"></span></div>` : ""}
+    ${p.steps.length ? p.steps.map(s => `<label class="target" style="cursor:pointer"><input type="checkbox" class="actStep" value="${esc(s.id)}" data-def="${s.default === false ? 0 : 1}" ${s.default === false ? "" : "checked"}>
       <span class="p"><b>${esc(s.label)}</b><br><code>${esc(s.detail)}</code></span></label>`).join("") +
-      `<div class="row" style="margin-top:8px"><button class="primary" id="actRun">🔒 以 Touch ID 授權執行</button>${canKey() ? '<button class="primary" id="actRunY">🔑 以 YubiKey 授權執行</button>' : ""}<button id="actCancel">取消</button><span id="actBusy" class="muted" style="display:none">目前有修復動作執行中，完成後才能執行下一個</span></div>`
+      `<div class="row" style="margin-top:8px"><button class="primary" id="actRun">🔒 以 Touch ID 授權執行</button>${canKey() ? '<button class="primary" id="actRunY">🔑 以 YubiKey 授權執行</button>' : ""}<button id="actMd" title="把預覽與目前的勾選彙整成 Markdown，執行前先評估（也可以交給 AI 檢查）">⬇ 下載評估 Markdown</button><button id="actCancel">取消</button><span id="actBusy" class="muted" style="display:none">目前有修復動作執行中，完成後才能執行下一個</span></div>`
       : '<div class="muted">目前沒有需要處理的項目 👍</div>'}`;
   if ($("#actCancel")) $("#actCancel").onclick = () => { $("#actPlan").style.display = "none"; actPlan = null; };
+  const boxes = [...document.querySelectorAll(".actStep")];
+  const count = () => { const n = boxes.filter(x => x.checked).length; if ($("#selCount")) $("#selCount").textContent = `已勾選 ${n} / ${boxes.length} 項`;
+    if ($("#actRun")) $("#actRun").textContent = `🔒 以 Touch ID 授權執行（${n} 項）`; if ($("#actRunY")) $("#actRunY").textContent = `🔑 以 YubiKey 授權執行（${n} 項）`; };
+  boxes.forEach(x => x.onchange = count);
+  if ($("#selRec")) $("#selRec").onclick = () => { boxes.forEach(x => x.checked = x.dataset.def === "1"); count(); };
+  if ($("#selAll")) $("#selAll").onclick = () => { boxes.forEach(x => x.checked = true); count(); };
+  if ($("#selNone")) $("#selNone").onclick = () => { boxes.forEach(x => x.checked = false); count(); };
+  count();
   if ($("#actRun")) $("#actRun").onclick = () => runAction("touchid");
+  if ($("#actMd")) $("#actMd").onclick = async () => {
+    const ids = [...document.querySelectorAll(".actStep:checked")].map(x => x.value);
+    const r = await api("/api/actions/plan-md", {plan_id: actPlan.plan_id, steps: ids});
+    if (!r.markdown) { $("#actStatus").style.display = ""; $("#actStatus").innerHTML = `<span style="color:var(--high)">❌ ${esc(r.error || "失敗")}</span>`; return; }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([r.markdown], {type: "text/markdown;charset=utf-8"}));
+    a.download = `secaudit-plan-${actPlan.action}-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}.md`;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  };
   if ($("#actRunY")) $("#actRunY").onclick = () => runAction("yubikey");
   lockRunButtons();
 }
@@ -482,6 +532,33 @@ function renderRecent(list) {
 }
 loadActions();
 refresh();
+
+// 從報告的「🔧 修復」按鈕進來：?fix=動作&report=報告&path=檔案 → 打開修復預覽（只預覽，授權後才會執行）
+(() => {
+  const q = new URLSearchParams(location.search);
+  const fix = q.get("fix");
+  if (!fix) return;
+  history.replaceState(null, "", location.pathname);
+  setTimeout(() => {
+    previewAction(fix, q.get("report") || "", q.get("path") || "");
+    const c = document.getElementById("actCard"); if (c) c.scrollIntoView({behavior: "smooth"});
+  }, 300);
+})();
+
+function downloadMd(text, fname) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], {type: "text/markdown;charset=utf-8"}));
+  a.download = fname; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+async function downloadAllMd(report) {
+  const m = $("#allMdMsg"); if (m) m.textContent = "產生中…（會查詢 Homebrew 等版本資訊，約 10～30 秒）";
+  const r = await api("/api/actions/all-md", {report: report || ""});
+  if (m) m.textContent = r.markdown ? "已下載" : "❌ " + (r.error || "失敗");
+  if (r.markdown) downloadMd(r.markdown, `secaudit-plan-all-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}.md`);
+}
+$("#allMd").onclick = () => downloadAllMd("");
+(() => { const q = new URLSearchParams(location.search); if (q.get("allmd")) { history.replaceState(null, "", location.pathname);
+  setTimeout(() => { downloadAllMd(q.get("report") || ""); const c = document.getElementById("actCard"); if (c) c.scrollIntoView({behavior: "smooth"}); }, 300); } })();
 </script>
 </body>
 </html>
