@@ -270,6 +270,29 @@ def check_credential_files(ctx: ScanContext):
                 fix="改用環境變數 ${NPM_TOKEN} 引用，並在 npmjs.com 啟用 2FA 與限制 token 權限。"))
 
 
+def _socket_owners(d):
+    """{socket 路徑: 使用它的程式（ps 顯示的指令）}；只看 d 底下的 socket。"""
+    import subprocess
+    from .core import safe_env
+    out = {}
+    try:
+        txt = subprocess.run(["lsof", "-nP", "-U", "-F", "pn"], capture_output=True, text=True, timeout=15, env=safe_env()).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return out
+    pid = None
+    for line in txt.splitlines():
+        if line.startswith("p"):
+            pid = line[1:]
+        elif line.startswith("n") and line[1:].startswith(d + "/") and pid and line[1:] not in out:
+            try:
+                cmd = subprocess.run(["ps", "-o", "command=", "-p", pid], capture_output=True, text=True, timeout=5,
+                                     env=safe_env()).stdout.strip()
+            except (OSError, subprocess.TimeoutExpired):
+                cmd = ""
+            out[line[1:]] = cmd
+    return out
+
+
 def check_ssh_dir(ctx: ScanContext):
     ctx.report("機密與憑證", "~/.ssh")
     d = os.path.join(HOME, ".ssh")
@@ -283,8 +306,21 @@ def check_ssh_dir(ctx: ScanContext):
         names = os.listdir(d)
     except OSError:
         return
+    owners = None
     for n in names:
         p = os.path.join(d, n)
+        st_n = lstat_safe(p)
+        if st_n is not None and stat.S_ISSOCK(st_n.st_mode):
+            if owners is None:
+                owners = _socket_owners(d)
+            # OpenSSH 先綁在「路徑.隨機字串」再改名，lsof 看到的常是改名前的名稱
+            who = owners.get(p) or next((v for k, v in owners.items() if k.startswith(p + ".")), "")
+            # ssh 連線共用（ControlMaster）的 socket：每次 ssh 連線都會新建、斷線就消失
+            # （例如 Warp 終端機的 SSH 會在 ~/.ssh 用隨機數字建一個），不放進清單，免得每次連線都被當成新增
+            if re.match(r"^ssh: .* \[mux\]$", who):
+                continue
+            ctx.inv("~/.ssh 檔案", n, "socket owner=%s" % (who.split()[0] if who else "（沒有程式在使用，可能是殘留）"))
+            continue
         ctx.inv("~/.ssh 檔案", n, file_fingerprint(p))
         if n.endswith(".pub") or n in ("known_hosts", "known_hosts.old", "config", "authorized_keys"):
             continue
