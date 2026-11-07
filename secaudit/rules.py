@@ -37,11 +37,15 @@ GENERIC_ASSIGN = re.compile(
 )
 
 PLACEHOLDER_HINTS = ("op://", "${", "{{", "xxxx", "your_", "your-", "example", "changeme",
-                     "<", "placeholder", "dummy", "****", "...", "process.env", "os.environ")
+                     "<", "placeholder", "dummy", "****", "...", "process.env", "os.environ",
+                     # 讀環境變數 / 設定的程式碼，不是寫死的值
+                     "getenv", "environ", "env(", "env.", "viper.", "config.", "settings.", "secrets.")
 
 
 def is_placeholder(value: str) -> bool:
     v = value.lower()
+    if re.match(r"^[A-Za-z_][\w.]*\(", value):
+        return True          # 函式呼叫（例如 rekorSigningKey()、os.Getenv(...)）：是程式碼，不是寫死的值
     return any(h in v for h in PLACEHOLDER_HINTS) or len(set(v)) <= 3
 
 

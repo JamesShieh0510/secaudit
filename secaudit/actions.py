@@ -1769,8 +1769,11 @@ ENV_GROUPS = [
     "📄 明文 .env → .env.tpl（整份轉換，驗證後刪除原檔）",
     "⚙️ 自動改寫成讀環境變數（Python / JS / TS / Go / shell / compose / 文件）",
     "📝 只把值搬進 1Password + .env.tpl（需要手動改程式，改法寫在處理紀錄）",
+    "🔁 程式已經會讀環境變數，這只是開發用的預設值（建議標記無害，或手動拿掉預設值）",
+    "🏗 CI 設定檔：.env.tpl 對 CI 沒有作用，改用 CI 的 secrets（測試用帳密可以標記無害）",
     "🧪 本機開發 / 範例帳密（低風險）",
 ]
+ENV_ACKABLE = set(ENV_GROUPS[3:])
 
 
 def plan_env_tpl():
@@ -1824,8 +1827,11 @@ def plan_env_tpl():
             if E.has_private_key(text):
                 lines.append("檔案裡有私鑰（例如 service account JSON）：這類檔案要改成執行時從環境變數或 1Password 取出，處理紀錄會寫改法")
             auto = bool(done) and not manual and not E.has_private_key(text)
-            grp = ENV_GROUPS[3] if low else ENV_GROUPS[1] if auto else ENV_GROUPS[2]
-            default = auto and not low
+            only_defaults = bool(manual) and not done and all(h.get("default") for h, _ in manual)
+            ci = bool(re.search(r"/\.github/workflows/|/\.gitlab-ci\.ya?ml$|/\.drone\.ya?ml$|/\.circleci/|/Jenkinsfile$", p))
+            grp = (ENV_GROUPS[4] if ci else ENV_GROUPS[3] if only_defaults else ENV_GROUPS[5] if low else
+                   ENV_GROUPS[1] if auto else ENV_GROUPS[2])
+            default = auto and not low and not ci
         if f.get("severity") != "low" and "已經提交到 git" in (f.get("detail") or ""):
             lines.append("⚠️ 已提交到 git：舊值永遠留在 git 歷史，處理後仍要到服務後台撤銷並更換")
         lines.append("專案：%s・.env.tpl：%s" % (home_rel(root), home_rel(tpl)))
@@ -2109,7 +2115,8 @@ def make_plan(action, report="", focus=""):
             del _plans[k]
         _plans[pid] = dict(plan, action=action, created=now)
     public = [{"id": s["id"], "label": s["label"], "detail": s["detail"], "default": s.get("default", True),
-               "group": s.get("group", ""), "ackable": s.get("group", "") in SECRET_ACKABLE and bool(s.get("fkey"))}
+               "group": s.get("group", ""),
+               "ackable": s.get("group", "") in (SECRET_ACKABLE | ENV_ACKABLE) and bool(s.get("fkey"))}
               for s in plan["steps"]]
     return {"plan_id": pid, "action": action, "title": plan["title"], "report": plan.get("report", ""),
             "steps": public, "notes": plan.get("notes", [])}
@@ -2518,9 +2525,13 @@ def _execute(plan, steps, key_name=None, preauth=False):
                 r = (False, "未知的步驟類型")
             results.append({"id": s["id"], "label": s["label"], "ok": r[0], "output": r[1]})
             status.update(results=results, done=len(results))
-        fails = sum(1 for r in results if not r["ok"])
-        status.update(ok=not fails, message="完成，%d 個步驟%s%s" % (len(results), "，%d 個失敗" % fails if fails else "全部成功",
-                                                                ("。" + plan["_summary"]) if plan.get("_summary") else ""))
+        skipped = sum(1 for r in results if not r["ok"] and r.get("skipped"))
+        fails = sum(1 for r in results if not r["ok"]) - skipped
+        okn = len(results) - fails - skipped
+        status.update(ok=not fails and not skipped,
+                      message="完成，%d 個步驟%s%s" % (len(results), "全部成功" if okn == len(results) else
+                                                    "：成功 %d、失敗 %d%s" % (okn, fails, "、未執行 %d" % skipped if skipped else ""),
+                                                    ("。" + plan["_summary"]) if plan.get("_summary") else ""))
         if plan["action"] == "env-tpl":
             done = [r for r in results if r["ok"]]
             _notify("🧷 secaudit：%d 個檔案的機密已搬進 1Password 並改成 .env.tpl 引用，%d 個沒有處理。之後執行這些專案請用 "
@@ -2543,7 +2554,8 @@ def _execute(plan, steps, key_name=None, preauth=False):
         del recent[5:]
         _log({"time": status["started"], "finished": status["finished"], "action": plan["action"], "ok": status["ok"],
               "method": status.get("method", ""),
-              "message": status["message"], "steps": [{"id": r["id"], "label": r["label"], "ok": r["ok"]} for r in results]
+              "message": status["message"], "steps": [{"id": r["id"], "label": r["label"], "ok": None if r.get("skipped") else r["ok"]}
+                                                      for r in results]
               or [{"id": s["id"], "label": s["label"], "ok": None} for s in steps]})
         threading.Thread(target=_run_next, daemon=True).start()      # 有排隊的動作就接著做
 

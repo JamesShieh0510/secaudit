@@ -104,6 +104,29 @@ def has_private_key(text):
 
 
 # ---------------------------------------------------------------- 改寫
+def default_reason(text, h, lang):
+    """這個值是不是「程式已經會讀環境變數，這只是開發用的預設值」，或改了會壞掉（Go const）。是的話回傳原因。"""
+    s, e = h["start"], h["end"]
+    ls, le = text.rfind("\n", 0, s) + 1, text.find("\n", e)
+    line = text[ls:le if le >= 0 else len(text)]
+    before = text[max(0, ls - 600):s]
+    if lang == "sh" and re.search(r"\$\{\w+:?[-=]\s*[\"']?$", text[ls:s]):
+        return "已經是 ${變數:-預設值} 的寫法（有設定環境變數就會用環境變數）"
+    if lang == "go":
+        if re.match(r"\s*const\b", line) or re.search(r"\bconst\s*\((?:(?!\)\s*\n).)*$", text[:s], re.S):
+            return "Go 的 const 不能改成 os.Getenv（改了會編譯不過）；而且它多半是讀不到環境變數時的預設值"
+        if re.search(r"(?i)getenv|lookupenv", line[:s - ls]) or re.search(r"\breturn\b", line) and re.search(r"(?i)getenv|lookupenv", before):
+            return "程式已經先讀環境變數，這是讀不到時的預設值"
+    if lang == "py":
+        if re.search(r"(?:os\.getenv|environ\.get|getenv)\s*\([^)]*$", text[ls:s]):
+            return "已經是 os.getenv(\"變數\", 預設值) 的寫法"
+        if re.match(r"\s+\w+\s*:\s*[\w\[\], |.]+\s*=", line) and re.search(r"class\s+\w+\s*\([^)]*(?:Settings|BaseModel|Config)", text[:s]):
+            return "這是設定類別（例如 pydantic BaseSettings）的欄位預設值，它本來就會先讀同名的環境變數"
+    if lang == "js" and re.search(r"process\.env\.\w+\s*(?:\|\||\?\?)\s*[\"'`]?$", text[ls:s]):
+        return "已經是 process.env.變數 || 預設值 的寫法"
+    return ""
+
+
 def _expr(lang, var):
     return {"py": 'os.environ["%s"]' % var, "js": "process.env.%s" % var, "go": 'os.Getenv("%s")' % var}[lang]
 
@@ -115,6 +138,11 @@ def rewrite(text, lang, hits):
     for h in hits:
         s, e = h["start"], h["end"]
         q = text[s - 1] if s > 0 else ""
+        dr = default_reason(text, h, lang)
+        if dr:
+            h["default"] = True
+            manual.append((h, dr))
+            continue
         whole = q in "\"'`" and text[e:e + 1] == q
         if lang in ("py", "js", "go"):
             if not whole or (lang == "go" and q == "`") or (lang == "py" and text[max(0, s - 2):s - 1] in "fFrRbB" and
