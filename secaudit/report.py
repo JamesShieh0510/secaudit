@@ -18,7 +18,7 @@ SOURCE_LABEL = {"manual": "手動", "scheduler": "排程", "watch": "即時監�
 
 FIX_LABEL = {"secure-files-1p": "🔧 修復：存進 1Password", "secure-files-dmg": "🔧 修復：加密封存 DMG",
              "fix-key-perms": "🔧 修復：權限改成 600", "redact-transcripts": "🔧 修復：遮罩對話紀錄",
-             "upgrade-runtimes": "🔧 修復：升級執行環境"}
+             "upgrade-runtimes": "🔧 修復：升級執行環境", "archive-idle-projects": "🔧 修復：封存閒置專案"}
 
 
 def _actions_for(rule, path="", detail=""):
@@ -37,13 +37,16 @@ def _batch_fix(result, name, e):
     for f in result.get("findings", []):
         for a in _actions_for(f.get("rule", ""), f.get("path", ""), f.get("detail", "")):
             cnt[a] = cnt.get(a, 0) + 1
+    _, idle = _idle(result)
+    if idle:
+        cnt["archive-idle-projects"] = len(idle)
     if not cnt:
         return ""
-    order = ["secure-files-1p", "secure-files-dmg", "fix-key-perms", "redact-transcripts", "upgrade-runtimes"]
+    order = ["archive-idle-projects", "secure-files-1p", "secure-files-dmg", "fix-key-perms", "redact-transcripts", "upgrade-runtimes"]
     btns = "".join('<a class="btn fixbatch" target="_blank" href="/?fix=%s&amp;report=%s" title="預覽這份報告裡所有可以這樣修的項目，勾選後授權執行">%s（%d 項）</a> ' % (
         e(a), e(name), e(FIX_LABEL.get(a, a).replace("🔧 修復：", "🔧 批次：")), cnt[a]) for a in order if a in cnt)
     btns += '<a class="btn fixbatch" target="_blank" href="/?allmd=1&amp;report=%s" title="所有修復動作的預覽＋需要手動處理的問題，彙整成一份 Markdown（只讀）">⬇ 全部修復預覽 Markdown</a>' % e(name)
-    return '<div class="fixbatchrow" style="margin:6px 0;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">%s</div>' % btns
+    return '<div style="display:flex;gap:6px;flex-wrap:wrap">%s</div>' % btns
 
 
 MODE_LABEL = {"full": "完整掃描", "quick": "快速掃描", "recheck": "重新檢查舊報告"}
@@ -111,6 +114,61 @@ def _counts(findings):
     return c
 
 
+# ---------------------------------------------------------------- 閒置專案
+def _idle(result):
+    pj = result.get("projects") or {}
+    return pj.get("days"), [a for a in pj.get("items") or [] if a.get("idle")]
+
+
+def _idle_root_of(path, idle):
+    p = os.path.expanduser((path or "").split("；")[0].split(" 等 ")[0].split("（")[0].strip())
+    return next((a for a in idle if p == a["root"] or p.startswith(a["root"] + os.sep)), None)
+
+
+def _idle_html(result, name, e):
+    from .projects import git_note, human_size
+    days, idle = _idle(result)
+    if not idle:
+        return ""
+    total = sum(sum(a["counts"].values()) for a in idle)
+    btn = ('<a class="btn fixbatch" target="_blank" href="/?fix=archive-idle-projects&amp;report=%s" '
+           'title="預覽要封存的專案，勾選後以 Touch ID 授權執行">📦 批次封存成加密 DMG（%d 個專案）</a>' % (e(name), len(idle))) if name else ""
+    rows = "".join(
+        '<tr><td><code>%s</code></td><td>%s 天<br><span class="muted">%s<br>%s</span></td>'
+        '<td>%s</td><td class="muted">%s</td><td class="muted">%s</td></tr>' % (
+            e(a["display"]), a["idle_days"], e(a["last"]), e(a["last_what"]),
+            " ".join('<span style="color:var(--%s)">%s %d</span>' % (s, SEV_LABEL[s], a["counts"].get(s, 0))
+                     for s in ("high", "medium", "low") if a["counts"].get(s)) +
+            '<br><span class="muted">%s</span>' % e("、".join(a["titles"][:2])),
+            e(human_size(a.get("size"))).replace(" ", "&nbsp;"), e(git_note(a)))
+        for a in idle)
+    return ('<h2>💤 閒置專案（%d 個，共 %d 個問題）</h2>'
+            '<div class="muted">超過 %s 天沒有更新、現在也沒有程式開在裡面。</div>'
+            '<div class="muted" style="margin:6px 0">已經不維護的專案，與其一個一個處理裡面的機密和套件漏洞，可以整個封存：'
+            '每個專案在旁邊產生一個加密 DMG（密碼存進 1Password），逐檔驗證後才刪除原資料夾，之後需要時解密就能找回。</div>'
+            '<div class="fixbatchrow" style="margin:6px 0">%s</div>'
+            '<div style="overflow-x:auto"><table style="table-layout:fixed;min-width:720px"><colgroup><col style="width:30%%"><col style="width:16%%">'
+            '<col style="width:26%%"><col style="width:9%%"><col style="width:19%%"></colgroup>'
+            '<thead><tr><th>專案</th><th>閒置</th><th>問題</th><th>大小</th><th>Git</th></tr></thead>'
+            '<tbody class="pg" data-size="20">%s</tbody></table></div>' % (len(idle), total, e(days), btn, rows))
+
+
+def _idle_md(result):
+    from .projects import git_note, human_size
+    days, idle = _idle(result)
+    if not idle:
+        return []
+    out = ["## 💤 閒置專案（%d 個，超過 %s 天沒有更新）" % (len(idle), days), "",
+           "可以在 Web UI 用「閒置專案 → 整個封存成加密 DMG」批次封存。", "",
+           "| 專案 | 閒置天數 | 最後活動 | 高/中/低 | 大小 | Git |", "|---|---|---|---|---|---|"]
+    for a in idle:
+        c = a["counts"]
+        out.append("| %s | %s | %s（%s） | %d/%d/%d | %s | %s |" % (
+            _md(a["display"]), a["idle_days"], a["last"], _md(a["last_what"]), c.get("high", 0), c.get("medium", 0),
+            c.get("low", 0), human_size(a.get("size")), _md(git_note(a))))
+    return out + [""]
+
+
 # ---------------------------------------------------------------- Markdown
 def _md(s):
     return str(s).replace("|", "\\|").replace("\n", " ").replace("`", "'")
@@ -152,6 +210,7 @@ def to_markdown(result, changes=None, summary="", sop=None):
         else:
             out.append("沒有變動。")
         out.append("")
+    out += _idle_md(result)
     for sev in SEVERITIES:
         group = [f for f in fs if f["severity"] == sev]
         if not group:
@@ -219,11 +278,31 @@ details.cat details.item{margin:6px 0}
 .pgnav{display:flex;justify-content:center;align-items:center;gap:10px;margin:8px 0;flex-wrap:wrap;font-size:13px}
 .pgnav button{padding:3px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);cursor:pointer}
 .pgnav button:disabled{opacity:.4;cursor:default}.fh,.pgh{display:none!important}
-a.btn,.filter .tool{display:inline-block;padding:6px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);text-decoration:none;font-size:14px;cursor:pointer}
+a.btn,.filter .tool,button.tool{display:inline-block;padding:6px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);text-decoration:none;font-size:14px;cursor:pointer}
+.rtabs{display:flex;gap:2px;margin:18px 0 4px;border-bottom:1px solid var(--line);overflow-x:auto;position:sticky;top:0;background:var(--bg);z-index:3}
+.rtabs button{border:0;border-bottom:2px solid transparent;background:none;padding:10px 12px;font:inherit;font-size:14px;color:var(--muted);white-space:nowrap;cursor:pointer}
+.rtabs button.on{color:var(--fg);border-bottom-color:var(--fg);font-weight:600}
+section.rtab{display:none}section.rtab.on{display:block}section.rtab>h2:first-child{margin-top:18px}
+.filter{top:42px}
+section.rtab .sop{margin-top:12px;border:0;padding:0;background:none}section.rtab .sop>summary{cursor:default}
+.mmd{margin:14px 0;padding:12px;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow-x:auto}.mmd svg{max-width:100%;height:auto}
 .sop{margin-top:40px;border-left-color:var(--info)}.sop h3{font-size:15px;margin:20px 0 8px}.sop ol,.sop ul{padding-left:22px;margin:6px 0}.sop li{margin:4px 0}.sop table{margin:6px 0}
 """
 
 JS = """
+const RT=[...document.querySelectorAll('.rtabs button')].map(b=>b.dataset.t);
+function mmd(){const ns=[...document.querySelectorAll('section.rtab[data-tab=sop] pre.mermaid')];
+ if(!ns.length||location.protocol!=='http:'||window._mmd)return;window._mmd=1;
+ const sc=document.createElement('script');sc.src='/static/vendor/mermaid-11.4.1.min.js';
+ sc.onload=()=>{mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default'});
+  mermaid.run({nodes:ns}).then(()=>document.querySelectorAll('.mmd-note').forEach(x=>x.remove()));};
+ document.head.appendChild(sc);}
+function rtab(t){if(!RT.includes(t))t='overview';
+ document.querySelectorAll('.rtabs button').forEach(b=>b.classList.toggle('on',b.dataset.t===t));
+ document.querySelectorAll('section.rtab').forEach(s=>s.classList.toggle('on',s.dataset.tab===t));
+ try{sessionStorage.setItem('secaudit-rtab',t);}catch(e){}if(t==='sop')mmd();}
+document.querySelectorAll('.rtabs button').forEach(b=>b.onclick=()=>{rtab(b.dataset.t);window.scrollTo(0,0);});
+(()=>{let t='';try{t=sessionStorage.getItem('secaudit-rtab')||'';}catch(e){}rtab(t||'overview');})();
 const q=document.getElementById('q');let sev='all';
 function itemsOf(c){return [...c.children].filter(x=>x.matches('.item,tr.row'));}
 function paginate(c){const size=+c.dataset.size||20;const vis=itemsOf(c).filter(x=>!x.classList.contains('fh'));
@@ -241,11 +320,13 @@ function apply(){const t=q.value.toLowerCase();const active=sev!=='all'||t;
  document.querySelectorAll('details.cat,details.sec[data-sec]').forEach(d=>{
   const n=[...d.querySelectorAll('.item[data-sev],tr.row')].filter(x=>!x.classList.contains('fh')).length;
   d.style.display=n?'':'none'; if(active&&n) d.open=true;});}
-q.addEventListener('input',apply);document.querySelectorAll('.filter button[data-f]').forEach(b=>b.onclick=()=>{
+q.addEventListener('input',()=>{rtab('results');apply();});document.querySelectorAll('.filter button[data-f]').forEach(b=>b.onclick=()=>{
  document.querySelectorAll('.filter button[data-f]').forEach(x=>x.classList.remove('on'));b.classList.add('on');sev=b.dataset.f;apply();});
 document.getElementById('expandAll').onclick=()=>document.querySelectorAll('details').forEach(d=>d.open=true);
 document.getElementById('collapseAll').onclick=()=>document.querySelectorAll('details').forEach(d=>d.open=false);
 const RPT=document.body.dataset.report||'';
+// 直接開報告網址（例如 Telegram 的連結）→ 回到主控台用彈窗顯示；?full=1 才以整頁開啟
+if(location.protocol==='http:'&&RPT&&window.top===window&&!/[?&]full=1/.test(location.search))location.replace('/#reports/'+encodeURIComponent(RPT));
 document.querySelectorAll('.ackbtn').forEach(b=>{
  if(location.protocol!=='http:'||!RPT){b.parentElement.style.display='none';return;}
  b.onclick=async()=>{const msg=b.nextElementSibling;
@@ -311,12 +392,21 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
         cats.setdefault(f["category"], {s: 0 for s in SEVERITIES})[f["severity"]] += 1
     p = ['<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">',
          '<title>安全掃描報告</title><style>%s</style></head><body data-report="%s"><div class="wrap">' % (CSS, e(name)),
-         '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">'
-         '<div><h1>🛡 安全掃描報告</h1><div class="muted">%s ・ %s ・ 耗時 %s 秒 ・ 模式 %s</div></div><div>%s</div></div>' % (
-             e(result["host"]), e(result["started"]), e(result["duration_sec"]), e(MODE_LABEL.get(result["mode"], result["mode"])),
-             md_button + _batch_fix(result, name, e) + (' <button type="button" class="tool" id="recheckBtn" title="只重新檢查這份報告提過的問題，並套用目前的規則">'
-                          '🔁 重新檢查這份報告</button><div class="muted" id="recheckMsg" style="font-size:12px;margin-top:4px"></div>'
-                          if name and result["mode"] in ("full", "recheck") else ""))]
+         '<h1>🛡 安全掃描報告</h1><div class="muted">%s ・ %s ・ 耗時 %s 秒 ・ 模式 %s</div>' % (
+             e(result["host"]), e(result["started"]), e(result["duration_sec"]), e(MODE_LABEL.get(result["mode"], result["mode"])))]
+    _, idle = _idle(result)
+    n_res = c["high"] + c["medium"] + c["low"]
+    tabs = [("overview", "📊 總覽")]
+    if changes is not None:
+        tabs.append(("changes", "🔄 變動（%d）" % len(changes)))
+    tabs.append(("results", "🔍 檢查結果（%d）" % n_res))
+    if idle:
+        tabs.append(("idle", "💤 閒置專案（%d）" % len(idle)))
+    tabs.append(("tools", "🛠 處理與下載"))
+    if sop:
+        tabs.append(("sop", "📖 這份報告怎麼來的"))
+    p.append('<nav class="rtabs">%s</nav>' % "".join('<button type="button" data-t="%s">%s</button>' % (k, e(v)) for k, v in tabs))
+    p.append('<section class="rtab" data-tab="overview">')
     overdue = sum(1 for f in fs if f["severity"] == "high" and (f.get("age_days") or 0) >= 7)
     if overdue:
         p.append('<div class="card" style="margin-top:12px;border-left:4px solid var(--high)">⏰ <b>%d 個高風險已超過 7 天未處理</b>，'
@@ -351,7 +441,9 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
                      MODE_LABEL.get(st["mode"], st["mode"]), e(SOURCE_LABEL.get(st["source"], st["source"])),
                      ("（%s）" % e("、".join(st["trigger"][:3]))) if st.get("trigger") else "",
                      on(st["online"]), on(st["notify"]), on(st["llm"]), tl))
+    p.append('</section>')
     if changes is not None:
+        p.append('<section class="rtab" data-tab="changes">')
         p.append('<h2>與上次掃描的差異（%d 項）</h2>' % len(changes))
         if summary:
             p.append('<div class="summary"><b>AI 摘要</b>（僅供參考，⚠️ 標記由規則判定）<br>%s</div>' % e(summary))
@@ -365,15 +457,22 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
                     '<span class="att">⚠️ </span>' if ch["attention"] else "", e(TYPE_LABEL[ch["type"]]), e(ch["section"]),
                     e(ch["key"]), e(ch.get("old", ""))[:300], e(ch.get("new", ""))[:300]))
             p.append('</tbody></table></details>')
+        p.append('</section>')
+    if idle:
+        p.append('<section class="rtab" data-tab="idle">%s</section>' % _idle_html(result, name, e))
+    p.append('<section class="rtab" data-tab="results">')
     p.append('<h2>檢查結果</h2><div class="filter"><input id="q" placeholder="搜尋標題、路徑、內容…">'
              '<button class="on" data-f="all">全部</button>%s'
              '<button type="button" id="expandAll" class="tool">全部展開</button><button type="button" id="collapseAll" class="tool">全部收合</button>'
-             '%s</div>' % ("".join('<button data-f="%s">%s %d</button>' % (s, SEV_LABEL[s], c[s]) for s in SEVERITIES), md_button))
+             '</div>' % "".join('<button data-f="%s">%s %d</button>' % (s, SEV_LABEL[s], c[s]) for s in SEVERITIES))
 
     def finding_html(f):
         age = f.get("age_days")
         age_tag = '<span class="tag" style="%s">已存在 %d 天</span>' % (
             "color:var(--high);font-weight:700" if (age or 0) >= 7 and f["severity"] == "high" else "", age) if age is not None else ""
+        ip = _idle_root_of(f.get("path"), idle) if f.get("scope") == "walk" else None
+        if ip:
+            age_tag += '<span class="tag" title="%s 超過 %d 天沒有更新">💤 專案閒置 %d 天</span>' % (e(ip["display"]), ip["idle_days"], ip["idle_days"])
         out = ['<details class="item" data-sev="%s" style="border-left-color:var(--%s)"><summary><span class="tag" style="color:var(--%s)">%s</span>'
                '<span class="tag">%s</span>%s%s</summary><dl>' % (
                    f["severity"], f["severity"], f["severity"], SEV_LABEL[f["severity"]], e(f["category"]), age_tag, e(f["title"]))]
@@ -385,6 +484,10 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
             '<a class="btn" target="_blank" href="/?fix=%s&amp;report=%s&amp;path=%s" title="到 Web UI 預覽修復步驟，授權後才會執行">%s</a>' % (
                 e(a), e(name), e(urllib.parse.quote(f.get("path") or "")), e(FIX_LABEL.get(a, a)))
             for a in (_actions_for(f.get("rule", ""), f.get("path", ""), f.get("detail", "")) if name else []))
+        if ip and name:
+            fixes += ('<a class="btn" target="_blank" href="/?fix=archive-idle-projects&amp;report=%s&amp;path=%s" '
+                      'title="專案已閒置：整個資料夾封存成加密 DMG（只預先勾選這個專案）">📦 封存整個專案</a>' % (
+                          e(name), e(urllib.parse.quote(ip["root"]))))
         out.append('</dl><div class="ackrow"><button type="button" class="ackbtn tool" data-key="%s">✅ 標記為已確認無害</button>'
                    '<span class="muted ackmsg"></span>%s</div></details>' % (e(finding_key(f)), fixes))
         return "".join(out)
@@ -436,10 +539,23 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
                          SEV_LABEL.get(f["severity"], ""), e(f["category"]), e(f["title"]), e(f.get("path", "")),
                          e(a.get("time", "")), ("・" + e(a["note"])) if a.get("note") else ""))
         p.append('</div></details>')
-    if sop:
-        p.append(_sop.to_html(sop, e, open_=False))
+    p.append('</section>')
+    batch = _batch_fix(result, name, e)
+    p.append('<section class="rtab" data-tab="tools"><h2>🛠 處理與下載</h2>')
+    p.append('<div class="card fixbatchrow"><b>批次修復</b><div class="muted" style="margin:4px 0 10px">每種修復動作一顆按鈕：'
+             '到 Web UI 預覽這份報告裡所有可以這樣修的項目，勾選後以 Touch ID 授權才會執行。</div>%s</div>' % (
+                 batch or '<div class="muted">這份報告沒有可以批次修復的項目。</div>'))
+    if name and result["mode"] in ("full", "recheck"):
+        p.append('<div class="card" style="margin-top:12px"><b>🔁 重新檢查</b><div class="muted" style="margin:4px 0 10px">'
+                 '只重新檢查這份報告提過的問題，並套用目前的規則；結果會是一份新報告。</div>'
+                 '<button type="button" class="tool" id="recheckBtn">🔁 重新檢查這份報告</button>'
+                 '<div class="muted" id="recheckMsg" style="margin-top:6px"></div></div>')
     if md_button:
-        p.append('<div style="margin-top:28px;text-align:center">%s</div>' % md_button)
+        p.append('<div class="card" style="margin-top:12px"><b>⬇ 下載</b><div class="muted" style="margin:4px 0 10px">'
+                 'Markdown 版適合交給其他 AI 或資安人員分析（機密已遮罩）。</div>%s</div>' % md_button)
+    p.append('</section>')
+    if sop:
+        p.append('<section class="rtab" data-tab="sop">%s</section>' % _sop.to_html(sop, e, open_=True))
     p.append('<script>%s</script></div></body></html>' % JS)
     return "".join(p)
 

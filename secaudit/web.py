@@ -1,5 +1,6 @@
 """本機 Web UI。只綁 127.0.0.1，並用 token + SameSite cookie + Host 檢查防止其他網頁或程式操作。"""
 import http.cookies
+import hashlib
 import json
 import os
 import re
@@ -15,6 +16,8 @@ from .app import DATA, REPORTS, Engine, load_config, load_targets, normalize_hos
 from .core import home_rel
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+# 內建的第三方前端程式：固定版本（從 npm 官方 tarball 取出，比對過 registry 的 sha512），提供前再比對 sha256，被改過就不提供
+VENDOR = {"/static/vendor/mermaid-11.4.1.min.js": "a43bc1afd446f9c4cc66ac5dd45d02e8d65e26fc5344ec0ef787f88d6ddb6f9e"}
 REPORT_RE = re.compile(r"^/reports/(\d{8}-\d{6})\.(html|md|json)$")
 
 
@@ -86,9 +89,10 @@ def make_handler(engine: Engine, token: str, port: int):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
+            extra = dict(extra or {})
+            self.send_header("Cache-Control", extra.pop("Cache-Control", "no-store"))
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("X-Frame-Options", extra.pop("X-Frame-Options", "DENY"))
             self.send_header("Referrer-Policy", "no-referrer")
             for k, v in (extra or {}).items():
                 self.send_header(k, v)
@@ -146,6 +150,12 @@ def make_handler(engine: Engine, token: str, port: int):
             if u.path == "/":
                 with open(os.path.join(STATIC, "index.html"), "rb") as fh:
                     return self._send(200, fh.read(), "text/html; charset=utf-8")
+            if u.path in VENDOR:
+                with open(os.path.join(STATIC, u.path[len("/static/"):]), "rb") as fh:
+                    data = fh.read()
+                if hashlib.sha256(data).hexdigest() != VENDOR[u.path]:
+                    return self._send(500, {"error": "內建的 %s 和預期的 sha256 不一致，可能被竄改，已拒絕提供" % os.path.basename(u.path)})
+                return self._send(200, data, "text/javascript; charset=utf-8", {"Cache-Control": "private, max-age=86400"})
             if u.path == "/api/state":
                 cfg = load_config()
                 return self._send(200, {
@@ -158,7 +168,8 @@ def make_handler(engine: Engine, token: str, port: int):
                     "acks": acks_mod.items(),
                     "config": {k: cfg.get(k) for k in ("quick_interval_min", "full_scan_hour", "online", "llm_enabled",
                                                        "ollama_host", "ollama_model", "vulnfeed_hours", "reminder_enabled",
-                                                       "reminder_weekday", "reminder_hour", "escalate_days", "secure_vault", "secure_dir")},
+                                                       "reminder_weekday", "reminder_hour", "escalate_days", "secure_vault", "secure_dir",
+                                                       "idle_project_days")},
                     "secrets": {"telegram": bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID")),
                                 "ollama": bool(os.environ.get("OLLAMA_API_KEY"))},
                 })
@@ -175,12 +186,17 @@ def make_handler(engine: Engine, token: str, port: int):
                 cfg = load_config()
                 blocks = build_sop(cfg, [{"path": t.path, "display": home_rel(t.path), "label": t.label, "enabled": t.enabled}
                                          for t in load_targets(cfg)])
+                if "frag=1" in u.query:       # Web UI 的 SOP 分頁
+                    return self._send(200, sop_html(blocks, _h.escape), "text/html; charset=utf-8")
                 page = ('<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">'
                         '<meta name="viewport" content="width=device-width,initial-scale=1"><title>運作 SOP</title>'
                         '<style>%s .sop{border:0;padding:0;background:none}</style></head><body><div class="wrap">'
                         '<p><a href="/" style="color:var(--info)">← 回到主控台</a></p>%s'
                         '<p class="muted" style="margin-top:24px">內容依照目前設定即時產生；修改設定後重新整理即可看到最新版本。</p>'
-                        '</div></body></html>') % (CSS, sop_html(blocks, _h.escape))
+                        '</div><script src="/static/vendor/mermaid-11.4.1.min.js"></script><script>'
+                        'mermaid.initialize({startOnLoad:false,securityLevel:"strict",theme:matchMedia("(prefers-color-scheme: dark)").matches?"dark":"default"});'
+                        'mermaid.run({querySelector:"pre.mermaid"}).then(()=>document.querySelectorAll(".mmd-note").forEach(x=>x.remove()));'
+                        '</script></body></html>') % (CSS, sop_html(blocks, _h.escape))
                 return self._send(200, page, "text/html; charset=utf-8")
             m = REPORT_RE.match(u.path)
             if m:
@@ -195,7 +211,10 @@ def make_handler(engine: Engine, token: str, port: int):
                         body = fh.read()
                 ctype = {"html": "text/html; charset=utf-8", "md": "text/markdown; charset=utf-8",
                          "json": "application/json; charset=utf-8"}[m.group(2)]
-                extra = {"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'"}
+                # 報告只允許被主控台自己的彈窗嵌入（同源），其他網站不能用 iframe 嵌入
+                extra = {"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+                                                    "connect-src 'self'; frame-ancestors 'self'",
+                         "X-Frame-Options": "SAMEORIGIN"}
                 if qs.get("dl"):
                     extra["Content-Disposition"] = 'attachment; filename="security-%s.%s"' % m.groups()
                 return self._send(200, body, ctype, extra)
@@ -252,7 +271,8 @@ def make_handler(engine: Engine, token: str, port: int):
                 cfg = load_config()
                 for k, typ in (("quick_interval_min", int), ("full_scan_hour", int), ("online", bool),
                                ("llm_enabled", bool), ("ollama_model", str), ("vulnfeed_hours", int),
-                               ("reminder_enabled", bool), ("reminder_weekday", int), ("reminder_hour", int), ("escalate_days", int)):
+                               ("reminder_enabled", bool), ("reminder_weekday", int), ("reminder_hour", int), ("escalate_days", int),
+                               ("idle_project_days", int)):
                     if k in body:
                         cfg[k] = typ(body[k])
                 if "ollama_host" in body:
@@ -263,6 +283,7 @@ def make_handler(engine: Engine, token: str, port: int):
                 cfg["reminder_weekday"] = min(6, max(0, cfg.get("reminder_weekday", 0)))
                 cfg["reminder_hour"] = min(23, max(0, cfg.get("reminder_hour", 9)))
                 cfg["escalate_days"] = min(90, max(1, cfg.get("escalate_days", 7)))
+                cfg["idle_project_days"] = min(3650, max(7, cfg.get("idle_project_days", 30)))
                 cfg["quick_interval_min"] = max(5, cfg["quick_interval_min"])
                 cfg["full_scan_hour"] = min(23, max(0, cfg["full_scan_hour"]))
                 save_config(cfg)

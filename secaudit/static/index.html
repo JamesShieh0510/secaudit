@@ -40,6 +40,47 @@ label.cfg{display:flex;justify-content:space-between;align-items:center;gap:8px;
 .tabs button.on{color:var(--fg);border-bottom-color:var(--fg);font-weight:600}
 .tabs .badge:not(:empty){display:inline-block;margin-left:6px;min-width:18px;padding:0 5px;border-radius:9px;background:var(--medium);color:#fff;font-size:11px;line-height:18px;text-align:center}
 section.tab{display:none}section.tab.on{display:block}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:10px;margin-top:16px}
+.metrics:empty{display:none}
+.metric{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;min-width:0}
+.metric .k{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.metric .v{font-size:22px;font-weight:700;line-height:1.3;margin:2px 0;font-variant-numeric:tabular-nums;white-space:nowrap}
+.metric .v small{font-size:13px;font-weight:500;color:var(--muted);margin-left:2px}
+.metric .s{font-size:12px;line-height:1.4;color:var(--muted);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.metric.warn{border-color:var(--medium)}.metric.warn .flag{color:var(--medium);font-weight:600}
+.keyfold>summary{cursor:pointer;font-weight:600}
+.actwrap{display:grid;grid-template-columns:270px minmax(0,1fr);gap:14px;margin-top:12px;align-items:start}
+.actlist{display:flex;flex-direction:column;gap:6px}
+.actlist button{text-align:left;display:flex;flex-direction:column;gap:2px;padding:10px 12px;width:100%}
+.actlist button .h{font-size:12px;color:var(--muted)}
+.actlist button.on{border-color:var(--accent);box-shadow:inset 3px 0 0 var(--accent);background:var(--code);font-weight:600}
+.actmain{border:1px solid var(--line);border-radius:12px;padding:0 14px 12px;min-height:160px}
+.actempty{padding:40px 10px;text-align:center}
+.acthead{padding:14px 0 8px}.acthead .t{font-size:16px;font-weight:700}
+.actbar{position:sticky;top:44px;z-index:2;background:var(--card);display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}
+.actbar button{padding:6px 10px;font-size:13px}.actbar input{min-width:140px;flex:0 1 200px;padding:6px 10px;font-size:13px}
+.actbar .sp{flex:1}
+.sgrp{border:1px solid var(--line);border-radius:10px;margin:10px 0;overflow:hidden}
+.sgh{display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--code)}
+.sgh .sgt{flex:1;display:flex;align-items:baseline;gap:8px;border:0;background:none;padding:2px 0;text-align:left;cursor:pointer}
+.sgh .arrow{margin-left:auto;color:var(--muted);transition:transform .15s}.sgrp.fold .arrow{transform:rotate(-90deg)}
+.sgrp.fold .sgb{display:none}.sgb{padding:0 10px}.sgb .step:last-child{border-bottom:0}
+.step{display:flex;gap:10px;align-items:flex-start;padding:10px 4px;border-bottom:1px solid var(--line);cursor:pointer}
+.step:hover{background:var(--code)}.step input{margin-top:4px}
+.step .l{font-weight:600;word-break:break-all}.step .d{font-size:12px;color:var(--muted);margin-top:2px}.step .d div{margin:1px 0}
+.step.nodef .l::after{content:"不建議";margin-left:8px;font-size:11px;font-weight:500;color:var(--medium);border:1px solid var(--medium);border-radius:8px;padding:0 6px}
+.actwrap>div{min-width:0}.actwrap>div:first-child{position:sticky;top:56px}
+@media (max-width:760px){.actwrap{grid-template-columns:1fr}.actwrap>div:first-child{position:static}.actlist{flex-direction:row;overflow-x:auto}.actlist button{min-width:210px}}
+.modal{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.5);display:none;padding:20px}
+.modal.on{display:flex;justify-content:center}
+.modal .box{background:var(--bg);border:1px solid var(--line);border-radius:14px;width:100%;max-width:1200px;display:flex;flex-direction:column;overflow:hidden}
+.modal .bar{display:flex;gap:8px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line);background:var(--card)}
+.modal .bar .btn,.modal .bar button{padding:5px 11px;font-size:13px}
+.modal iframe{flex:1;min-height:0;border:0;width:100%;background:var(--bg)}
+body.noscroll{overflow:hidden}
+@media (max-width:600px){.modal{padding:0}.modal .box{border-radius:0;border:0}}
+#sopBody details.sop>summary{list-style:none;cursor:default}#sopBody details.sop>summary::-webkit-details-marker{display:none}
+#sopBody h3{font-size:15px;margin:22px 0 8px}#sopBody .mmd{margin:14px 0;padding:12px;border:1px solid var(--line);border-radius:12px;overflow-x:auto}#sopBody .mmd svg{max-width:100%;height:auto}#sopBody td,#sopBody th{vertical-align:top}#sopBody li{margin:4px 0}#sopBody td:first-child{min-width:7em}
 </style>
 </head>
 <body>
@@ -47,12 +88,13 @@ section.tab{display:none}section.tab.on{display:block}
   <div class="top">
     <div><h1>🛡 Mac 安全監控</h1><div class="muted" id="sched"></div></div>
     <div class="row">
-      <a class="btn" href="/sop" target="_blank" rel="noopener">📖 運作 SOP</a>
-      <label class="muted"><input type="checkbox" id="notify"> 有變動時發 Telegram</label>
+      <label class="muted" title="只影響右邊這兩顆手動掃描按鈕。排程、即時監看、資源監控觸發的掃描一律照常通知。會記在這個瀏覽器裡"><input type="checkbox" id="notify"> 手動掃描有變動時也發 Telegram</label>
       <button id="quick">快速掃描</button>
       <button class="primary" id="full">完整掃描</button>
     </div>
   </div>
+
+  <div class="metrics" id="metrics"></div>
 
   <div class="card" id="statusCard">
     <div class="top"><h2 id="stTitle">狀態</h2><button id="cancel" style="display:none">取消</button></div>
@@ -65,12 +107,13 @@ section.tab{display:none}section.tab.on{display:block}
     <button data-tab="feed">🧯 漏洞快訊</button>
     <button data-tab="fix">🛠 處理<span class="badge" id="tbFix"></span></button>
     <button data-tab="settings">⚙️ 設定<span class="badge" id="tbSet"></span></button>
+    <button data-tab="sop">📖 運作 SOP</button>
   </nav>
 
   <section class="tab" data-tab="reports">
   <div class="card">
     <h2>報告</h2>
-    <table><thead><tr><th>時間</th><th class="hide-sm">模式／觸發</th><th class="hide-sm">範圍</th><th>風險（高/中/低）</th><th>變動</th><th></th></tr></thead><tbody id="reports"></tbody></table>
+    <div style="overflow-x:auto"><table><thead><tr><th>時間</th><th class="hide-sm">模式／觸發</th><th class="hide-sm">範圍</th><th>風險（高/中/低）</th><th>變動</th><th></th></tr></thead><tbody id="reports"></tbody></table></div>
     <div id="reportsNav"></div>
     <div class="muted" style="margin-top:6px">沒有變動的排程掃描不另存報告；報告保留 30 天，完整掃描保留 90 天。</div>
   </div>
@@ -95,11 +138,16 @@ section.tab{display:none}section.tab.on{display:block}
   <div class="card" id="actCard">
     <h2>🛠 修復動作</h2>
     <div class="muted">這些動作會修改你的電腦。流程：先預覽步驟、勾選要做的項目，再用 <b>Touch ID</b>（只接受指紋，不能改用密碼）或已註冊的 <b>YubiKey</b> 授權，通過才會執行。</div>
-    <div id="keyBox" class="note"></div>
-    <div id="actList" class="row" style="margin-top:10px"></div>
-    <div class="row" style="margin-top:6px"><button id="allMd" title="所有修復動作的預覽（預設勾選）＋需要手動處理的問題，彙整成一份 Markdown。只讀，不會執行任何動作">⬇ 下載全部修復預覽 Markdown</button><span class="muted" id="allMdMsg"></span></div>
-    <div id="actPlan" style="display:none;margin-top:12px"></div>
+    <details class="note keyfold"><summary>🔑 授權方式：Touch ID ／ YubiKey 設定</summary><div id="keyBox" style="margin-top:8px"></div></details>
     <div id="actStatus" class="note" style="display:none"></div>
+    <div class="actwrap">
+      <div>
+        <div id="actList" class="actlist"></div>
+        <button id="allMd" style="margin-top:8px;width:100%" title="所有修復動作的預覽（預設勾選）＋需要手動處理的問題，彙整成一份 Markdown。只讀，不會執行任何動作">⬇ 全部修復預覽 Markdown</button>
+        <div class="muted" id="allMdMsg"></div>
+      </div>
+      <div class="actmain" id="actPlan"><div class="muted actempty">← 先選一個修復動作，這裡會列出它要處理的項目，勾選後再授權執行。</div></div>
+    </div>
     <div id="actRecent"></div>
     <details style="margin-top:10px"><summary class="muted">執行紀錄</summary><div id="actHistory" class="muted"></div></details>
   </div>
@@ -142,6 +190,7 @@ section.tab{display:none}section.tab.on{display:block}
             <option value="4">星期五</option><option value="5">星期六</option><option value="6">星期日</option></select>
           <input type="number" id="c_rh" min="0" max="23" style="width:60px"> 點</span></label>
         <label class="cfg">高風險超過幾天未處理 → 每天提醒<input type="number" id="c_esc" min="1" max="90" style="width:80px"></label>
+        <label class="cfg" title="有問題的專案超過這個天數沒有更新，報告會列在「💤 閒置專案」，可以批次封存成加密 DMG">專案幾天沒更新算閒置<input type="number" id="c_idle" min="7" max="3650" style="width:80px"></label>
         <label class="cfg">封存機密檔案用的 1Password vault<input type="text" id="c_vault" style="max-width:160px"></label>
         <label class="cfg">加密 DMG 存放資料夾<input type="text" id="c_sdir" style="max-width:160px"></label>
         <div class="row" style="justify-content:flex-end"><button type="button" id="saveSecure">🔒 儲存封存設定（Touch ID）</button><button type="button" id="saveSecureY" style="display:none">🔑 用 YubiKey 儲存封存設定</button></div>
@@ -163,20 +212,104 @@ section.tab{display:none}section.tab.on{display:block}
     <div class="note" id="secretNote"></div>
   </div>
   </section>
+  <section class="tab" data-tab="sop">
+  <div class="card">
+    <div id="sopBody" class="muted">載入中…</div>
+    <p class="muted" style="margin-top:16px">內容依照目前設定即時產生。<a href="/sop" target="_blank" rel="noopener" style="color:var(--info)">在新分頁開啟</a></p>
+  </div>
+  </section>
+</div>
+<div class="modal" id="rptModal" role="dialog" aria-modal="true" aria-labelledby="rptTitle">
+  <div class="box">
+    <div class="bar"><b id="rptTitle" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></b>
+      <a class="btn" id="rptMd">MD</a><a class="btn hide-sm" id="rptFull" target="_blank" rel="noopener">新分頁開啟 ↗</a>
+      <button id="rptClose" aria-label="關閉報告">✕ 關閉</button></div>
+    <iframe id="rptFrame" title="報告內容"></iframe>
+  </div>
 </div>
 <script>
 // 分頁標籤：記住上次看的分頁（網址 #分頁 優先）
-const TABS = ["reports", "feed", "fix", "settings"];
+const TABS = ["reports", "feed", "fix", "settings", "sop"];
 function showTab(t) {
   if (!TABS.includes(t)) t = "reports";
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
   document.querySelectorAll("section.tab").forEach(s => s.classList.toggle("on", s.dataset.tab === t));
   try { localStorage.setItem("secaudit-tab", t); } catch (e) {}
-  if (location.hash.slice(1) !== t) history.replaceState(null, "", location.pathname + location.search + "#" + t);
+  if (t === "sop") loadSop();
+  if (location.hash.slice(1).split("/")[0] !== t) history.replaceState(null, "", location.pathname + location.search + "#" + t);
+}
+// Mermaid 流程圖：用內建的固定版本（伺服器提供前會比對 sha256），第一次用到才載入
+let mermaidReady = null;
+function renderMermaid(root) {
+  const nodes = [...root.querySelectorAll("pre.mermaid")];
+  if (!nodes.length) return;
+  mermaidReady = mermaidReady || new Promise((ok, bad) => {
+    const sc = document.createElement("script");
+    sc.src = "/static/vendor/mermaid-11.4.1.min.js";
+    sc.onload = () => { mermaid.initialize({startOnLoad: false, securityLevel: "strict",
+      theme: matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "default"}); ok(); };
+    sc.onerror = () => { mermaidReady = null; bad(new Error("流程圖程式載入失敗")); };
+    document.head.appendChild(sc);
+  });
+  mermaidReady.then(() => mermaid.run({nodes})).then(() => root.querySelectorAll(".mmd-note").forEach(x => x.remove()))
+    .catch(e => root.querySelectorAll(".mmd-note").forEach(x => x.textContent = "⚠️ " + e.message + "，以下顯示原始碼"));
+}
+// SOP 每次切到分頁都重新抓，設定改過就會反映
+async function loadSop() {
+  try {
+    const r = await fetch("/sop?frag=1");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    document.getElementById("sopBody").innerHTML = await r.text();
+    document.getElementById("sopBody").classList.remove("muted");
+    renderMermaid(document.getElementById("sopBody"));
+  } catch (e) { document.getElementById("sopBody").textContent = "SOP 載入失敗：" + e.message; }
 }
 document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
-window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
-(() => { let t = location.hash.slice(1); if (!TABS.includes(t)) { try { t = localStorage.getItem("secaudit-tab"); } catch (e) {} } showTab(t || "reports"); })();
+
+// 報告彈窗：網址 #reports/20261107-190700 會自動打開；直接開 /reports/….html 也會被導回這裡
+const RNAME = /^\d{8}-\d{6}$/;
+const rptModal = document.getElementById("rptModal"), rptFrame = document.getElementById("rptFrame");
+function openReport(name) {
+  if (!RNAME.test(name)) return;
+  showTab("reports");
+  const src = "/reports/" + name + ".html";
+  if (rptFrame.dataset.name !== name) { rptFrame.dataset.name = name; rptFrame.src = src; }
+  document.getElementById("rptTitle").textContent = "📋 報告 " + name.replace(/^(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)(\d\d)$/, "$1-$2-$3 $4:$5:$6");
+  document.getElementById("rptMd").href = "/reports/" + name + ".md?dl=1";
+  document.getElementById("rptFull").href = src + "?full=1";
+  rptModal.classList.add("on"); document.body.classList.add("noscroll");
+  if (location.hash !== "#reports/" + name) history.replaceState(null, "", location.pathname + location.search + "#reports/" + name);
+  document.getElementById("rptClose").focus();
+}
+function closeReport() {
+  if (!rptModal.classList.contains("on")) return;
+  rptModal.classList.remove("on"); document.body.classList.remove("noscroll");
+  if (location.hash.startsWith("#reports/")) history.replaceState(null, "", location.pathname + location.search + "#reports");
+}
+function route() {
+  const [t, r] = decodeURIComponent(location.hash.slice(1)).split("/");
+  if (t === "reports" && RNAME.test(r || "")) return openReport(r);
+  closeReport();
+  if (TABS.includes(t)) showTab(t);
+}
+document.getElementById("rptClose").onclick = closeReport;
+rptModal.addEventListener("click", e => { if (e.target === rptModal) closeReport(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeReport(); });
+rptFrame.addEventListener("load", () => {
+  // 報告裡的連結：其他報告 → 在彈窗裡切換；修復 / 下載預覽（/?fix=…）→ 回到主控台處理
+  let doc; try { doc = rptFrame.contentDocument; } catch (e) { return; }
+  if (!doc) return;
+  doc.addEventListener("keydown", e => { if (e.key === "Escape") closeReport(); });
+  doc.addEventListener("click", e => {
+    const a = e.target.closest && e.target.closest("a[href]"); if (!a) return;
+    const u = new URL(a.href, location.href); if (u.origin !== location.origin) return;
+    const m = u.pathname.match(/^\/reports\/(\d{8}-\d{6})\.html$/);
+    if (m && !u.searchParams.get("full")) { e.preventDefault(); openReport(m[1]); }
+    else if (u.pathname === "/" && u.search) { e.preventDefault(); location.href = u.pathname + u.search; }
+  });
+});
+window.addEventListener("hashchange", route);
+(() => { let t = location.hash.slice(1).split("/")[0]; if (!TABS.includes(t)) { try { t = localStorage.getItem("secaudit-tab"); } catch (e) {} } showTab(t || "reports"); route(); })();
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let state = null, targets = [], cfgLoaded = false;
@@ -232,11 +365,42 @@ function renderStatus(st) {
           (st.last_check ? `　・ 上次檢查 ${esc(st.last_check)}（沒有變動的排程掃描不另存報告）` : "");
   if (st.last_error) t += `<br><span style="color:var(--high)">錯誤：${esc(st.last_error)}</span>`;
   $("#stText").innerHTML = t;
-  let sc = st.next_quick ? `下次快速掃描 ${st.next_quick} ・ 下次完整掃描 ${st.next_full}` : "常駐排程未啟動（只開 Web UI）";
-  if (st.next_reminder) sc += ` ・ 📋 下次未處理提醒 ${st.next_reminder}${st.escalated ? "（逾期，每天提醒）" : ""}`;
-  if (st.watch) sc += ` ・ ⚡ 即時監看 ${st.watch.paths} 處（每輪 ${st.watch.cost_ms ?? "-"} ms）${st.watch.pending ? `，${st.watch.pending} 處變動待確認` : ""}${st.watch.last_trigger ? `，上次觸發 ${st.watch.last_trigger}` : ""}`;
-  if (st.resources) sc += ` ・ 📈 資源監控 ${st.resources.last} 取樣（CPU ${st.resources.cpu}、記憶體壓力 ${st.resources.pressure}、swap ${st.resources.swap_gb} GB、常駐程式 ${st.resources.known} 個、24 小時內事件 ${st.resources.events} 件）`;
-  $("#sched").textContent = sc;
+  $("#sched").textContent = st.next_quick ? "" : "常駐排程未啟動（只開 Web UI）";
+  renderMetrics(st);
+}
+
+// 頁首的指標卡片：排程、即時監看、資源監控的現況
+function renderMetrics(st) {
+  const cfg = (state && state.config) || {};
+  const plain = h => String(h || "").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ");
+  const card = (k, v, sub, opt = {}) => `<div class="metric${opt.warn ? " warn" : ""}" title="${esc(opt.title || plain(k + "：" + v.replace(/<small>/g, "") + "\n" + sub))}">
+    <div class="k">${k}</div><div class="v">${v}</div><div class="s">${sub || "&nbsp;"}</div></div>`;
+  // 「11-08 03:00」→ 時間大字、日期小字，窄卡片也放得下
+  const hm = t => { const m = String(t || "").match(/^(\d\d-\d\d) (\d\d:\d\d)/); return m ? `${m[2]}<small>${m[1]}</small>` : esc(String(t || "—")); };
+  const out = [];
+  if (st.next_quick) {
+    out.push(card("🔁 下次快速掃描", hm(st.next_quick), `每 ${esc(cfg.quick_interval_min ?? "?")} 分鐘${st.last_check ? "・上次 " + esc(String(st.last_check).slice(-8, -3)) : ""}`));
+    out.push(card("🗂 下次完整掃描", hm(st.next_full), st.last_report ? "上次報告 " + esc(st.last_report) : ""));
+  }
+  if (st.watch) {
+    const w = st.watch, lt = String(w.last_trigger || ""), at = lt.split("（")[0];
+    out.push(card("⚡ 即時監看", `${esc(w.paths)}<small>處</small>`,
+      w.pending ? `<span class="flag">${esc(w.pending)} 處變動待確認</span>` : (at ? "上次觸發 " + esc(at) : `每輪 ${esc(w.cost_ms ?? "-")} ms`),
+      {warn: !!w.pending, title: (lt ? "上次觸發 " + lt + "\n" : "") + "每輪 " + (w.cost_ms ?? "-") + " ms"}));
+  }
+  if (st.resources) {
+    const r = st.resources, cpu = String(r.cpu ?? "-").replace(/%$/, "");
+    out.push(card("📈 CPU", `${esc(cpu)}<small>%</small>`, `整台使用率・${esc(r.last || "")} 取樣`,
+      {warn: +cpu >= 80, title: "資源監控每分鐘取樣，最後一次 " + (r.last || "")}));
+    out.push(card("🧠 記憶體", esc(r.pressure ?? "-"), `記憶體壓力・swap ${esc(r.swap_gb)} GB`,
+      {warn: r.pressure && r.pressure !== "正常", title: "macOS 記憶體壓力：正常 / 警告 / 緊急；swap 是已經換到磁碟的記憶體"}));
+    out.push(card("🧩 常駐程式", `${esc(r.known)}<small>個</small>`,
+      r.events ? `<span class="flag">24 小時內 ${esc(r.events)} 件事件</span>` : "24 小時內沒有異常",
+      {warn: !!r.events, title: "資源監控每分鐘取樣，最後一次 " + (r.last || "")}));
+  }
+  if (st.next_reminder) out.push(card("📋 未處理提醒", hm(st.next_reminder), st.escalated ? '<span class="flag">有逾期高風險，每天提醒</span>' : "每週一次",
+    {warn: !!st.escalated}));
+  $("#metrics").innerHTML = out.join("");
 }
 
 const KIND = {home:"家目錄", cloud:"雲端硬碟", volume:"磁碟", custom:"自訂"};
@@ -267,7 +431,7 @@ function renderReports(rp) {
     <td class="hide-sm muted" title="${esc((r.targets || []).join("\n"))}">${r.mode === "full" ? `${(r.targets || []).length} 個資料夾` : "—"}</td>
     <td>${pill(r.counts.high,"high")} ${pill(r.counts.medium,"medium")} ${pill(r.counts.low,"low")}</td>
     <td>${r.changes ? `${r.changes}${r.attention ? ` <b style="color:var(--high)">⚠️${r.attention}</b>` : ""}` : "—"}</td>
-    <td style="white-space:nowrap"><a class="btn" href="/reports/${esc(r.name)}.html" target="_blank" rel="noopener">檢視</a>
+    <td style="white-space:nowrap"><a class="btn" href="#reports/${esc(r.name)}">檢視</a>
         <a class="btn" href="/reports/${esc(r.name)}.md?dl=1">MD</a>
         ${r.mode === "full" || r.mode === "recheck" ? `<button class="btn" data-recheck="${esc(r.name)}" title="只重新檢查這份報告提過的問題，並套用目前的規則">🔁 重新檢查</button>` : ""}</td></tr>`).join("") ||
     `<tr><td colspan="6" class="muted">還沒有報告</td></tr>`;
@@ -284,7 +448,7 @@ function renderConfig(c, s) {
   if (!cfgLoaded) {
     $("#c_quick").value = c.quick_interval_min; $("#c_hour").value = c.full_scan_hour;
     $("#c_online").checked = c.online; $("#c_llm").checked = c.llm_enabled; $("#c_feed").value = c.vulnfeed_hours ?? 6;
-    $("#c_rem").checked = c.reminder_enabled ?? true; $("#c_wd").value = c.reminder_weekday ?? 0; $("#c_rh").value = c.reminder_hour ?? 9; $("#c_esc").value = c.escalate_days ?? 7;
+    $("#c_rem").checked = c.reminder_enabled ?? true; $("#c_wd").value = c.reminder_weekday ?? 0; $("#c_rh").value = c.reminder_hour ?? 9; $("#c_esc").value = c.escalate_days ?? 7; $("#c_idle").value = c.idle_project_days ?? 30;
     $("#c_vault").value = c.secure_vault || "Personal"; $("#c_sdir").value = c.secure_dir || "~/Secure";
     savedSecure = {vault: $("#c_vault").value, dir: $("#c_sdir").value}; secureDirty();
     $("#c_host").value = c.ollama_host; $("#c_model").value = c.ollama_model; cfgLoaded = true; hostHint();
@@ -352,6 +516,9 @@ async function refresh() {
   clearTimeout(window._t); window._t = setTimeout(refresh, (state.status.running || state.status.feed_running) ? 1500 : 10000);
 }
 
+// 手動掃描要不要發 Telegram：記在這個瀏覽器（只是個人偏好，不影響排程掃描的通知）
+try { $("#notify").checked = localStorage.getItem("secaudit-manual-notify") === "1"; } catch (e) {}
+$("#notify").onchange = () => { try { localStorage.setItem("secaudit-manual-notify", $("#notify").checked ? "1" : "0"); } catch (e) {} };
 $("#full").onclick = async () => { await api("/api/scan", {mode:"full", notify:$("#notify").checked}); refresh(); };
 $("#quick").onclick = async () => { await api("/api/scan", {mode:"quick", notify:$("#notify").checked}); refresh(); };
 $("#cancel").onclick = () => api("/api/cancel", {});
@@ -377,7 +544,7 @@ $("#saveCfg").onclick = async () => {
   const pendingSecure = secureChanged();
   const r = await api("/api/config", {quick_interval_min:+$("#c_quick").value, full_scan_hour:+$("#c_hour").value, online:$("#c_online").checked,
     llm_enabled:$("#c_llm").checked, ollama_host:$("#c_host").value, ollama_model:$("#c_model").value, vulnfeed_hours:+$("#c_feed").value,
-    reminder_enabled:$("#c_rem").checked, reminder_weekday:+$("#c_wd").value, reminder_hour:+$("#c_rh").value, escalate_days:+$("#c_esc").value});
+    reminder_enabled:$("#c_rem").checked, reminder_weekday:+$("#c_wd").value, reminder_hour:+$("#c_rh").value, escalate_days:+$("#c_esc").value, idle_project_days:+$("#c_idle").value});
   if (r.error) { $("#cfgMsg").innerHTML = `<span style="color:var(--high)">❌ ${esc(r.error)}</span>`; return; }
   $("#cfgMsg").textContent = "已儲存，下一次 AI 摘要開始套用"; setTimeout(() => $("#cfgMsg").textContent = "", 3000);
   if (pendingSecure) { await saveSecure(); return; }   // 一般設定存好後，vault / DMG 資料夾另外走 Touch ID
@@ -493,7 +660,8 @@ async function loadActions() {
   keyState = {keys: r.keys || [], localhost: !!r.localhost};
   if ($("#saveSecureY")) $("#saveSecureY").style.display = canKey() ? "" : "none";
   if (!document.activeElement || document.activeElement.id !== "keyName") renderKeys();
-  $("#actList").innerHTML = r.catalog.map(a => `<button data-act="${esc(a.id)}">${esc(a.icon)} ${esc(a.title)}</button>${a.hint ? `<span class="muted">${esc(a.hint)}</span>` : ""}`).join("");
+  actCatalog = Object.fromEntries(r.catalog.map(a => [a.id, a]));
+  $("#actList").innerHTML = r.catalog.map(a => `<button data-act="${esc(a.id)}" class="${a.id === actActive ? "on" : ""}"><span>${esc(a.icon)} ${esc(a.title)}</span>${a.hint ? `<span class="h">${esc(a.hint)}</span>` : ""}</button>`).join("");
   document.querySelectorAll("#actList button[data-act]").forEach(b => b.onclick = () => previewAction(b.dataset.act));
   actRunning = !!r.status.running;
   renderActStatus(r.status);
@@ -502,26 +670,77 @@ async function loadActions() {
   $("#actHistory").innerHTML = r.history.length ? r.history.map(h => `<div>${esc(h.time)}　${h.ok ? "✅" : "❌"} ${esc(h.action)}　${esc(h.message)}${h.method ? `　<span class="muted">（${esc(h.method)}）</span>` : ""}</div>`).join("") : "尚無紀錄";
   clearTimeout(actTimer); actTimer = setTimeout(loadActions, r.status.running ? 1500 : 10000);
 }
+let actActive = "", actCatalog = {}, actSeq = 0;
+const stepHtml = s => `<label class="step${s.default === false ? " nodef" : ""}"><input type="checkbox" class="actStep" value="${esc(s.id)}" data-def="${s.default === false ? 0 : 1}" ${s.default === false ? "" : "checked"}>
+  <span style="min-width:0"><div class="l">${esc(s.label)}</div><div class="d">${String(s.detail || "").split("；").filter(Boolean).map(x => `<div>${esc(x)}</div>`).join("")}</div></span></label>`;
+// 有分類（例如閒置專案依位置分）就分組顯示：每組一個總勾選框，項目多時預設收合
+function stepsGrouped(steps) {
+  if (!steps.some(s => s.group)) return steps.map(stepHtml).join("");
+  const order = [], by = {};
+  steps.forEach(s => { const g = s.group || "其他"; if (!by[g]) { by[g] = []; order.push(g); } by[g].push(s); });
+  const fold = steps.length > 20;
+  return order.map((g, i) => `<div class="sgrp${fold ? " fold" : ""}" data-g="${i}">
+    <div class="sgh"><input type="checkbox" class="grpBox" title="勾選 / 取消這一類的全部項目">
+      <button type="button" class="sgt"><b>${esc(g)}</b> <span class="muted gcnt"></span><span class="arrow">▾</span></button></div>
+    <div class="sgb">${by[g].map(stepHtml).join("")}</div></div>`).join("");
+}
+// 修復預覽：一次只顯示一個動作；標題、勾選數與執行按鈕固定在頂端，項目再多也不用捲到最下面
 async function previewAction(id, report, focus) {
-  $("#actPlan").style.display = ""; $("#actPlan").innerHTML = '<span class="muted">產生預覽中…</span>';
+  actActive = id; const seq = ++actSeq;
+  document.querySelectorAll("#actList button[data-act]").forEach(b => b.classList.toggle("on", b.dataset.act === id));
+  const a = actCatalog[id] || {icon: "🛠", title: id};
+  $("#actPlan").innerHTML = `<div class="acthead"><div class="t">${esc(a.icon)} ${esc(a.title)}</div><div class="muted">產生預覽中…</div></div>`;
+  if (matchMedia("(max-width:760px)").matches) $("#actPlan").scrollIntoView({block: "start", behavior: "smooth"});
   const p = await api("/api/actions/plan", {action:id, report: report || "", focus: focus || ""});
-  if (p.error) { $("#actPlan").innerHTML = `<span style="color:var(--high)">❌ ${esc(p.error)}</span>`; return; }
+  if (seq !== actSeq) return;          // 已經切換到別的動作，這份預覽作廢
+  if (p.error) { $("#actPlan").innerHTML = `<div class="acthead"><div class="t">${esc(a.icon)} ${esc(a.title)}</div><div style="color:var(--high)">❌ ${esc(p.error)}</div></div>`; return; }
   actPlan = p;
-  $("#actPlan").innerHTML = `<b>${esc(p.title)}</b>${p.report ? `<span class="muted">（依據報告 ${esc(p.report)}）</span>` : ""}
-    <ul class="muted" style="margin:6px 0;padding-left:20px">${p.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>
-    ${p.steps.length > 1 ? `<div class="row" style="margin:6px 0"><button type="button" id="selRec">只選建議項目</button><button type="button" id="selAll">全選</button><button type="button" id="selNone">全不選</button><span class="muted" id="selCount"></span></div>` : ""}
-    ${p.steps.length ? p.steps.map(s => `<label class="target" style="cursor:pointer"><input type="checkbox" class="actStep" value="${esc(s.id)}" data-def="${s.default === false ? 0 : 1}" ${s.default === false ? "" : "checked"}>
-      <span class="p"><b>${esc(s.label)}</b><br><code>${esc(s.detail)}</code></span></label>`).join("") +
-      `<div class="row" style="margin-top:8px"><button class="primary" id="actRun">🔒 以 Touch ID 授權執行</button>${canKey() ? '<button class="primary" id="actRunY">🔑 以 YubiKey 授權執行</button>' : ""}<button id="actMd" title="把預覽與目前的勾選彙整成 Markdown，執行前先評估（也可以交給 AI 檢查）">⬇ 下載評估 Markdown</button><button id="actCancel">取消</button><span id="actBusy" class="muted" style="display:none">目前有修復動作執行中，完成後才能執行下一個</span></div>`
-      : '<div class="muted">目前沒有需要處理的項目 👍</div>'}`;
-  if ($("#actCancel")) $("#actCancel").onclick = () => { $("#actPlan").style.display = "none"; actPlan = null; };
+  const rec = p.steps.filter(s => s.default !== false).length;
+  const many = p.steps.length > 8;
+  $("#actPlan").innerHTML = `<div class="acthead"><div class="t">${esc(a.icon)} ${esc(p.title)}</div>
+      <div class="muted">${p.report ? `依據報告 ${esc(p.report)}・` : ""}共 ${p.steps.length} 項，建議處理 ${rec} 項</div></div>
+    ${p.notes.length ? `<details class="note" style="margin:0 0 8px"><summary style="cursor:pointer">說明與注意事項（${p.notes.length} 點，執行前請看一次）</summary>
+      <ul class="muted" style="margin:6px 0;padding-left:20px">${p.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul></details>` : ""}
+    ${p.steps.length ? `<div class="actbar">
+        <b style="font-size:13px">${esc(a.icon)} ${esc(a.title)}</b>
+        ${many ? '<input type="text" id="actFilter" placeholder="篩選項目…">' : ""}
+        ${p.steps.length > 1 ? '<button type="button" id="selRec">建議項目</button><button type="button" id="selAll">全選</button><button type="button" id="selNone">全不選</button>' : ""}
+        <span class="muted" id="selCount"></span><span class="sp"></span>
+        <button id="actMd" title="把預覽與目前的勾選彙整成 Markdown，執行前先評估（也可以交給 AI 檢查）">⬇ 評估 MD</button>
+        <button class="primary" id="actRun">🔒 Touch ID 執行</button>${canKey() ? '<button class="primary" id="actRunY">🔑 YubiKey 執行</button>' : ""}
+        <button id="actCancel" title="關閉預覽">✕</button></div>
+      <div id="actBusy" class="muted" style="display:none;padding:6px 0">目前有修復動作執行中，完成後才能執行下一個</div>
+      <div id="actSteps">${stepsGrouped(p.steps)}</div>`
+      : '<div class="muted actempty">目前沒有需要處理的項目 👍</div>'}`;
+  if ($("#actCancel")) $("#actCancel").onclick = () => { actPlan = null; actActive = ""; actSeq++;
+    document.querySelectorAll("#actList button.on").forEach(b => b.classList.remove("on"));
+    $("#actPlan").innerHTML = '<div class="muted actempty">← 先選一個修復動作，這裡會列出它要處理的項目，勾選後再授權執行。</div>'; };
   const boxes = [...document.querySelectorAll(".actStep")];
-  const count = () => { const n = boxes.filter(x => x.checked).length; if ($("#selCount")) $("#selCount").textContent = `已勾選 ${n} / ${boxes.length} 項`;
-    if ($("#actRun")) $("#actRun").textContent = `🔒 以 Touch ID 授權執行（${n} 項）`; if ($("#actRunY")) $("#actRunY").textContent = `🔑 以 YubiKey 授權執行（${n} 項）`; };
+  const shown = () => boxes.filter(x => x.closest(".step").style.display !== "none");
+  let count = () => { const n = boxes.filter(x => x.checked).length; if ($("#selCount")) $("#selCount").textContent = `已勾選 ${n} / ${boxes.length}`;
+    if ($("#actRun")) { $("#actRun").textContent = `🔒 Touch ID 執行（${n}）`; $("#actRun").disabled = !n || actRunning; }
+    if ($("#actRunY")) { $("#actRunY").textContent = `🔑 YubiKey 執行（${n}）`; $("#actRunY").disabled = !n || actRunning; } };
+  // 分類的總勾選框：全選 / 全不選這一類（有篩選時只作用在顯示中的項目），部分勾選時顯示「–」
+  const syncGroups = () => document.querySelectorAll("#actSteps .sgrp").forEach(g => {
+    const bs = [...g.querySelectorAll(".actStep")], n = bs.filter(x => x.checked).length, gb = g.querySelector(".grpBox");
+    gb.checked = n === bs.length && n > 0; gb.indeterminate = n > 0 && n < bs.length;
+    g.querySelector(".gcnt").textContent = `已選 ${n} / ${bs.length}`; });
+  const count0 = count;
+  count = () => { count0(); syncGroups(); };
+  document.querySelectorAll("#actSteps .sgrp").forEach(g => {
+    g.querySelector(".grpBox").onchange = e => { g.querySelectorAll(".actStep").forEach(x => { if (x.closest(".step").style.display !== "none") x.checked = e.target.checked; }); count(); };
+    g.querySelector(".sgt").onclick = () => g.classList.toggle("fold");
+  });
   boxes.forEach(x => x.onchange = count);
-  if ($("#selRec")) $("#selRec").onclick = () => { boxes.forEach(x => x.checked = x.dataset.def === "1"); count(); };
-  if ($("#selAll")) $("#selAll").onclick = () => { boxes.forEach(x => x.checked = true); count(); };
-  if ($("#selNone")) $("#selNone").onclick = () => { boxes.forEach(x => x.checked = false); count(); };
+  if ($("#actFilter")) $("#actFilter").oninput = e => { const t = e.target.value.toLowerCase();
+    boxes.forEach(x => { const row = x.closest(".step"); row.style.display = !t || row.textContent.toLowerCase().includes(t) ? "" : "none"; });
+    // 篩選時展開有符合項目的分類、隱藏沒有符合的分類
+    document.querySelectorAll("#actSteps .sgrp").forEach(g => { const any = [...g.querySelectorAll(".step")].some(r => r.style.display !== "none");
+      g.style.display = any ? "" : "none"; if (t) g.classList.toggle("fold", !any); }); };
+  // 有篩選時，全選 / 全不選 / 建議項目只作用在目前顯示的項目
+  if ($("#selRec")) $("#selRec").onclick = () => { shown().forEach(x => x.checked = x.dataset.def === "1"); count(); };
+  if ($("#selAll")) $("#selAll").onclick = () => { shown().forEach(x => x.checked = true); count(); };
+  if ($("#selNone")) $("#selNone").onclick = () => { shown().forEach(x => x.checked = false); count(); };
   count();
   if ($("#actRun")) $("#actRun").onclick = () => runAction("touchid");
   if ($("#actMd")) $("#actMd").onclick = async () => {
@@ -547,13 +766,16 @@ async function runAction(method) {
   }
   const r = await api("/api/actions/run", {plan_id:actPlan.plan_id, steps:ids, method, assertion});
   if (!r.started) { $("#actStatus").style.display = ""; $("#actStatus").innerHTML = `<span style="color:var(--high)">❌ ${esc(r.error)}</span>`; return; }
-  $("#actPlan").style.display = "none"; actPlan = null; loadActions();
+  actPlan = null; actActive = ""; document.querySelectorAll("#actList button.on").forEach(b => b.classList.remove("on"));
+  $("#actPlan").innerHTML = '<div class="muted actempty">⏳ 已開始執行，進度顯示在上方。完成後的結果在下方「最近的執行結果」。</div>';
+  $("#actStatus").scrollIntoView({block: "nearest"}); loadActions();
 }
 let actRunning = false, actWasRunning = false;
 const stepsHtml = rs => (rs || []).map(x => `<details><summary>${x.ok ? "✅" : "❌"} ${esc(x.label)}</summary><pre style="white-space:pre-wrap;font-size:12px;max-height:260px;overflow:auto">${esc(x.output)}</pre></details>`).join("");
 // 一次只能執行一個修復動作（伺服器也會拒絕）：執行中時停用所有「執行」按鈕
 function lockRunButtons() {
-  ["#actRun", "#actRunY"].forEach(id => { const b = $(id); if (b) { b.disabled = actRunning; b.title = actRunning ? "目前有修復動作執行中，請等它完成" : ""; } });
+  const n0 = document.querySelectorAll(".actStep:checked").length;
+  ["#actRun", "#actRunY"].forEach(id => { const b = $(id); if (b) { b.disabled = actRunning || !n0; b.title = actRunning ? "目前有修復動作執行中，請等它完成" : ""; } });
   const n = $("#actBusy"); if (n) n.style.display = actRunning ? "" : "none";
 }
 function renderActStatus(s) {

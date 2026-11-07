@@ -8,7 +8,7 @@
 
 - 只用 Python 3.8+ 標準庫，不需要 `pip install`。
 - 掃描結果輸出 HTML（給人看）與 Markdown（給其他 AI 處理），機密一律遮罩。
-- 附本機 Web UI：設定掃描範圍、查看報告、漏洞快訊、運作 SOP。
+- 附本機 Web UI：設定掃描範圍、查看報告（彈窗，網址可直接開啟）、漏洞快訊、修復動作、運作 SOP。
 
 ## 功能
 
@@ -22,6 +22,7 @@
 | 開機自動執行 | LaunchAgents / LaunchDaemons（含程式簽章）、crontab、shell 啟動檔 |
 | 供應鏈與版本 | 各專案 lockfile（npm / pnpm / yarn / pip / poetry / uv / Go / Cargo / Gemfile / composer）查 [OSV.dev](https://osv.dev)；全域 npm 套件 |
 | 執行環境版本 | **所有已安裝的**Node.js、Python、Go、Ruby、Java、PHP、Rust、Deno、Bun、.NET（nvm / fnm / volta / asdf / mise / Homebrew / conda / pyenv / uv / rbenv / rvm / sdkman / rustup / 系統內建）是否停止維護（[endoflife.date](https://endoflife.date)）；Node.js 是否錯過官方標記的安全更新；專案指定的版本（`.nvmrc`、`.python-version`、`.tool-versions`、`go.mod`、`package.json` engines、`pyproject.toml`、`Dockerfile` FROM、compose `image:`） |
+| 💤 閒置專案 | 完整掃描後把有問題的檔案依專案分組，看最後一次 commit、git 操作與檔案修改時間（不算 lockfile、`.env*` 等常被工具自動改的檔案），超過 30 天沒更新、也沒有程式開在裡面的列為閒置；可以批次把整個專案封存成加密 DMG（放在專案旁邊，密碼存進 1Password），逐檔驗證後才刪除原資料夾 |
 | 漏洞快訊 | 定期抓取 [GitHub Advisory Database](https://github.com/advisories) 與 [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)，比對你專案實際使用的套件版本，影響到你的會標出要升級到哪個版本，附每則 50～100 字摘要與連結 |
 
 ### 執行方式
@@ -185,6 +186,7 @@ secaudit/
   diff.py                變動比對與 ⚠️ 規則
   watch.py               即時監看
   checks_resources.py    CPU / 記憶體異常與新常駐程式（背景取樣）
+  projects.py            閒置專案判斷
   notify.py              Telegram、LLM
   report.py / sop.py     報告與 SOP
   app.py / web.py        排程、狀態、Web UI

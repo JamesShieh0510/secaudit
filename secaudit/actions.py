@@ -973,9 +973,9 @@ def secure_settings_update(vault, out_dir, method="touchid", assertion=None, por
     return True, ""
 
 
-def plan_key_perms():
-    name, fs = _latest_findings()
-    seen, steps = set(), []
+def _key_perm_todo(fs):
+    """報告裡權限過寬的私鑰，只留「現在」仍然過寬的（已經改過的報告不會馬上更新，不要一直重複列出）。"""
+    out, done, seen = [], 0, set()
     for f in fs:
         if f.get("rule") != "key-perm" or not f.get("path"):
             continue
@@ -983,19 +983,296 @@ def plan_key_perms():
         if p in seen or not _secure_ok(p):
             continue
         seen.add(p)
-        st = _file_state(p)
-        if not st:
-            continue
         try:
             mode = stat.S_IMODE(os.lstat(p).st_mode)
         except OSError:
             continue
+        if mode & 0o077:
+            out.append((p, mode))
+        else:
+            done += 1
+    return out, done
+
+
+def plan_key_perms():
+    name, fs = _latest_findings()
+    todo, done = _key_perm_todo(fs)
+    steps = []
+    for p, mode in todo:
+        st = _file_state(p)
+        if not st:
+            continue
         steps.append({"id": "k%d" % len(steps), "label": home_rel(p), "detail": "權限 %o → 600（只有你可讀寫）" % mode,
                       "kind": "chmod", "path": p, "state": st})
-    return {"title": "把私鑰檔案的權限改成只有自己可讀（chmod 600）", "report": name, "steps": steps,
-            "notes": ["只改權限，不改內容。執行前會確認檔案還是預覽時那一份，不是的話略過。",
-                      "檔案若在雲端硬碟，雲端上的分享設定不受影響，請另外檢查。"],
+    notes = ["只改權限，不改內容。執行前會確認檔案還是預覽時那一份，不是的話略過。",
+             "檔案若在雲端硬碟，雲端上的分享設定不受影響，請另外檢查。"]
+    if done:
+        notes.insert(0, "✅ 報告裡另有 %d 個私鑰現在已經是 600（之前改過了），不再列出。報告要等下一次完整掃描，"
+                        "或在報告的「🛠 處理與下載」按「🔁 重新檢查」才會更新。" % done)
+    return {"title": "把私鑰檔案的權限改成只有自己可讀（chmod 600）", "report": name, "steps": steps, "notes": notes,
             "reason": "執行 secaudit 修復：把私鑰權限改成只有自己可讀（共 %d 個檔案）" % len(steps)}
+
+
+# ---------------------------------------------------------------- 動作 7：閒置專案 → 整個資料夾封存成加密 DMG
+# 已經不維護的專案：與其一個一個處理裡面的機密與套件漏洞，不如整個封存。
+#   - DMG 放在專案旁邊（同一層資料夾），密碼隨機產生、存進 1Password（只經由 stdin 傳給 op / hdiutil）
+#   - 預覽時記下最後活動時間；執行前重新確認：預覽之後有更新、有程式在裡面當工作目錄、有 iCloud 僅限線上的檔案 → 不處理
+#   - 唯讀掛載 DMG 逐檔比對（大小、sha256、symlink 目標），刪除前再比對一次原資料夾，都一致才刪除
+PROJECT_MAX = 20 * 1024 ** 3
+
+
+def _project_ok(root):
+    """可以整個封存的資料夾：家目錄或 /Volumes 底下、不是家目錄 / 磁碟根目錄 / 掃描範圍的根目錄、
+    不在 ~/Library（雲端硬碟除外），也不是 secaudit 自己或它的上層。"""
+    from .app import load_config, load_targets
+    rp = os.path.realpath(root)
+    if rp != root or not os.path.isdir(rp) or os.path.islink(root):
+        return False
+    if not (_inside(rp, HOME) or rp.startswith("/Volumes/")) or rp == os.path.realpath(HOME) or \
+            re.match(r"^/Volumes/[^/]+$", rp):
+        return False
+    lib = os.path.join(os.path.realpath(HOME), "Library")
+    if _inside(rp, lib) and not any(m in rp + "/" for m, _ in _CLOUD_NAMES):
+        return False
+    if _inside(DATA, rp) or _inside(_ME, rp) or _inside(rp, _ME):
+        return False
+    from .projects import tool_dir
+    if tool_dir(rp):         # ~/.lmstudio 這類工具自己管理的資料夾
+        return False
+    tg = {os.path.realpath(t.path) for t in load_targets(load_config())}
+    return rp not in tg and not any(_inside(t, rp) for t in tg)
+
+
+def _tree(root):
+    """{相對路徑: (類型, 大小, sha256 或 symlink 目標)}，略過 .DS_Store（Finder 打開資料夾就會改寫）。"""
+    out = {}
+    for dp, dns, fns in os.walk(root):
+        for n in dns + fns:
+            if n == ".DS_Store":
+                continue
+            p = os.path.join(dp, n)
+            r = os.path.relpath(p, root)
+            st = os.lstat(p)
+            if stat.S_ISLNK(st.st_mode):
+                out[r] = ("l", 0, os.readlink(p))
+            elif stat.S_ISDIR(st.st_mode):
+                out[r] = ("d", 0, "")
+            elif stat.S_ISREG(st.st_mode):
+                out[r] = ("f", st.st_size, _sha(p))
+    return out
+
+
+def _loc_group(path):
+    """封存預覽的大類：依位置分，方便一次勾選整類（例如 iCloud 裡的通常是舊備份）。"""
+    rp = os.path.realpath(path)
+    if "/Library/Mobile Documents/" in rp:
+        return "☁️ iCloud Drive（通常是舊備份）"
+    for m, n in _CLOUD_NAMES:
+        if m in rp:
+            return "☁️ %s" % n
+    m = re.match(r"^/Volumes/([^/]+)", rp)
+    if m:
+        return "💽 外接磁碟「%s」" % m.group(1)
+    if _inside(rp, HOME):
+        top = os.path.relpath(rp, os.path.realpath(HOME)).split(os.sep)[0]
+        return "🏠 ~/%s" % top
+    return "其他位置"
+
+
+def plan_archive_projects():
+    from . import projects as P
+    from .app import load_config, load_targets
+    cfg = load_config()
+    days = cfg.get("idle_project_days", P.DEFAULT_DAYS)
+    vault = cfg.get("secure_vault", "Personal")
+    name, fs = _latest_findings()
+    # 報告裡已經算好閒置專案（完整掃描時）：只重新確認那些專案；舊報告沒有才整份重算（比較慢）
+    pre = (_read(os.path.join(REPORTS, name + ".json"), {}).get("projects") or {}) if name else {}
+    if pre.get("items") is not None:
+        cand = [a for a in pre["items"] if a.get("idle")]
+        users = P.cwd_users([a["root"] for a in cand])
+        items = []
+        for a in cand:
+            if not os.path.isdir(a["root"]):
+                continue
+            b = P.activity(a["root"], quick=True)
+            b.update({k: a.get(k) for k in ("remote", "dirty", "unpushed", "has_upstream")})
+            b.update(counts=a["counts"], titles=a["titles"], in_use=users.get(a["root"], []), size=a.get("size"))
+            b["idle"] = b["idle_days"] is not None and b["idle_days"] >= days and not b["in_use"]
+            items.append(b)
+    else:
+        items = P.summarize(fs, [t.path for t in load_targets(cfg)], days)["items"]
+    steps = []
+    for a in items:
+        if not a["idle"] or not _project_ok(a["root"]):
+            continue
+        c = a["counts"]
+        stamp = time.strftime("%Y%m%d")
+        dmg = os.path.join(os.path.dirname(a["root"]), "%s.archive-%s.dmg" % (os.path.basename(a["root"]), stamp))
+        notes = ["💤 閒置 %d 天（最後：%s，%s）" % (a["idle_days"], a["last"], a["last_what"]),
+                 "問題：高 %d、中 %d、低 %d（%s）" % (c["high"], c["medium"], c["low"], "、".join(a["titles"][:2])),
+                 "大小 %s" % P.human_size(a.get("size")), "Git：" + P.git_note(a),
+                 "封存到 %s" % home_rel(dmg), "⚠️ 驗證成功後會刪除整個原資料夾"]
+        default = True
+        if a["dataless"]:
+            notes.append("☁️ 有 %d 個檔案（約 %s）只在雲端，會先下載到這台電腦再封存；任何一個下載不到就不封存" % (
+                a["dataless"], P.human_size(a.get("dataless_bytes"))))
+        if (a.get("size") or 0) > PROJECT_MAX:
+            notes.append("⚠️ 超過 %d GB，封存需要很久、也需要同樣大小的可用空間，預設不勾選" % (PROJECT_MAX // 1024 ** 3))
+            default = False
+        if not os.access(os.path.dirname(a["root"]), os.W_OK):
+            notes.append("⚠️ 上層資料夾是唯讀的，DMG 放不進去，預設不勾選")
+            default = False
+        steps.append({"id": "p%d" % len(steps), "label": a["display"], "detail": "；".join(notes), "kind": "archive-project",
+                      "group": _loc_group(a["root"]),
+                      "path": a["root"], "last_ts": a["last_ts"], "default": default, "dmg": dmg, "info": a})
+    # 巢狀專案：上層專案封存時已經包含在裡面，不另外列
+    tops = [s for s in steps if not any(s["path"].startswith(o["path"] + os.sep) for o in steps)]
+    for t in tops:
+        kids = [s["label"] for s in steps if s["path"].startswith(t["path"] + os.sep)]
+        if kids:
+            t["detail"] += "；包含 %d 個子專案（%s）" % (len(kids), "、".join(os.path.basename(k) for k in kids[:3]))
+    # 同一類排在一起：雲端、外接磁碟在前（多半是備份），家目錄依資料夾名稱
+    rank = lambda g: (0 if g.startswith("☁️") else 1 if g.startswith("💽") else 2, g)
+    # 家目錄底下只有 1～2 個專案的資料夾合併成一類，避免分類太碎
+    from collections import Counter
+    n = Counter(s["group"] for s in tops)
+    for s in tops:
+        if s["group"].startswith("🏠") and n[s["group"]] < 3:
+            s["group"] = "🏠 家目錄其他資料夾"
+    tops.sort(key=lambda s: rank(s["group"]) if s["group"] != "🏠 家目錄其他資料夾" else (3, ""))
+    steps = [dict(s, id="p%d" % i) for i, s in enumerate(tops)]
+    title = "把閒置專案整個封存成加密 DMG，並刪除原資料夾"
+    notes = ["閒置的定義：超過 %d 天沒有更新（看最後一次 commit、git 操作，以及專案裡檔案的修改時間；lockfile、.env*、"
+             ".gitignore 這類常被工具自動改動的檔案不算），而且現在沒有任何程式（終端機、編輯器、dev server）開在裡面。"
+             "天數可以在「常駐監控設定」修改。" % days,
+             "🔐 每個專案一個 DMG，放在專案旁邊（同一層資料夾），檔名是「專案名稱.archive-日期.dmg」。"
+             "密碼隨機產生，存進 1Password vault「%s」的「secaudit 封存專案：路徑」項目，備註裡有原本位置、git remote、"
+             "最後活動時間和還原方式。執行前會確認這個 vault 只有你能存取。" % vault,
+             "流程：計算原資料夾每個檔案的 sha256 → 密碼存進 1Password 並讀回確認 → 直接從資料夾建立 AES-256 加密、壓縮的 DMG"
+             "（不會在磁碟上留下明文暫存副本）→ 用 1Password 裡的密碼唯讀掛載，逐檔比對 → 再確認原資料夾在這段期間沒有被改過 → 刪除原資料夾。"
+             "任何一步沒通過就停在那個專案，不刪除。",
+             "還原：雙擊 DMG，輸入 1Password 裡的密碼，把裡面的檔案複製回原本位置（備註裡有完整路徑）。",
+             "封存不等於撤銷：專案裡的金鑰如果曾經提交到 git、推到 GitHub 或分享過，請另外到各服務撤銷。"
+             "沒有 remote、或有沒 push 的 commit 的專案，DMG 會是唯一的副本，請保管好 1Password 項目。",
+             "雲端硬碟（iCloud 等）裡只在雲端的檔案，會在封存前自動下載到這台電腦（需要可用空間與網路，"
+             "大的專案可能要幾分鐘）；下載完才建立 DMG，刪除原資料夾後雲端上的那份也會一起刪除（iCloud 會保留 30 天在「最近刪除」）。",
+             "原資料夾直接刪除、不進垃圾桶。執行時 1Password 也會跳出自己的授權視窗。"]
+    return {"title": title, "report": name, "steps": steps, "notes": notes, "vault": vault,
+            "reason": "執行 secaudit 修復：把閒置專案封存成加密 DMG 並刪除原資料夾（共 %d 個專案）" % len(steps)}
+
+
+def _archive_project(plan, s):
+    """封存一個專案；回傳 (ok, 摘要)。"""
+    import secrets as _secrets
+    import socket
+    import tempfile
+    from . import projects as P
+    root, vault = s["path"], plan["vault"]
+    if not (vault_ok(vault) and _project_ok(root)):
+        return False, "設定的 vault 不合法，或資料夾不在允許封存的範圍，沒有處理"
+    status["phase"] = "%s：確認還是閒置的" % s["label"]
+    a = P.activity(root, quick=True)
+    a.update({k: (s.get("info") or {}).get(k) for k in ("remote", "dirty", "unpushed", "has_upstream")})
+    if a["last_ts"] > s["last_ts"]:
+        return False, "預覽之後專案有更新（%s，%s），沒有處理" % (a["last"], a["last_what"])
+    if P.cwd_users([root])[root]:
+        return False, "有程式正開在這個資料夾裡（%s），沒有處理" % "、".join(P.cwd_users([root])[root][:3])
+    if a["dataless"]:
+        if not P.in_cloud(root):
+            return False, "有 %d 個檔案只在雲端（佔位檔），沒有處理" % a["dataless"]
+        status["phase"] = "%s：從雲端下載 %d 個檔案（約 %s）" % (s["label"], a["dataless"], P.human_size(a.get("dataless_bytes")))
+        lab = s["label"]
+        bad = P.cloud_download(root, lambda d, n: status.update(phase="%s：從雲端下載檔案 %d / %d" % (lab, d, n)))
+        if bad:
+            return False, "有 %d 個檔案從雲端下載不到（例如 %s），沒有封存；可以稍後再試" % (len(bad), home_rel(bad[0]))
+    if not plan.get("_vault_id"):
+        status["phase"] = "確認 1Password vault 只有你能存取（請留意 1Password 的授權視窗）"
+        ok, why, vid = _vault_private(vault)
+        if not ok:
+            return False, why + "；沒有處理"
+        plan["_vault_id"] = vid
+    vid = plan["_vault_id"]
+    status["phase"] = "%s：計算每個檔案的 sha256" % s["label"]
+    try:
+        before = _tree(root)
+    except OSError as e:
+        return False, "讀取原資料夾失敗：%s；沒有處理" % e
+    nfile = sum(1 for v in before.values() if v[0] == "f")
+    size = sum(v[1] for v in before.values())
+    dmg = s["dmg"]
+    if os.path.exists(dmg):
+        dmg = dmg[:-4] + time.strftime("-%H%M%S") + ".dmg"
+    left = []
+    fail = lambda why: (False, why + "；原資料夾沒有刪除" + ("（留下：%s，可以刪除）" % "、".join(left) if left else ""))
+    title = "secaudit 封存專案：%s" % home_rel(root)
+    info = s.get("info") or {}
+    note = "\n".join([
+        "secaudit 封存專案（加密 DMG，密碼就是這個項目）",
+        "原本位置：%s" % home_rel(root), "完整路徑：%s" % root, "電腦：%s" % socket.gethostname(),
+        "封存時間：%s（授權：%s）" % (time.strftime("%Y-%m-%d %H:%M:%S"), status.get("method") or "—"),
+        "DMG：%s" % home_rel(dmg),
+        "內容：%d 個檔案、%s（逐檔 sha256 驗證後才刪除原資料夾）" % (nfile, P.human_size(size)),
+        "最後活動：%s（%s），封存時已閒置 %s 天" % (a["last"], a["last_what"], a["idle_days"]),
+        "Git：%s" % P.git_note(a),
+        "封存原因：專案已閒置，裡面有安全問題（%s）" % "、".join((info.get("titles") or [])[:3]),
+        "依據報告：%s" % (plan.get("report") or "—"),
+        "還原：雙擊 DMG、輸入這個項目的密碼，把裡面的檔案複製回「完整路徑」。",
+        "提醒：封存不等於撤銷。專案裡的金鑰如果曾經提交到 git 或外流，請到各服務撤銷並更換。"])
+    pw = _secrets.token_urlsafe(32)
+    status["phase"] = "%s：把 DMG 密碼存進 1Password" % s["label"]
+    iid = _op_item_create_password(vid, title, pw, note)
+    if not iid:
+        return fail("無法把密碼存進 1Password（可能沒有授權）")
+    left.append("1Password 項目「%s」" % title)
+    ok, got = _quiet(["op", "item", "get", iid, "--vault", vid, "--fields", "label=password", "--reveal"], env=_op_env())
+    same = ok and got.decode().strip() == pw
+    del got
+    if not same:
+        return fail("1Password 讀回的密碼和產生的不一致")
+    status["phase"] = "%s：建立加密 DMG（%s，可能要幾分鐘）" % (s["label"], P.human_size(size))
+    vol = re.sub(r"[^\w.-]+", "-", os.path.basename(root)).strip("-")[:27] or "project"
+    ok, _ = _quiet(["hdiutil", "create", "-quiet", "-srcfolder", root, "-fs", "APFS", "-format", "UDZO",
+                    "-encryption", "AES-256", "-stdinpass", "-volname", vol, dmg], pw.encode(), timeout=4 * 3600)
+    if os.path.isfile(dmg):
+        os.chmod(dmg, 0o600)
+        left.append("DMG %s" % home_rel(dmg))
+    if not ok or not os.path.isfile(dmg):
+        return fail("建立 DMG 失敗（可能是空間不夠或有讀不到的檔案）")
+    os.makedirs(SECURE_TMP, mode=0o700, exist_ok=True)
+    mnt = tempfile.mkdtemp(prefix="mnt-", dir=SECURE_TMP)
+    try:
+        status["phase"] = "%s：用 1Password 裡的密碼唯讀掛載 DMG，逐檔比對" % s["label"]
+        ok, _ = _quiet(["hdiutil", "attach", dmg, "-stdinpass", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mnt],
+                       pw.encode(), timeout=600)
+        if not ok:
+            return fail("掛載 DMG 失敗")
+        try:
+            after = _tree(mnt)
+        except OSError:
+            after = None
+        for junk in (".fseventsd", ".Trashes", ".Spotlight-V100", ".TemporaryItems"):   # 磁碟區本身會有的系統資料夾
+            if after is not None and junk not in before:
+                after = {k: v for k, v in after.items() if k != junk and not k.startswith(junk + os.sep)}
+        if not _detach(mnt):
+            return fail("驗證後卸載 DMG 失敗（解密的磁碟區可能還掛著，請手動退出）")
+    finally:
+        try:
+            os.rmdir(mnt)
+        except OSError:
+            pass
+    if after != before:
+        diff = sorted(k for k in set(before) | set(after or {}) if before.get(k) != (after or {}).get(k))[:3]
+        return fail("DMG 內容和原資料夾不一致（例如 %s）" % "、".join(diff))
+    status["phase"] = "%s：確認原資料夾沒有被改過，刪除" % s["label"]
+    try:
+        if _tree(root) != before:
+            return False, "已封存到 %s，但封存期間原資料夾被修改，沒有刪除" % home_rel(dmg)
+        shutil.rmtree(root)
+    except OSError as e:
+        return False, "已封存到 %s，但刪除原資料夾失敗：%s" % (home_rel(dmg), e)
+    return True, "已封存到 %s（%d 個檔案、%s；密碼在 1Password「%s」）並刪除原資料夾" % (
+        home_rel(dmg), nfile, P.human_size(size), title)
 
 
 # ---------------------------------------------------------------- 對外介面
@@ -1006,6 +1283,7 @@ ACTIONS = {
     "secure-files-dmg": ("📦", "含機密的檔案 → 加密 DMG", plan_secure_dmg),
     "secure-files-1p": ("🔐", "含機密的檔案 → 1Password", plan_secure_1p),
     "fix-key-perms": ("🔏", "私鑰權限改成只有自己可讀", plan_key_perms),
+    "archive-idle-projects": ("💤", "閒置專案 → 整個封存成加密 DMG", plan_archive_projects),
 }
 
 # 報告裡每個問題可以用的修復動作（按鈕會帶到 Web UI 預覽，授權後才執行）
@@ -1032,10 +1310,20 @@ def actions_for(rule, path="", detail=""):
 def catalog():
     _, fs = _latest_findings()
     n_tr = sum(1 for f in fs if f.get("rule", "").startswith("transcript-"))
-    n_sf = len({f.get("path") for f in fs if f.get("rule") in SECURE_RULES})
+    # 只算現在還存在的檔案：已經封存 / 刪除的，報告要等重新掃描才會更新
+    n_sf = len({f.get("path") for f in fs if f.get("rule") in SECURE_RULES and f.get("path")
+                and os.path.isfile(os.path.expanduser(f["path"]))})
+    kp_todo, kp_done = _key_perm_todo(fs)
     hints = {"redact-transcripts": "最近一次完整掃描（或重新檢查）有 %d 項對話紀錄金鑰" % n_tr if n_tr else "最近一次完整掃描（或重新檢查）沒有發現",
              "secure-files-dmg": "最近一次完整掃描（或重新檢查）有 %d 個含機密的檔案" % n_sf if n_sf else "最近一次完整掃描（或重新檢查）沒有發現",
              "secure-files-1p": "最近一次完整掃描（或重新檢查）有 %d 個含機密的檔案" % n_sf if n_sf else "最近一次完整掃描（或重新檢查）沒有發現"}
+    hints["fix-key-perms"] = ("還有 %d 個私鑰權限過寬" % len(kp_todo)) if kp_todo else \
+        ("✅ 全部已改成 600（報告重新檢查後就會更新）" if kp_done else "最近一次完整掃描（或重新檢查）沒有發現")
+    name = _latest_walk_report()
+    pj = (_read(os.path.join(REPORTS, name + ".json"), {}).get("projects") or {}) if name else {}
+    n_idle = sum(1 for a in pj.get("items") or [] if a.get("idle"))
+    hints["archive-idle-projects"] = ("最近一次完整掃描有 %d 個閒置專案" % n_idle) if n_idle else \
+        ("最近一次完整掃描沒有閒置專案" if pj else "下一次完整掃描後會判斷哪些專案已經閒置")
     return [{"id": k, "icon": v[0], "title": v[1], "hint": hints.get(k, "")} for k, v in ACTIONS.items()]
 
 
@@ -1052,7 +1340,8 @@ def make_plan(action, report="", focus=""):
         _plan_ctx.report = ""
     if focus:
         fp = os.path.expanduser(focus)
-        hit = [s for s in plan["steps"] if s.get("path") == fp]
+        hit = [s for s in plan["steps"] if s.get("path") == fp or
+               (s.get("kind") == "archive-project" and fp.startswith(s["path"] + os.sep))]
         if hit:
             for s in plan["steps"]:
                 # 已提交到 git 的檔案原本就預設不勾（刪除也無法從歷史移除），這裡維持不勾，由使用者自己決定
@@ -1064,7 +1353,8 @@ def make_plan(action, report="", focus=""):
         for k in [k for k, v in _plans.items() if now - v["created"] > PLAN_TTL]:
             del _plans[k]
         _plans[pid] = dict(plan, action=action, created=now)
-    public = [{"id": s["id"], "label": s["label"], "detail": s["detail"], "default": s.get("default", True)} for s in plan["steps"]]
+    public = [{"id": s["id"], "label": s["label"], "detail": s["detail"], "default": s.get("default", True),
+               "group": s.get("group", "")} for s in plan["steps"]]
     return {"plan_id": pid, "action": action, "title": plan["title"], "report": plan.get("report", ""),
             "steps": public, "notes": plan.get("notes", [])}
 
@@ -1315,6 +1605,8 @@ def _execute(plan, steps, key_name=None):
                         r = (False, str(e))
             elif s["kind"] == "secure-1p":
                 r = _secure_1p(plan, s)
+            elif s["kind"] == "archive-project":
+                r = _archive_project(plan, s)
             elif s["kind"] == "chmod":
                 if not _still_same(s):
                     r = (False, "略過：檔案在預覽之後被修改、移動或換成 symlink")
@@ -1357,6 +1649,10 @@ def _execute(plan, steps, key_name=None):
         fails = sum(1 for r in results if not r["ok"])
         status.update(ok=not fails, message="完成，%d 個步驟%s%s" % (len(results), "，%d 個失敗" % fails if fails else "全部成功",
                                                                 ("。" + plan["_summary"]) if plan.get("_summary") else ""))
+        if plan["action"] == "archive-idle-projects":
+            done = [r for r in results if r["ok"]]
+            _notify("💤 secaudit 閒置專案封存結果：%d 個已封存成加密 DMG 並刪除原資料夾，%d 個沒有處理。%s" % (
+                len(done), len(results) - len(done), "；".join(r["label"] for r in done[:5])))
         if plan["action"].startswith("secure-files"):
             done = sum(1 for r in results if r["ok"])
             _notify("🔐 secaudit 封存結果：%d 個檔案已處理並刪除原檔，%d 個沒有處理。%s" % (

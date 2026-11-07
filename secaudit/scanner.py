@@ -191,11 +191,16 @@ def run_scan(targets, mode="full", cache=None, progress=None, cancel=None, onlin
             supply_chain.check_dependencies(ctx, lockfiles, osv)
             runtimes.check_project_pins(ctx, pins, osv, online=True)
 
+    projects = None
+    if mode == "full" and not ctx.cancel.is_set():
+        ctx.report("判斷閒置專案", "有問題的專案最近有沒有在用")
+        projects = _projects([f.to_dict() for f in ctx.findings], [t.path for t in ctx.targets])
     ctx.report("完成", "")
     return {
         "version": 1,
         "host": socket.gethostname(),
         "mode": mode,
+        "projects": projects,
         "cancelled": ctx.cancel.is_set(),
         "started": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started)),
         "duration_sec": round(time.time() - started, 1),
@@ -299,6 +304,10 @@ def run_recheck(old, cache=None, progress=None, cancel=None, online=True):
         runtimes.check_project_pins(ctx, sorted(set(pins)), osv, online=True)
     for f in carried:
         ctx.findings.append(_finding_from_dict(f))
+    projects = None
+    if not ctx.cancel.is_set():
+        ctx.report("判斷閒置專案", "有問題的專案最近有沒有在用")
+        projects = _projects([f.to_dict() for f in ctx.findings], [t["path"] for t in old.get("targets", [])])
     ctx.report("完成", "")
     return {
         "version": 1, "host": socket.gethostname(), "mode": "recheck", "cancelled": ctx.cancel.is_set(),
@@ -310,7 +319,17 @@ def run_recheck(old, cache=None, progress=None, cancel=None, online=True):
         "findings": [f.to_dict() for f in ctx.findings],
         "inventory": ctx.inventory,
         "_excluded_carry": [f for f in excluded],
+        "projects": projects,
     }
+
+
+def _projects(findings, targets):
+    """閒置專案判斷失敗不能讓整份報告失敗。"""
+    try:
+        from . import projects as P
+        return P.summarize(findings, targets)
+    except Exception as e:
+        return {"error": "%s: %s" % (type(e).__name__, str(e)[:200]), "items": []}
 
 
 def _finding_from_dict(d):

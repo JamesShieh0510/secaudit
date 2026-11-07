@@ -22,6 +22,51 @@ def build_sop(cfg: dict, targets: list):
           ("p", "本工具只讀不改：不會修改、刪除或停用任何檔案與設定，所有「建議」都需要你自己決定是否執行。"
                 "以下內容依照目前的設定自動產生。")]
 
+    off = lambda on, txt: txt if on else "（已關閉）"
+    vh = cfg.get("vulnfeed_hours", 6)
+    rem = "每週%s %02d:00" % ("一二三四五六日"[cfg.get("reminder_weekday", 0)], cfg.get("reminder_hour", 9))
+    B += [("mermaid", "流程圖：什麼時候檢查、發現變動後怎麼處理", "\n".join([
+        "flowchart TD",
+        '  W["⚡ 即時監看<br>%s"]' % off(watch_on, "每 %d 秒看關鍵位置" % wi),
+        '  R["📈 資源監控<br>%s"]' % off(cfg.get("resource_monitor", True), "每 60 秒取樣 CPU / 記憶體"),
+        '  Q["🔁 快速掃描<br>每 %d 分鐘"]' % q,
+        '  F["🗂 完整掃描<br>每天 %02d:00"]' % h,
+        '  M["👆 手動<br>Web UI 按鈕"]',
+        '  W -->|"有變動，等 20 秒合併"| QS',
+        '  R -->|"異常 / 新常駐程式"| QS',
+        '  Q --> QS',
+        '  M --> QS',
+        '  M --> FS',
+        '  F --> FS',
+        '  QS["快速掃描<br>固定位置 + AI 對話紀錄 + 執行環境"]',
+        '  FS["完整掃描<br>＋ 遍歷勾選的資料夾 ＋ 專案套件 CVE"]',
+        '  FS --> IP["💤 判斷閒置專案"]',
+        '  QS --> CMP{"和上一次比對<br>有變動嗎？"}',
+        '  IP --> CMP',
+        '  CMP -->|沒有| S1["只更新狀態<br>不打擾你"]',
+        '  CMP -->|有| RULE["規則標 ⚠️<br>高敏感區段、新的高 / 中風險"]',
+        '  RULE --> AI["%s"]' % ("AI 分類<br>A 你本人操作 / B 自動更新 / C 可疑" if llm else "（AI 摘要已關閉）"),
+        '  AI --> OUT["📋 存報告 ＋ 📱 Telegram 通知"]',
+        '  V["🧯 漏洞快訊<br>%s"] -->|"影響你的套件"| OUT' % off(vh, "每 %s 小時" % vh),
+        '  D["📋 未處理提醒<br>%s"] --> YOU' % off(cfg.get("reminder_enabled", True), rem),
+        '  OUT --> YOU(["你：看下面的處理流程"])',
+    ])),
+          ("mermaid", "流程圖：收到通知之後", "\n".join([
+        "flowchart TD",
+        '  A(["📱 收到 Telegram"]) --> B{"是你剛剛做的操作嗎？<br>安裝工具、改設定、自己開的程式"}',
+        '  B -->|是| OK["不用處理<br>可在報告標記「已確認無害」"]',
+        '  B -->|不確定 / 不是| C["打開報告看細節<br>時間、由誰啟動、簽章、位置"]',
+        '  C --> D{"AI 怎麼分類？"}',
+        '  D -->|"A / B"| E["多半沒事<br>用報告裡的唯讀指令確認來源"]',
+        '  D -->|"C 可疑"| G["先不要刪除<br>記下路徑與時間"]',
+        '  G --> H{"確認是惡意的？"}',
+        '  H -->|是| I["停用移除 → 從乾淨裝置換密碼、登出 session<br>撤銷 API 金鑰 → 跑一次完整掃描"]',
+        '  H -->|不確定| J["把報告的 .md 交給 AI 或資安人員判斷"]',
+        '  C --> K{"有對應的修復動作？"}',
+        '  K -->|有| L["🛠 處理頁籤：預覽 → 勾選<br>→ Touch ID 授權 → 執行"]',
+        '  K -->|"專案已閒置"| P["📦 整個專案封存成加密 DMG<br>密碼存 1Password"]',
+    ]))]
+
     B += [("h", "1. 什麼時候會執行"),
           ("table", ["觸發方式", "頻率", "做什麼"], [
               ["⚡ 即時監看", ("每 %d 秒" % wi) if watch_on else "（已關閉）",
@@ -29,10 +74,15 @@ def build_sop(cfg: dict, targets: list):
                "等 20 秒沒有新變動（最久 90 秒）再跑一次「不連網的快速掃描」，把同一批變動合併成一則通知。"],
               ["🔁 快速掃描", "每 %d 分鐘" % q, "固定位置檢查 + AI 對話紀錄 + 執行環境版本。"],
               ["🗂 完整掃描", "每天 %02d:00" % h, "快速掃描的全部內容 + 遍歷你勾選的資料夾 + 專案套件 CVE 查詢。"
-               "常駐程式第一次啟動時也會先做一次，建立比對基準。"],
+               "常駐程式第一次啟動時也會先做一次，建立比對基準。最後判斷有問題的專案是不是已經閒置。"],
               ["🧯 漏洞快訊", ("每 %d 小時" % cfg.get("vulnfeed_hours", 6)) if cfg.get("vulnfeed_hours", 6) else "（已關閉）",
                "抓取 GitHub Advisory Database 與 CISA KEV 的新漏洞，比對你專案的套件版本與本機軟體；"
                "有影響到你的會以 🔴 標出要升級到哪個版本，再推送 Telegram 摘要。"],
+              ["📈 資源監控", "每 60 秒" if cfg.get("resource_monitor", True) else "（已關閉）",
+               "取樣整台 CPU、記憶體壓力、swap 和所有程式的清單（只看 ps 資訊，不讀程式內容）。"
+               "發現新出現的常駐程式（第一次見到、已執行超過 5 分鐘）、某個程式連續 10 分鐘吃滿 CPU、"
+               "你沒在用電腦時整台持續高 CPU、記憶體壓力或 swap 暴增，就記錄事件並立刻跑一次不連網的快速掃描，再推送 Telegram。"
+               "第一次啟動時先把目前所有程式記成基準，不發通知。"],
               ["📋 未處理提醒", ("每週%s %02d:00" % ("一二三四五六日"[cfg.get("reminder_weekday", 0)], cfg.get("reminder_hour", 9)))
                if cfg.get("reminder_enabled", True) else "（已關閉）",
                "列出還沒處理的高 / 中風險問題與「已存在幾天」，依嚴重程度 × 天數排序；"
@@ -56,6 +106,7 @@ def build_sop(cfg: dict, targets: list):
               ["入侵跡象：暫存 / 共享 / 隱藏資料夾裡的執行檔（含簽章檢查）", "✅", "✅", "✅"],
               ["勒索軟體跡象：勒索信檔名、大量「原檔名.怪副檔名」", "桌面、文件、下載、圖片", "桌面、文件、下載、圖片", "＋所有勾選的資料夾（含 NAS）"],
               ["瀏覽器登入 session、擴充功能、遠端除錯、cookie 外流跡象", "✅", "✅", "✅"],
+              ["CPU / 記憶體異常、新出現的常駐程式（讀取資源監控 24 小時內的事件）", "✅", "✅", "✅"],
               ["AI 對話紀錄裡有沒有貼過金鑰（只重掃有變動的檔案）", "✅", "✅", "✅"],
               ["所有已安裝的執行環境（Node.js、Python、Go、Ruby、Java、PHP、Rust、Deno、Bun、.NET；"
                "nvm / Homebrew / conda / pyenv / uv / rbenv / rustup / asdf…）是否停止維護；Node.js 是否錯過官方標記的安全更新", "—",
@@ -71,6 +122,32 @@ def build_sop(cfg: dict, targets: list):
           ("ul", ["「家目錄」不含 ~/Library，所以不包含 iCloud / Google Drive / OneDrive；雲端硬碟要另外勾選。",
                   "雲端「僅限線上」的檔案只看檔名，不讀內容，不會觸發下載。",
                   "會略過 node_modules、.git、虛擬環境、快取等大型資料夾，以及超過 1MB 的檔案和二進位檔。"])]
+
+    B += [("h", "2-1. 資源監控怎麼判斷要不要通知"),
+          ("ul", ["由誰啟動：沿著父程式往上找。從終端機、Claude Code / Codex / Cursor、ssh / tmux 或 PM2 開的算「你開的」，"
+                  "只記在報告裡、不推播。",
+                  "Apple 簽章的系統程式不會因為吃 CPU 被通報（例如 WindowServer、Spotlight 建索引）。",
+                  "🔴 高：執行檔已經被刪除，或沒有正式簽章（ad-hoc / 未簽章）＋ 放在暫存 / 共享 / 隱藏資料夾 ＋ 不是你開的；"
+                  "或是不認得的程式在你沒用電腦時持續吃滿 CPU（挖礦常見）。",
+                  "🟠 中：沒有正式簽章、位置可疑，或是 osascript / python / curl / shell 這類常被濫用的工具，而且不是你開的；"
+                  "以及你閒置時整台 CPU 10 分鐘平均超過 50%、記憶體壓力持續偏高。",
+                  "🟡 低：其他第一次出現的背景程式（例如 App 自己的輔助程式、Ollama 載入模型），swap 突然增加 4 GB 以上。",
+                  "同一個程式的同一種事件 6 小時內只通知一次；事件在報告裡保留 24 小時，過期不會發「已解決」。",
+                  "想確認監控有沒有在跑：執行 python3 audit.py resources，會列出最後一次取樣時間和最近的事件。"])]
+
+    B += [("h", "2-2. 💤 閒置專案"),
+          ("ul", ["完整掃描（和重新檢查）結束時，把有問題的檔案依所在專案分組（git 根目錄，或有 package.json、go.mod 等設定檔的資料夾）。",
+                  "最後活動時間取最新的：最後一次 commit、git 操作（commit / checkout），以及專案裡檔案的修改時間。"
+                  "node_modules、建置輸出、lockfile、.env*、.gitignore 這類常被工具或修復動作自動改動的檔案不算。",
+                  "超過 %d 天沒有更新、而且現在沒有程式（終端機、編輯器、dev server）開在裡面，就列在報告的「💤 閒置專案」，"
+                  "問題旁邊也會標「💤 專案閒置 N 天」。天數可以在「常駐監控設定」修改。" % cfg.get("idle_project_days", 30),
+                  "「📦 批次封存成加密 DMG」：每個專案在旁邊（同一層資料夾）產生一個 AES-256 加密、壓縮的 DMG，密碼存進 1Password。"
+                  "唯讀掛載後逐檔比對 sha256，再確認原資料夾在這段期間沒有被改過，全部一致才刪除原資料夾。"
+                  "預覽之後專案有更新、或有程式開在裡面，都不會處理。雲端硬碟裡只在雲端的檔案，會在封存前自動下載（下載不到就不封存）。"
+                  "預覽依位置分類（iCloud、外接磁碟、~/projects…），可以整類勾選。需要 Touch ID 授權。",
+                  "~/.lmstudio 這類家目錄底下的隱藏資料夾是工具自己管理的，不會被當成專案。"
+                  "雲端硬碟裡的專案只看修改時間，不執行 git 指令（git 會讀檔案內容，會觸發下載）。",
+                  "還原：雙擊 DMG、輸入 1Password「secaudit 封存專案：路徑」項目裡的密碼，把檔案複製回原本位置。"])]
 
     B += [("h", "3. 每次掃描後的處理流程"),
           ("ol", ["把結果和上一次比對：清單快照（MCP、LaunchAgent、擴充功能…）的新增、移除、修改，以及新出現或已解決的問題。"
@@ -108,6 +185,8 @@ def build_sop(cfg: dict, targets: list):
 
     B += [("h", "6. 收到 Telegram 警示時怎麼做"),
           ("ol", ["先看「⚡ 即時監看觸發」和 ⚠️ 項目：是不是你剛剛做的操作（安裝工具、改設定、裝擴充功能）？是的話就不用處理。",
+                  "收到「新出現的常駐程式」或「程式持續大量使用 CPU」：看細節裡的啟動時間、由誰啟動、簽章和位置。"
+                  "是你剛開的程式就不用處理；不認得的，先記下路徑再結束它，並檢查 LaunchAgent / LaunchDaemon 有沒有新的自動執行項目。",
                   "看 AI 的分類：B（程式自動更新）通常沒事，但仍可用報告中的唯讀指令確認來源。",
                   "C（可疑）或你完全不認得的變動：先不要刪除，用報告裡的唯讀指令查看內容、程式簽章與修改時間，"
                   "記下路徑與時間（之後追查需要）。",
@@ -130,6 +209,8 @@ def to_md(blocks):
             out += ["- " + x for x in b[1]] + [""]
         elif k == "ol":
             out += ["%d. %s" % (i + 1, x) for i, x in enumerate(b[1])] + [""]
+        elif k == "mermaid":
+            out += ["**%s**" % b[1], "", "```mermaid", b[2], "```", ""]
         elif k == "table":
             cell = lambda s: str(s).replace("|", "\\|")
             out += ["| " + " | ".join(b[1]) + " |", "|" + "---|" * len(b[1])]
@@ -145,6 +226,11 @@ def to_html(blocks, esc, open_=True):
             p.append("<h3>%s</h3>" % esc(b[1]))
         elif k == "p":
             p.append('<p class="muted">%s</p>' % esc(b[1]))
+        elif k == "mermaid":
+            # Web UI 會用內建的 Mermaid 畫成圖；離線打開報告時顯示原始碼（也可以貼到任何支援 Mermaid 的編輯器）
+            p.append('<div class="mmd"><b>%s</b><pre class="mermaid" style="white-space:pre-wrap;font-size:12px">%s</pre>'
+                     '<div class="muted mmd-note" style="font-size:12px">這是 Mermaid 流程圖原始碼，在 Web UI 的「📖 運作 SOP」頁籤會顯示成圖。</div></div>'
+                     % (esc(b[1]), esc(b[2])))
         elif k in ("ul", "ol"):
             p.append("<%s>%s</%s>" % (k, "".join("<li>%s</li>" % esc(x) for x in b[1]), k))
         elif k == "table":
