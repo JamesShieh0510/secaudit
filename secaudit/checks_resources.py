@@ -333,6 +333,7 @@ class ResourceMonitor:
                 rows.insert(1, "CPU：最近 %d 分鐘每次取樣都 ≥ %.0f%%（平均 %.0f%%，100%% = 一個核心跑滿）" % (
                     WINDOW, PROC_CPU, sum(hist) / len(hist)))
                 rows.append("判斷：%s" % ("⚠️ 你沒在用電腦時持續吃 CPU，挖礦程式常見的行為" if idle >= IDLE_MIN else
+                                           "⚠️ 沒有正式簽章、也不是從你的終端機啟動，卻持續吃滿 CPU，請確認你認得它" if sev == "medium" else
                                            "你正在使用電腦，可能是編譯、AI 模型或影片處理；不認得這個程式再處理"))
                 self._event("cpu", key, sev, "程式持續大量使用 CPU：%s" % os.path.basename(p["exe"]), "\n".join(rows), key)
         if len(self.total) >= WINDOW and min(i for _, i in self.total) >= IDLE_MIN:
