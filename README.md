@@ -18,6 +18,7 @@
 | AI 與 Agent | MCP 伺服器（Claude Code / Claude Desktop / Cursor / Codex / Gemini / Windsurf / VS Code）：未鎖版本、明文金鑰、可疑路徑；Claude Code 允許清單與 hooks；skills / plugins / 指令檔中的隱藏 Unicode 字元、prompt injection 語句、可疑指令；Claude Code Telegram channel 存取政策；**AI 對話紀錄裡貼過的金鑰** |
 | 機密與憑證 | 明文 `.env`、各家 API Key 格式、私鑰（權限、是否有密碼保護）、`~/.ssh`（新增的金鑰、authorized_keys 新增的公鑰）、`~/.aws`、`~/.npmrc`、`~/.docker`、`~/.git-credentials` 等 |
 | 瀏覽器 | Chrome / Arc / Brave / Edge / Firefox 各 profile 中重要服務的登入 session 持續多久、閒置多久；擴充功能權限；是否開著遠端除錯；暫存資料夾是否出現 Cookies / Login Data 副本。**只讀 cookie 的網域與時間，不讀取、不解密 cookie 值** |
+| 系統資源與常駐程式 | 每分鐘取樣 CPU / 記憶體：單一程式持續吃滿 CPU（挖礦特徵）、閒置時整台 CPU 偏高、記憶體壓力 / swap / 單一程式記憶體暴增；新出現的常駐程式（執行超過 5 分鐘、以前沒看過的非 Apple 執行檔），附簽章、位置、啟動時間與由誰啟動，從你的終端機或 AI 助理開的程式只記在報告裡不推播 |
 | 開機自動執行 | LaunchAgents / LaunchDaemons（含程式簽章）、crontab、shell 啟動檔 |
 | 供應鏈與版本 | 各專案 lockfile（npm / pnpm / yarn / pip / poetry / uv / Go / Cargo / Gemfile / composer）查 [OSV.dev](https://osv.dev)；全域 npm 套件 |
 | 執行環境版本 | **所有已安裝的**Node.js、Python、Go、Ruby、Java、PHP、Rust、Deno、Bun、.NET（nvm / fnm / volta / asdf / mise / Homebrew / conda / pyenv / uv / rbenv / rvm / sdkman / rustup / 系統內建）是否停止維護（[endoflife.date](https://endoflife.date)）；Node.js 是否錯過官方標記的安全更新；專案指定的版本（`.nvmrc`、`.python-version`、`.tool-versions`、`go.mod`、`package.json` engines、`pyproject.toml`、`Dockerfile` FROM、compose `image:`） |
@@ -28,6 +29,7 @@
 | 觸發 | 預設頻率 | 內容 |
 |---|---|---|
 | ⚡ 即時監看 | 每 10 秒 | 只 stat 約 100 個關鍵位置（不讀內容），有變動時合併一批後跑一次快速掃描 |
+| 📈 資源監控 | 每分鐘 | `ps` + `sysctl` 取樣，第一次執行先把目前的程式記成基準；發現異常時跑一次快速掃描並通知（同一程式 6 小時內不重複） |
 | 🔁 快速掃描 | 每 15 分鐘 | 固定位置檢查 + AI 對話紀錄 + 執行環境版本 |
 | 🗂 完整掃描 | 每天 03:00 | 再加上遍歷你勾選的資料夾 + 專案套件 CVE |
 | 🧯 漏洞快訊 | 每 6 小時 | 新漏洞摘要推送 |
@@ -182,6 +184,7 @@ secaudit/
   vulnfeed.py            漏洞快訊
   diff.py                變動比對與 ⚠️ 規則
   watch.py               即時監看
+  checks_resources.py    CPU / 記憶體異常與新常駐程式（背景取樣）
   notify.py              Telegram、LLM
   report.py / sop.py     報告與 SOP
   app.py / web.py        排程、狀態、Web UI

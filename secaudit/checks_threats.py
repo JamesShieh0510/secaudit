@@ -3,7 +3,7 @@ import os
 import re
 import stat
 
-from .core import HOME, Finding, is_fixture_path, ScanContext, file_fingerprint, home_rel, lstat_safe, is_dataless
+from .core import HOME, Finding, is_fixture_path, ScanContext, file_fingerprint, home_rel, lstat_safe, is_dataless, read_text, truncate
 from .checks_persistence import _signature
 
 CAT = "入侵跡象"
@@ -100,6 +100,10 @@ RANSOM_NOTE = re.compile(
     r"(?i)^(?:_readme\.txt|!+\s*read[_\- ]?me\s*!+.*|.*(?:decrypt|ransom|recover[_\- ]?(?:my|your|all)?[_\- ]?files|"
     r"restore[_\- ]?(?:my|your|all)?[_\- ]?files|unlock[_\- ]?(?:my|your)?[_\- ]?files|how[_\- ]?to[_\- ]?(?:back|get|return|recover)|"
     r"your[_\- ]?files[_\- ]?(?:are|were)?[_\- ]?encrypted).*\.(?:txt|html?|hta|rtf|png|url))$")
+# 勒索信內容幾乎一定會有的字眼（加密 / 解密 / 付款 / 聯絡方式）
+RANSOM_WORDS = re.compile(r"(?i)\b(?:encrypted|decrypt\w*|decryption|ransom|bitcoin|btc|monero|xmr|wallet|payment|"
+                          r"private key|tor browser|\.onion|your files|all your|personal id|restore files)\b"
+                          r"|加密|解密|贖金|比特幣|付款")
 # 工具固定產生的同名檔（例如 Sui / Move 的鎖定檔 Move.locked），不是被加密的檔案
 BENIGN_NAMES = {"move.locked"}
 # 「原副檔名.xxx」裡常見的正常後綴：壓縮、程式碼產生檔、測試期望值、備份
@@ -141,9 +145,18 @@ class RansomTracker:
 
     def report(self, ctx: ScanContext):
         for p in self.notes[:50]:
+            # 檔名像勒索信（例如 _readme.txt）但內容完全沒有勒索字眼 → 一般說明檔，只記在報告裡
+            txt = read_text(p, ctx, limit=16384) if not p.lower().endswith((".png", ".url")) else None
+            hits = sorted(set(m.lower() for m in RANSOM_WORDS.findall(txt or "")))
+            if txt is not None and not hits:
+                ctx.add(Finding(rule="ransom-note-name", severity="info", category=CAT, title="檔名像勒索信，但內容沒有勒索字眼",
+                                path=home_rel(p), detail="內容開頭：%s" % truncate(" ".join(txt.split()), 160),
+                                why="檔名符合勒索信常用名稱，但內容沒有加密、解密、付款、比特幣等字眼，應該是一般說明檔。"))
+                continue
             ctx.inv("勒索軟體跡象", home_rel(p), "note")
             ctx.add(Finding(
                 rule="ransom-note", severity="high", category=CAT, title="發現疑似勒索信的檔案", path=home_rel(p),
+                detail=("內容出現勒索字眼：%s" % "、".join(hits[:8])) if hits else "無法讀取內容（可能是雲端佔位檔或圖片），請手動確認",
                 why="勒索軟體加密檔案後，會在每個資料夾留下類似「HOW_TO_DECRYPT.txt」的說明檔。",
                 fix="立刻中斷網路（Wi-Fi、拔網路線、退出 NAS 掛載），不要關機、不要付款；"
                     "用另一台裝置查看這個檔案的內容與檔案修改時間，並確認備份是否完好。"))

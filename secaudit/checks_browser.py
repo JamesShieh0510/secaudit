@@ -326,16 +326,29 @@ def _debug_detail(pid, line):
     if "--headless" in line:
         rows.append("模式：無視窗（headless），畫面上看不到這個瀏覽器")
     # 由誰啟動：往上追父程序
-    chain, p, seen = [], info["ppid"] if info else 0, set()
+    chain, p, seen, kinds, cwds = [], info["ppid"] if info else 0, set(), set(), []
     while p > 1 and p not in seen and len(chain) < 8:
         seen.add(p)
         pi = _ps_info(p)
         if not pi:
             break
         chain.append("%s［pid %d，%s 啟動］" % (_proc_label(pi), p, pi["start"]))
+        kinds.update(h for rx, h in AUTOMATION_HINTS if re.search(rx, pi["cmd"], re.I))
+        name = os.path.basename(pi["exe"])
+        if re.search(r"(?:Warp|Terminal|iTerm2?|Code|Cursor|Ghostty|kitty|Alacritty|WezTerm)\.app/", pi["exe"]) or name in ("sshd", "tmux"):
+            kinds.add("終端機")
+        if pi["exe"].startswith("/Users/") or re.match(r"^-?(?:zsh|bash|sh|fish)$", name):
+            kinds.add("shell")
+        # 工作目錄：測試 / 腳本程式在哪個專案資料夾執行（最多列 2 個不同的）
+        if len(cwds) < 2 and re.match(r"^(?:node|npm|npx|pnpm|yarn|bun|deno|[Pp]ython[\d.]*|claude|go|cargo|ruby)$", name):
+            w = re.search(r"^n(/.+)$", _lsof(["-a", "-p", str(p), "-d", "cwd", "-Fn"]), re.M)
+            if w and w.group(1) not in [c[0] for c in cwds]:
+                cwds.append((home_rel(w.group(1)), "%s［pid %d］" % (name, p)))
         p = pi["ppid"]
     if chain:
         rows.append("由誰啟動（由近到遠）：" + " ← ".join(chain))
+    for wp, wlabel in cwds:
+        rows.append("在哪裡執行：%s %s" % (wlabel, wp))
     exposed = False
     port = re.search(r"--remote-debugging-port=(\d+)", line)
     if port and port.group(1) != "0":
@@ -376,7 +389,17 @@ def _debug_detail(pid, line):
             pass
     elif "--remote-debugging-pipe" in line:
         rows.append("連線方式：pipe（只有啟動它的程式能控制，其他程式連不進來）")
-    return "\n".join(rows), temp_profile, exposed
+    # 自動判斷：從你的終端機 / AI 助理啟動、用暫時設定檔、外部連不進來 → 幾乎可以確定是你自己的自動化工具
+    tools = sorted(kinds - {"shell", "終端機"})
+    own = temp_profile and not exposed and bool(kinds & {"終端機", "Claude Code", "Cursor", "Codex"}) and \
+        ("--remote-debugging-pipe" in line or not port)
+    if own:
+        rows.append("判斷：很可能是你自己的操作。它是從你的%s啟動（%s），用的是用完即丟的暫時設定檔，"
+                    "其他程式也連不進來。對照上面的時間和資料夾，確認是不是你當時在跑的測試或 AI 助理的工作。"
+                    % ("終端機" if "終端機" in kinds else "AI 助理", "、".join(tools) or "shell"))
+    elif not kinds & {"終端機", "shell", "Claude Code", "Cursor", "Codex"}:
+        rows.append("判斷：⚠️ 往上追不到你的終端機或 AI 助理，啟動來源不明（可能是開機自動執行的程式），請特別留意。")
+    return "\n".join(rows), temp_profile, exposed, own
 
 
 def check_debug_and_theft(ctx: ScanContext):
@@ -399,11 +422,13 @@ def check_debug_and_theft(ctx: ScanContext):
                 continue        # 分頁 / GPU 等子程序，只看主程序
             pid = int(line.split(None, 1)[0])
             m = re.search(r"--remote-debugging-port=(\d+)", line)
-            detail, temp_profile, exposed = _debug_detail(pid, line)
+            detail, temp_profile, exposed, own = _debug_detail(pid, line)
             pipe_only = not m and "--remote-debugging-pipe" in line
             low_risk = temp_profile and not exposed
+            # 確定是自己的測試 / AI 助理 → 只記在報告裡（資訊），不推播；每次跑測試都會出現，推播只是噪音
+            sev = "info" if own else "medium" if low_risk or pipe_only and temp_profile else "high"
             ctx.add(Finding(
-                rule="browser-remote-debug", severity="medium" if low_risk or pipe_only and temp_profile else "high",
+                rule="browser-remote-debug", severity=sev,
                 category=CAT,
                 title="瀏覽器正以遠端除錯模式執行%s" % ("（port %s）" % m.group(1) if m else "（pipe）"),
                 detail=detail, evidence=truncate(line, 160),

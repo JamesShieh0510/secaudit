@@ -32,6 +32,7 @@ DEFAULT_CONFIG = {
     "secure_vault": "Personal",      # 封存含機密的檔案時用的 1Password vault
     "secure_dir": "~/Secure",       # 加密 DMG 存放的資料夾
     "watch_enabled": True,          # 關鍵位置即時監看
+    "resource_monitor": True,       # CPU / 記憶體異常與新常駐程式監控（每分鐘取樣）
     "watch_interval_sec": 10,        # 第一次建立基準時也通知一次
     "report_keep_days": 30,         # 一般報告保留天數
     "full_report_keep_days": 90,    # 完整掃描報告保留天數

@@ -159,7 +159,9 @@ def to_markdown(result, changes=None, summary="", sop=None):
         out += ["## %s風險（%d）" % (SEV_LABEL[sev], len(group)), ""]
         if sev == "info":
             out += ["| 分類 | 項目 | 路徑 | 內容 |", "|---|---|---|---|"]
-            out += ["| %s | %s | %s | %s |" % (_md(f["category"]), _md(f["title"]), _md(f["path"]), _md(f["evidence"]))
+            out += ["| %s | %s | %s | %s |" % (_md(f["category"]), _md(f["title"]), _md(f["path"]),
+                                              _md(f["evidence"]) + ("<br>" + "<br>".join(_md(x) for x in f["detail"].splitlines())
+                                                                    if f.get("detail") else ""))
                     for f in group]
             out.append("")
             continue
@@ -418,8 +420,10 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
         p.append('<details class="sec" data-sec="info"><summary><h2 style="display:inline">資訊：請確認你都認得（%d）</h2></summary><table>' % len(infos))
         p.append('<thead><tr><th>分類</th><th>項目</th><th>內容</th></tr></thead><tbody class="pg" data-size="50">')
         for f in infos:
-            p.append('<tr class="row" data-sev="info"><td>%s</td><td>%s<br><span class="muted">%s</span></td><td><code>%s</code></td></tr>' % (
-                e(f["category"]), e(f["title"]), e(f["path"]), e(f["evidence"])))
+            det = ('<details><summary class="muted">細節（時間、由誰啟動、判斷）</summary><div class="ml" style="white-space:pre-wrap">%s</div></details>'
+                   % e(f["detail"])) if f.get("detail") else ""
+            p.append('<tr class="row" data-sev="info"><td>%s</td><td>%s<br><span class="muted">%s</span></td><td><code>%s</code>%s</td></tr>' % (
+                e(f["category"]), e(f["title"]), e(f["path"]), e(f["evidence"]), det))
         p.append('</tbody></table></details>')
     acked = result.get("acknowledged") or []
     if acked:

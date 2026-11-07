@@ -56,11 +56,13 @@ def compare(prev_state: dict, result: dict):
         old_f = prev_find.get(scope, {})
         old_cats = {f.get("category") for f in old_f.values()} | {cur_find[k]["category"] for k in old_f if k in cur_find}
         for k, f in cur_find.items():
-            if k not in old_f and f["category"] in old_cats:
+            # 資源監控事件（res-）一出現就要通知，不受「新分類當基準」影響
+            if k not in old_f and (f["category"] in old_cats or f["rule"].startswith("res-")):
                 changes.append({"type": "new_finding", "section": f["category"], "key": f["title"], "severity": f["severity"],
-                                "new": "%s %s" % (f["path"], f.get("evidence", "")), "why": f.get("why", ""), "scope": scope})
+                                "new": "%s %s" % (f["path"], f.get("evidence", "")), "why": f.get("why", ""),
+                                "detail": (f.get("detail") or "")[:1200], "scope": scope})
         for k, f in old_f.items():
-            if k not in cur_find:
+            if k not in cur_find and not k.startswith("res-"):     # 資源事件 24 小時後自然過期，不算「已解決」
                 changes.append({"type": "resolved", "section": "已解決", "key": f["title"], "severity": f["severity"],
                                 "old": f["path"], "scope": scope})
     try:
@@ -125,6 +127,8 @@ def changes_to_text(changes, limit=80) -> str:
             s += "\n    舊：" + c["old"][:220]
         if c.get("new"):
             s += "\n    新：" + c["new"][:220]
+        if c.get("detail"):
+            s += "\n    細節：" + c["detail"][:900].replace("\n", "\n          ")
         lines.append(s)
     if len(changes) > limit:
         lines.append("…另有 %d 項變動" % (len(changes) - limit))

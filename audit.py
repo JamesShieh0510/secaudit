@@ -121,6 +121,7 @@ def main():
     sub.add_parser("daemon")
     sub.add_parser("serve")
     sub.add_parser("url")
+    sub.add_parser("resources", help="查看 CPU / 記憶體 / 常駐程式監控是否在運作、最近的事件")
     sub.add_parser("test-notify", help="測試 Telegram 與 Ollama 設定")
     np_ = sub.add_parser("notify", help="透過執行中的常駐程式發 Telegram（不需要 1Password）")
     np_.add_argument("text")
@@ -141,6 +142,41 @@ def main():
     from secaudit.web import get_token, serve
 
     cfg = load_config()
+    if args.cmd == "resources":
+        import json
+        import time as _t
+        import urllib.request
+        from secaudit.app import DATA
+        req = urllib.request.Request("http://127.0.0.1:%d/api/state" % cfg["web_port"],
+                                     headers={"X-Secaudit": "1", "Cookie": "sa=" + get_token(),
+                                              "Host": "127.0.0.1:%d" % cfg["web_port"]})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                st = json.loads(r.read().decode()).get("status", {}).get("resources")
+        except Exception as e:
+            st, err = None, "%s: %s" % (type(e).__name__, e)
+        if st:
+            print("✅ 監控執行中：最後一次取樣 %s（每分鐘一次）" % st.get("last"))
+            print("   目前整台 CPU %s、記憶體壓力 %s、swap %s GB；已知常駐程式 %s 個；24 小時內事件 %s 件" % (
+                st.get("cpu"), st.get("pressure"), st.get("swap_gb"), st.get("known"), st.get("events")))
+        else:
+            print("❌ 常駐程式沒有回報監控狀態（%s）：確認 pm2 status secaudit、config 的 resource_monitor，"
+                  "剛重啟的話等 1 分鐘再試" % (err if "err" in locals() else "還沒完成第一次取樣"))
+        try:
+            with open(os.path.join(DATA, "resources.json"), encoding="utf-8") as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            d = {}
+        print("   基準建立時間：%s" % (d.get("baseline") or "（尚未建立）"))
+        ev = d.get("events", [])
+        print("\n最近的事件（24 小時內，%d 件）：" % len(ev) if ev else "\n24 小時內沒有異常事件")
+        lab = {"high": "高", "medium": "中", "low": "低", "info": "只記錄"}
+        for e in ev[-15:]:
+            print("  [%s] %s %s" % (lab.get(e["severity"], e["severity"]), e["time"], e["title"]))
+            for l in e["detail"].splitlines():
+                if l.startswith(("由誰啟動", "判斷", "CPU", "記憶體")):
+                    print("        " + l[:200])
+        return
     if args.cmd == "notify":
         import json
         import urllib.request
@@ -180,6 +216,10 @@ def main():
             from secaudit.watch import Watcher
             threading.Thread(target=Watcher(eng, interval=max(3, int(cfg.get("watch_interval_sec", 10)))).run,
                              daemon=True).start()
+        if cfg.get("resource_monitor", True):
+            from secaudit.app import DATA
+            from secaudit.checks_resources import ResourceMonitor
+            threading.Thread(target=ResourceMonitor(eng, DATA).run, daemon=True).start()
         serve(eng, cfg["web_port"])
     elif args.cmd == "scan":
         from secaudit.app import load_targets

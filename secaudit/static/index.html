@@ -201,6 +201,7 @@ function renderStatus(st) {
   let sc = st.next_quick ? `下次快速掃描 ${st.next_quick} ・ 下次完整掃描 ${st.next_full}` : "常駐排程未啟動（只開 Web UI）";
   if (st.next_reminder) sc += ` ・ 📋 下次未處理提醒 ${st.next_reminder}${st.escalated ? "（逾期，每天提醒）" : ""}`;
   if (st.watch) sc += ` ・ ⚡ 即時監看 ${st.watch.paths} 處（每輪 ${st.watch.cost_ms ?? "-"} ms）${st.watch.pending ? `，${st.watch.pending} 處變動待確認` : ""}${st.watch.last_trigger ? `，上次觸發 ${st.watch.last_trigger}` : ""}`;
+  if (st.resources) sc += ` ・ 📈 資源監控 ${st.resources.last} 取樣（CPU ${st.resources.cpu}、記憶體壓力 ${st.resources.pressure}、swap ${st.resources.swap_gb} GB、常駐程式 ${st.resources.known} 個、24 小時內事件 ${st.resources.events} 件）`;
   $("#sched").textContent = sc;
 }
 
