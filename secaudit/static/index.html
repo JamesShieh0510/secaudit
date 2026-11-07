@@ -40,6 +40,25 @@ label.cfg{display:flex;justify-content:space-between;align-items:center;gap:8px;
 .tabs button.on{color:var(--fg);border-bottom-color:var(--fg);font-weight:600}
 .tabs .badge:not(:empty){display:inline-block;margin-left:6px;min-width:18px;padding:0 5px;border-radius:9px;background:var(--medium);color:#fff;font-size:11px;line-height:18px;text-align:center}
 section.tab{display:none}section.tab.on{display:block}
+:root{--c1:#2a78d6;--c2:#eb6834;--c3:#1baf7a;--c4:#eda100;--c5:#e87ba4;--c6:#008300;--c7:#6250d6;--c8:#898781;
+  --s-high:#d03b3b;--s-med:#ec835a;--s-low:#fab219;--v-grid:#e1e0d9;--v-base:#c3c2b7}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--c1:#3987e5;--c2:#d95926;--c3:#199e70;--c4:#c98500;--c5:#d55181;--c6:#008300;--c7:#9085e9;--c8:#6f6e69;--v-grid:#2c2c2a;--v-base:#383835}}
+:root[data-theme=dark]{--c1:#3987e5;--c2:#d95926;--c3:#199e70;--c4:#c98500;--c5:#d55181;--c6:#008300;--c7:#9085e9;--c8:#6f6e69;--v-grid:#2c2c2a;--v-base:#383835}
+.vfilter{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:14px 0 4px}.vfilter button{padding:5px 12px;font-size:13px}
+.vfilter button.on{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+#statsBody{transition:opacity .15s}.vsec{font-size:15px;margin:22px 0 8px}
+.vtiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.vtile{margin:0;padding:12px 14px}
+.vbig{font-size:28px;font-weight:700;margin:2px 0}.vup{color:var(--s-high);font-weight:600}.vdown{color:var(--ok);font-weight:600}
+.vc{position:relative}.vh{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.vtog{padding:3px 10px;font-size:12px}
+.lg{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin:8px 0 2px}.lg span{display:inline-flex;align-items:center;gap:6px}
+.lk{display:inline-block;width:14px;height:2px;border-radius:1px}.bk{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px}
+.vp{position:relative;margin-top:6px}.vp svg{display:block;max-width:100%;overflow:visible}
+.vg{stroke:var(--v-grid);stroke-width:1}.vb{stroke:var(--v-base);stroke-width:1}.vx{stroke:var(--muted);stroke-width:1}
+.vax{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}.vrow{fill:var(--fg)}.vlab{fill:var(--fg);font-size:11px;font-weight:600}
+.vm{cursor:pointer;outline:none}.vm:hover,.vm:focus{opacity:.8}
+.vtip{position:absolute;z-index:5;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:12px;box-shadow:0 4px 14px rgba(0,0,0,.12);pointer-events:none;white-space:nowrap}
+.vtr{display:flex;gap:6px;align-items:center}.vtr b{min-width:28px}.vempty{padding:30px 0;text-align:center}
+.vtw{overflow-x:auto;margin-top:6px}.vt{font-size:12px}.vt td,.vt th{padding:4px 8px}
 .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:10px;margin-top:16px}
 .metrics:empty{display:none}
 .metric{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;min-width:0}
@@ -125,6 +144,7 @@ body.noscroll{overflow:hidden}
 
   <nav class="tabs" id="tabs">
     <button data-tab="reports">📋 報告</button>
+    <button data-tab="stats">📈 統計</button>
     <button data-tab="feed">🧯 漏洞快訊</button>
     <button data-tab="fix">🛠 處理<span class="badge" id="tbFix"></span></button>
     <button data-tab="settings">⚙️ 設定<span class="badge" id="tbSet"></span></button>
@@ -138,6 +158,17 @@ body.noscroll{overflow:hidden}
     <div id="reportsNav"></div>
     <div class="muted" style="margin-top:6px">沒有變動的排程掃描不另存報告；報告保留 30 天，完整掃描保留 90 天。</div>
   </div>
+  </section>
+  <section class="tab" data-tab="stats">
+    <div class="vfilter" id="statsFilter">
+      <span class="muted">時間</span>
+      <button type="button" data-days="7">7 天</button><button type="button" data-days="30" class="on">30 天</button>
+      <button type="button" data-days="90">90 天</button><button type="button" data-days="0">全部</button>
+      <span class="muted" style="margin-left:10px">掃描類型</span>
+      <button type="button" data-group="full" class="on">完整掃描</button><button type="button" data-group="quick">快速掃描</button>
+      <button type="button" data-group="watch">即時監看</button>
+    </div>
+    <div id="statsBody"></div>
   </section>
   <section class="tab" data-tab="feed">
   <div class="card">
@@ -272,15 +303,247 @@ body.noscroll{overflow:hidden}
 </div>
 <script>
 // 分頁標籤：記住上次看的分頁（網址 #分頁 優先）
-const TABS = ["reports", "feed", "fix", "settings", "sop"];
+const TABS = ["reports", "stats", "feed", "fix", "settings", "sop"];
 function showTab(t) {
   if (!TABS.includes(t)) t = "reports";
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
   document.querySelectorAll("section.tab").forEach(s => s.classList.toggle("on", s.dataset.tab === t));
   try { localStorage.setItem("secaudit-tab", t); } catch (e) {}
   if (t === "sop") loadSop();
+  if (t === "stats") loadStats();
   if (location.hash.slice(1).split("/")[0] !== t) history.replaceState(null, "", location.pathname + location.search + "#" + t);
 }
+// ================================================================ 📈 統計（手刻 SVG 圖表，不載入外部程式）
+// 規則：線 2px、格線 hairline、柱 ≤24px 且堆疊之間 2px 間隙、兩個以上數列一定有圖例、每張圖都有表格檢視、
+// 文字用文字色（不用數列色）、嚴重度用保留的狀態色並一定搭配文字標籤。標籤一律 textContent。
+const SVGNS = "http://www.w3.org/2000/svg";
+const SEVS = [["high", "高風險"], ["medium", "中風險"], ["low", "低風險"]];
+const CATS = ["入侵跡象", "AI 與 Agent", "機密與憑證", "瀏覽器", "開機自動執行", "供應鏈與版本", "系統資源與常駐程式"];
+const GROUP_NAME = {full: "完整掃描（含重新檢查）", quick: "快速掃描（排程、手動）", watch: "即時監看觸發的掃描"};
+const catColor = c => { const i = CATS.indexOf(c); return i >= 0 ? `var(--c${i + 1})` : "var(--c8)"; };
+let statsState = {days: 30, group: "full"};
+function sv(tag, attrs, parent) { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; }
+// 刻度：步距取 1 / 2 / 5 × 10ⁿ（大約 4 格），刻度值一定是整齊的數字
+function niceScale(v) { v = Math.max(1, v); const raw = v / 4, p = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = Math.max(1, [1, 2, 5, 10].map(m => m * p).find(x => x >= raw)); return {max: Math.ceil(v / step) * step, step}; }
+function niceMax(v) { return niceScale(v).max; }
+const fmtN = n => (Math.round(n * 10) / 10).toLocaleString();
+const shortDay = s => String(s).slice(5, 10).replace("-", "/");
+function legendEl(items, kind) {
+  const d = document.createElement("div"); d.className = "lg";
+  items.forEach(it => { const s = document.createElement("span"); const k = document.createElement("i");
+    k.className = kind === "line" ? "lk" : "bk"; k.style.background = it.color; s.appendChild(k); s.appendChild(document.createTextNode(it.label)); d.appendChild(s); });
+  return d;
+}
+function tableEl(head, rows) {
+  const t = document.createElement("table"); t.className = "vt"; const tr = t.insertRow();
+  head.forEach(h => { const th = document.createElement("th"); th.textContent = h; tr.appendChild(th); });
+  rows.forEach(r => { const x = t.insertRow(); r.forEach(c => { x.insertCell().textContent = c; }); });
+  return t;
+}
+// 一張圖卡：標題、說明、圖例、圖、表格切換
+function chartCard(host, title, sub, draw, table, legend) {
+  const c = document.createElement("div"); c.className = "card vc";
+  const h = document.createElement("div"); h.className = "vh";
+  const tt = document.createElement("div"); const b = document.createElement("b"); b.textContent = title; tt.appendChild(b);
+  if (sub) { const m = document.createElement("div"); m.className = "muted"; m.textContent = sub; tt.appendChild(m); }
+  const tb = document.createElement("button"); tb.type = "button"; tb.className = "vtog"; tb.textContent = "表格";
+  h.appendChild(tt); h.appendChild(tb); c.appendChild(h);
+  if (legend) c.appendChild(legend);
+  const plot = document.createElement("div"); plot.className = "vp"; c.appendChild(plot);
+  const tw = document.createElement("div"); tw.className = "vtw"; tw.hidden = true; if (table) tw.appendChild(table); c.appendChild(tw);
+  tb.onclick = () => { tw.hidden = !tw.hidden; plot.hidden = !tw.hidden; tb.textContent = tw.hidden ? "表格" : "圖表"; };
+  host.appendChild(c);
+  requestAnimationFrame(() => draw(plot));
+  return c;
+}
+function emptyNote(plot, msg) { const d = document.createElement("div"); d.className = "muted vempty"; d.textContent = msg; plot.appendChild(d); }
+function tipEl(plot) { let t = plot.querySelector(".vtip"); if (!t) { t = document.createElement("div"); t.className = "vtip"; t.hidden = true; plot.appendChild(t); } return t; }
+function showTip(plot, x, y, title, rows) {
+  const t = tipEl(plot); t.replaceChildren();
+  const h = document.createElement("div"); h.className = "muted"; h.textContent = title; t.appendChild(h);
+  rows.forEach(r => { const d = document.createElement("div"); d.className = "vtr"; const k = document.createElement("i"); k.className = "lk"; k.style.background = r.color;
+    const v = document.createElement("b"); v.textContent = r.value; const l = document.createElement("span"); l.textContent = r.label;
+    d.appendChild(k); d.appendChild(v); d.appendChild(l); t.appendChild(d); });
+  t.hidden = false; const pw = plot.clientWidth; t.style.left = Math.min(Math.max(0, x + 12), pw - t.offsetWidth - 4) + "px"; t.style.top = Math.max(0, y - 10) + "px";
+}
+// 折線圖：時間軸、十字準線、一個提示框列出所有數列；最多 4 條時在線尾標數值
+function lineChart(plot, xs, series, opt = {}) {
+  if (!xs.length) return emptyNote(plot, opt.empty || "這段期間沒有資料");
+  const W = Math.max(280, plot.clientWidth), H = opt.h || 240, L = 40, R = 56, T = 12, B = 26;
+  const svg = sv("svg", {viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img", "aria-label": opt.label || ""}, plot);
+  const tx = xs.map(x => +x), x0 = Math.min(...tx), x1 = Math.max(...tx) || x0 + 1;
+  const sc = niceScale(Math.max(1, ...series.flatMap(s => s.values))), ymax = sc.max;
+  const X = t => L + (x1 === x0 ? (W - L - R) / 2 : (t - x0) / (x1 - x0) * (W - L - R)), Y = v => T + (1 - v / ymax) * (H - T - B);
+  for (let v = 0; v <= ymax + 1e-9; v += sc.step) { const y = Y(v);
+    sv("line", {x1: L, x2: W - R, y1: y, y2: y, class: v ? "vg" : "vb"}, svg);
+    sv("text", {x: L - 6, y: y + 4, "text-anchor": "end", class: "vax"}, svg).textContent = fmtN(v) + (opt.unit || ""); }
+  const nt = Math.max(2, Math.min(6, xs.length, Math.floor((W - L - R) / (opt.hourly ? 110 : 56))));
+  for (let i = 0; i < nt; i++) { const t = x0 + (x1 - x0) * (nt === 1 ? 0.5 : i / (nt - 1));
+    sv("text", {x: X(t), y: H - 6, "text-anchor": "middle", class: "vax"}, svg).textContent = opt.hourly ?
+      new Date(t).toLocaleString([], {month: "numeric", day: "numeric", hour: "2-digit"}) : new Date(t).toLocaleDateString([], {month: "numeric", day: "numeric"}); }
+  series.forEach(s => {
+    if (opt.area && series.length === 1) sv("path", {d: `M${X(tx[0])},${Y(0)} ` + tx.map((t, i) => `L${X(t)},${Y(s.values[i])}`).join(" ") + ` L${X(tx[tx.length - 1])},${Y(0)} Z`, fill: s.color, opacity: 0.1}, svg);
+    sv("path", {d: tx.map((t, i) => `${i ? "L" : "M"}${X(t)},${Y(s.values[i])}`).join(" "), fill: "none", stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round"}, svg);
+    const lx = X(tx[tx.length - 1]), ly = Y(s.values[s.values.length - 1]);
+    sv("circle", {cx: lx, cy: ly, r: 4, fill: s.color, stroke: "var(--card)", "stroke-width": 2}, svg);
+  });
+  if (series.length <= 4) {     // 線尾數值：彼此太近就不標（改看提示框 / 表格）
+    const ends = series.map(s => ({s, y: Y(s.values[s.values.length - 1])})).sort((a, b) => a.y - b.y); let last = -99;
+    ends.forEach(e => { if (e.y - last < 13) return; last = e.y;
+      sv("text", {x: W - R + 8, y: e.y + 4, class: "vlab"}, svg).textContent = fmtN(e.s.values[e.s.values.length - 1]) + (opt.unit || ""); });
+  }
+  const cross = sv("line", {y1: T, y2: H - B, class: "vx", visibility: "hidden"}, svg);
+  const hit = sv("rect", {x: L, y: T, width: W - L - R, height: H - T - B, fill: "transparent"}, svg);
+  const near = px => { let bi = 0, bd = 1e18; tx.forEach((t, i) => { const d = Math.abs(X(t) - px); if (d < bd) { bd = d; bi = i; } }); return bi; };
+  hit.addEventListener("pointermove", ev => { const r = svg.getBoundingClientRect(), px = (ev.clientX - r.left) * W / r.width, i = near(px), cx = X(tx[i]);
+    cross.setAttribute("x1", cx); cross.setAttribute("x2", cx); cross.setAttribute("visibility", "visible");
+    showTip(plot, cx * r.width / W, 8, opt.tipTitle ? opt.tipTitle(i) : new Date(tx[i]).toLocaleString(),
+      series.map(s => ({color: s.color, label: s.label, value: fmtN(s.values[i]) + (opt.unit || "")}))); });
+  hit.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); tipEl(plot).hidden = true; });
+}
+// 堆疊直條：每根 ≤24px，段與段之間 2px 間隙，頂端 4px 圓角；每一段自己有提示
+function stackedColumns(plot, labels, series, opt = {}) {
+  if (!labels.length) return emptyNote(plot, opt.empty || "這段期間沒有資料");
+  const W = Math.max(280, plot.clientWidth), H = opt.h || 240, L = 40, R = 12, T = 18, B = 28;
+  const svg = sv("svg", {viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img", "aria-label": opt.label || ""}, plot);
+  const tot = labels.map((_, i) => series.reduce((a, s) => a + (s.values[i] || 0), 0));
+  const sc = niceScale(Math.max(1, ...tot)), ymax = sc.max, Y = v => T + (1 - v / ymax) * (H - T - B), band = (W - L - R) / labels.length, bw = Math.min(24, band * 0.6);
+  for (let v = 0; v <= ymax + 1e-9; v += sc.step) { const y = Y(v);
+    sv("line", {x1: L, x2: W - R, y1: y, y2: y, class: v ? "vg" : "vb"}, svg);
+    sv("text", {x: L - 6, y: y + 4, "text-anchor": "end", class: "vax"}, svg).textContent = fmtN(v); }
+  const every = Math.ceil(labels.length / Math.max(1, Math.floor((W - L - R) / 44)));
+  labels.forEach((lab, i) => {
+    const cx = L + band * (i + 0.5); let acc = 0; const segs = series.map(s => ({s, v: s.values[i] || 0})).filter(x => x.v > 0);
+    segs.forEach((g, j) => { const y0 = Y(acc), y1 = Y(acc + g.v); acc += g.v;
+      const top = j === segs.length - 1, h = Math.max(0, y0 - y1 - (j ? 2 : 0)), y = y1;
+      const r = sv("path", {d: top ? `M${cx - bw / 2},${y + h} V${y + Math.min(4, h)} Q${cx - bw / 2},${y} ${cx - bw / 2 + Math.min(4, h)},${y} H${cx + bw / 2 - Math.min(4, h)} Q${cx + bw / 2},${y} ${cx + bw / 2},${y + Math.min(4, h)} V${y + h} Z`
+        : `M${cx - bw / 2},${y} H${cx + bw / 2} V${y + h} H${cx - bw / 2} Z`, fill: g.s.color, class: "vm", tabindex: 0}, svg);
+      const tip = () => { const rr = svg.getBoundingClientRect(); showTip(plot, cx * rr.width / W, y * rr.height / H, opt.tipTitle ? opt.tipTitle(i) : lab,
+        [{color: g.s.color, label: g.s.label, value: fmtN(g.v)}, ...(segs.length > 1 ? [{color: "transparent", label: "合計", value: fmtN(tot[i])}] : [])]); };
+      r.addEventListener("pointermove", tip); r.addEventListener("focus", tip);
+      r.addEventListener("pointerleave", () => tipEl(plot).hidden = true); r.addEventListener("blur", () => tipEl(plot).hidden = true); });
+    if (tot[i] && (i === tot.indexOf(Math.max(...tot)) || i === labels.length - 1))
+      sv("text", {x: cx, y: Y(tot[i]) - 5, "text-anchor": "middle", class: "vlab"}, svg).textContent = fmtN(tot[i]);
+    if (i % every === 0 || i === labels.length - 1) sv("text", {x: cx, y: H - 8, "text-anchor": "middle", class: "vax"}, svg).textContent = lab;
+  });
+}
+// 橫向堆疊長條（依專案）：數值標在長條尾端
+function hBars(plot, rows, keys, opt = {}) {
+  if (!rows.length) return emptyNote(plot, opt.empty || "沒有資料");
+  const W = Math.max(280, plot.clientWidth), rowH = 30, LW = Math.min(260, W * 0.42), H = rows.length * rowH + 8, R = 40;
+  const svg = sv("svg", {viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img", "aria-label": opt.label || ""}, plot);
+  const tot = rows.map(r => keys.reduce((a, k) => a + (r[k.key] || 0), 0)), mx = niceMax(Math.max(1, ...tot)), Xs = v => v / mx * (W - LW - R);
+  sv("line", {x1: LW, x2: LW, y1: 0, y2: H - 4, class: "vb"}, svg);
+  rows.forEach((r, i) => { const y = 6 + i * rowH, bh = Math.min(18, rowH - 10); let acc = 0;
+    // 專案名稱依可用寬度從左邊截斷（保留最有辨識度的尾端），完整名稱在提示框與表格
+    const maxc = Math.max(8, Math.floor((LW - 12) / 6.5));
+    const lab = sv("text", {x: LW - 8, y: y + bh / 2 + 4, "text-anchor": "end", class: "vax vrow"}, svg); lab.textContent = r.label.length > maxc ? "…" + r.label.slice(-(maxc - 1)) : r.label;
+    const segs = keys.filter(k => r[k.key] > 0);
+    segs.forEach((k, j) => { const x = LW + Xs(acc) + (j ? 2 : 0), w = Math.max(1, Xs(r[k.key]) - (j ? 2 : 0)); acc += r[k.key];
+      const last = j === segs.length - 1, rad = Math.min(4, w);
+      const p = sv("path", {d: last ? `M${x},${y} H${x + w - rad} Q${x + w},${y} ${x + w},${y + rad} V${y + bh - rad} Q${x + w},${y + bh} ${x + w - rad},${y + bh} H${x} Z`
+        : `M${x},${y} H${x + w} V${y + bh} H${x} Z`, fill: k.color, class: "vm", tabindex: 0}, svg);
+      const tip = () => { const rr = svg.getBoundingClientRect(); showTip(plot, (x + w) * rr.width / W, y * rr.height / H, r.label, keys.map(kk => ({color: kk.color, label: kk.label, value: fmtN(r[kk.key] || 0)}))); };
+      p.addEventListener("pointermove", tip); p.addEventListener("focus", tip); p.addEventListener("pointerleave", () => tipEl(plot).hidden = true); });
+    sv("text", {x: LW + Xs(tot[i]) + 6, y: y + bh / 2 + 4, class: "vlab"}, svg).textContent = fmtN(tot[i]);
+  });
+}
+function statTiles(host, items) {
+  const g = document.createElement("div"); g.className = "vtiles";
+  items.forEach(it => { const c = document.createElement("div"); c.className = "card vtile";
+    const k = document.createElement("div"); k.className = "muted"; const dot = document.createElement("i"); dot.className = "bk"; dot.style.background = it.color;
+    k.appendChild(dot); k.appendChild(document.createTextNode(it.label)); c.appendChild(k);
+    const v = document.createElement("div"); v.className = "vbig"; v.textContent = fmtN(it.value); c.appendChild(v);
+    const d = document.createElement("div"); d.className = "muted";
+    if (it.delta === null || it.delta === undefined) d.textContent = it.sub || "";
+    else { const s = document.createElement("span"); s.className = it.delta > 0 ? "vup" : it.delta < 0 ? "vdown" : "";
+      s.textContent = it.delta > 0 ? `▲ ${it.delta}` : it.delta < 0 ? `▼ ${-it.delta}` : "— 0"; d.appendChild(s); d.appendChild(document.createTextNode(" 比上一次" + (it.sub ? "・" + it.sub : ""))); }
+    c.appendChild(d); g.appendChild(c); });
+  host.appendChild(g);
+}
+async function loadStats() {
+  const host = $("#statsBody"); host.style.opacity = 0.5;      // 重新載入時保留舊的畫面（不閃爍）
+  let d;
+  try { d = await api(`/api/stats?days=${statsState.days}&group=${statsState.group}`); }
+  catch (e) { host.style.opacity = 1; return; }
+  host.replaceChildren(); host.style.opacity = 1;
+  const sevCol = {high: "var(--s-high)", medium: "var(--s-med)", low: "var(--s-low)"};
+  const sevSeries = SEVS.map(([k, l]) => ({key: k, label: l, color: sevCol[k]}));
+  const gname = GROUP_NAME[d.group];
+  const sec = (title, note) => { const h = document.createElement("h3"); h.className = "vsec"; h.textContent = title; host.appendChild(h);
+    if (note) { const m = document.createElement("div"); m.className = "muted"; m.style.margin = "-4px 0 8px"; m.textContent = note; host.appendChild(m); } };
+  // ---- 風險趨勢
+  sec("風險趨勢・" + gname, d.group === "full" ? "完整掃描會遍歷你勾選的資料夾、查套件漏洞，所以數字比快速掃描多；兩種掃描的範圍不同，不要直接相比。" :
+      "快速掃描只檢查固定位置（開機自動執行、AI 設定、憑證、瀏覽器…），不含資料夾裡的檔案與套件漏洞。");
+  const tr = d.trend, last = tr[tr.length - 1], prev = d.prev;
+  statTiles(host, SEVS.map(([k, l]) => ({label: l, color: sevCol[k], value: last ? last[k] : 0,
+    delta: last && prev ? last[k] - prev[k] : null, sub: last ? "最新 " + shortDay(last.t) + " " + last.t.slice(11, 16) : "這段期間沒有資料"})));
+  const xs = tr.map(t => new Date(t.t.replace(" ", "T")));
+  chartCard(host, "高 / 中 / 低風險數量的變化", `${gname}・${tr.length} 個時間點（沒有另存報告的日子用當天最後一次掃描補點）`,
+    p => lineChart(p, xs, sevSeries.map(s => ({...s, values: tr.map(t => t[s.key])})), {label: "風險數量趨勢",
+      tipTitle: i => tr[i].t.slice(0, 16) + (tr[i].name ? "・報告 " + tr[i].name : "")}),
+    tableEl(["時間", "報告", "高", "中", "低"], tr.map(t => [t.t.slice(0, 16), t.name || "（當天最後一次）", t.high, t.medium, t.low])), legendEl(sevSeries, "line"));
+  const cc = d.cat_cols, cats = CATS.filter(c => cc.some(x => x.cats[c])).concat([...new Set(cc.flatMap(x => Object.keys(x.cats)))].filter(c => !CATS.includes(c)));
+  const catSeries = cats.map(c => ({key: c, label: c, color: catColor(c)}));
+  chartCard(host, "各分類的問題數量", `最近 ${cc.length} 份${gname}報告（高 + 中 + 低）`,
+    p => stackedColumns(p, cc.map((x, i) => cc.filter(y => y.t.slice(0, 10) === x.t.slice(0, 10)).length > 1 ? x.t.slice(11, 16) : shortDay(x.t)),
+      catSeries.map(s => ({...s, values: cc.map(x => x.cats[s.key] || 0)})),
+      {label: "各分類問題數量", tipTitle: i => cc[i].t.slice(0, 16)}),
+    tableEl(["時間"].concat(cats), cc.map(x => [x.t.slice(0, 16)].concat(cats.map(c => x.cats[c] || 0)))), legendEl(catSeries, "bar"));
+  // ---- 目前狀況
+  const lt = d.latest || {};
+  sec("目前狀況・最新一份" + gname + "報告" + (lt.name ? "（" + lt.name + "）" : ""), "已標記為已確認無害的問題不算在內。");
+  const ages = lt.ages || {}, ab = Object.keys(ages);
+  chartCard(host, "問題已經存在多久", "依「已存在幾天」分組；越右邊越該優先處理",
+    p => stackedColumns(p, ab, sevSeries.map(s => ({...s, values: ab.map(b => ages[b][s.key])})), {label: "問題存在天數分布", empty: "沒有資料"}),
+    tableEl(["存在天數", "高", "中", "低"], ab.map(b => [b, ages[b].high, ages[b].medium, ages[b].low])), legendEl(sevSeries, "bar"));
+  if (d.group === "full") {
+    const pr = (lt.projects || []).map(x => ({label: x.project, high: x.high, medium: x.medium, low: x.low}));
+    chartCard(host, "供應鏈問題最多的專案", "套件漏洞與專案指定版本，依專案合併；在報告的「📦 依專案」可以複製給 AI Agent 修復",
+      p => hBars(p, pr, sevSeries, {label: "依專案的供應鏈問題", empty: "沒有供應鏈問題 👍"}),
+      tableEl(["專案", "高", "中", "低"], pr.map(x => [x.label, x.high, x.medium, x.low])), legendEl(sevSeries, "bar"));
+  }
+  // ---- 監控與處理
+  const mon = d.monitor || [];
+  sec("監控與處理", mon.length ? "" : "這些計數從這個版本開始記錄（沒有變動的快速掃描、即時監看觸發本來不會留下紀錄），之後每天會累積。");
+  const md = mon.map(m => shortDay(m.day));
+  const scanS = [{key: "scan:full", label: "完整掃描", color: "var(--c1)"}, {key: "scan:quick", label: "快速掃描", color: "var(--c2)"}, {key: "scan:watch", label: "即時監看觸發", color: "var(--c3)"}];
+  chartCard(host, "每天的掃描次數", "依掃描類型（含沒有變動、沒另存報告的掃描）",
+    p => stackedColumns(p, md, scanS.map(s => ({...s, values: mon.map(m => m[s.key] || 0)})), {label: "每天掃描次數", empty: "還沒有資料（從現在開始記錄）", tipTitle: i => mon[i].day}),
+    tableEl(["日期"].concat(scanS.map(s => s.label)), mon.map(m => [m.day].concat(scanS.map(s => m[s.key] || 0)))), legendEl(scanS, "bar"));
+  const wS = [{key: "chg", label: "有實際變動", color: "var(--c1)"}, {key: "nochg", label: "只是時間改了", color: "var(--c8)"}];
+  chartCard(host, "即時監看：每天觸發幾次、有幾次真的有變動", "偵測到變動、合併 20 秒後跑一次掃描算一次觸發",
+    p => stackedColumns(p, md, [{...wS[0], values: mon.map(m => m["watch:changed"] || 0)}, {...wS[1], values: mon.map(m => Math.max(0, (m["watch:trigger"] || 0) - (m["watch:changed"] || 0)))}],
+      {label: "即時監看觸發", empty: "還沒有資料（從現在開始記錄）", tipTitle: i => mon[i].day}),
+    tableEl(["日期", "觸發", "有實際變動"], mon.map(m => [m.day, m["watch:trigger"] || 0, m["watch:changed"] || 0])), legendEl(wS, "bar"));
+  chartCard(host, "資源監控：每天的事件", "新出現的常駐程式、CPU / 記憶體異常、背景對外連線",
+    p => stackedColumns(p, md, sevSeries.map(s => ({...s, values: mon.map(m => m["res:" + s.key] || 0)})), {label: "資源監控事件", empty: "還沒有資料（從現在開始記錄）", tipTitle: i => mon[i].day}),
+    tableEl(["日期", "高", "中", "低", "只記錄"], mon.map(m => [m.day, m["res:high"] || 0, m["res:medium"] || 0, m["res:low"] || 0, m["res:info"] || 0])), legendEl(sevSeries, "bar"));
+  const rs = d.resource || [], rx = rs.map(x => new Date(x.t * 1000));
+  chartCard(host, "整台 CPU 使用率（每小時平均）", "最多顯示 14 天", p => lineChart(p, rx, [{key: "cpu", label: "CPU", color: "var(--c1)", values: rs.map(x => x.cpu)}],
+      {unit: "%", area: true, hourly: true, label: "CPU 使用率", empty: "還沒有資料（每個整點記錄一次）", tipTitle: i => rx[i].toLocaleString()}),
+    tableEl(["時間", "平均 CPU %", "最高 CPU %", "swap GB"], rs.map(x => [new Date(x.t * 1000).toLocaleString(), x.cpu, x.cpu_max, x.swap])));
+  chartCard(host, "swap 使用量（GB）", "swap 持續增加代表記憶體不夠用，或有程式異常佔用", p => lineChart(p, rx, [{key: "swap", label: "swap", color: "var(--c2)", values: rs.map(x => x.swap)}],
+      {unit: "", area: true, hourly: true, label: "swap 使用量", empty: "還沒有資料（每個整點記錄一次）", tipTitle: i => rx[i].toLocaleString()}),
+    tableEl(["時間", "swap GB"], rs.map(x => [new Date(x.t * 1000).toLocaleString(), x.swap])));
+  const fx = d.fixes || [], acts = [...new Set(fx.flatMap(x => Object.keys(x).filter(k => k !== "day")))];
+  // 修復動作清單的固定順序 → 固定顏色（處理頁籤還沒載入時用內建順序）
+  const actOrder = Object.keys(actCatalog).length ? Object.keys(actCatalog) :
+    ["redact-transcripts", "upgrade-runtimes", "clean-go-toolchains", "secure-files-dmg", "secure-files-1p", "fix-key-perms", "archive-idle-projects", "env-tpl"];
+  const actS = acts.sort((a, b) => actOrder.indexOf(a) - actOrder.indexOf(b)).map(a => { const i = actOrder.indexOf(a);
+    return {key: a, label: (actCatalog[a] || {}).title || a, color: i >= 0 && i < 7 ? `var(--c${i + 1})` : "var(--c8)"}; });
+  chartCard(host, "修復動作：每天處理了幾項", "依修復動作（只算成功的項目）",
+    p => stackedColumns(p, fx.map(x => shortDay(x.day)), actS.map(s => ({...s, values: fx.map(x => x[s.key] || 0)})), {label: "修復動作", empty: "這段期間沒有執行修復動作", tipTitle: i => fx[i].day}),
+    tableEl(["日期"].concat(actS.map(s => s.label)), fx.map(x => [x.day].concat(acts.map(a => x[a] || 0)))), actS.length > 1 ? legendEl(actS, "bar") : null);
+}
+document.querySelectorAll("#statsFilter [data-days]").forEach(b => b.onclick = () => { statsState.days = +b.dataset.days;
+  document.querySelectorAll("#statsFilter [data-days]").forEach(x => x.classList.toggle("on", x === b)); loadStats(); });
+document.querySelectorAll("#statsFilter [data-group]").forEach(b => b.onclick = () => { statsState.group = b.dataset.group;
+  document.querySelectorAll("#statsFilter [data-group]").forEach(x => x.classList.toggle("on", x === b)); loadStats(); });
+let statsResize = 0;
+window.addEventListener("resize", () => { clearTimeout(statsResize); statsResize = setTimeout(() => { if ($("section.tab[data-tab=stats]").classList.contains("on")) loadStats(); }, 300); });
+
 // Mermaid 流程圖：用內建的固定版本（伺服器提供前會比對 sha256），第一次用到才載入
 let mermaidReady = null;
 function renderMermaid(root) {

@@ -8,7 +8,7 @@
 
 - 只用 Python 3.8+ 標準庫，不需要 `pip install`。
 - 掃描結果輸出 HTML（給人看）與 Markdown（給其他 AI 處理），機密一律遮罩。
-- 附本機 Web UI：設定掃描範圍、查看報告（彈窗，網址可直接開啟）、漏洞快訊、修復動作、運作 SOP。
+- 附本機 Web UI：設定掃描範圍、查看報告（彈窗，網址可直接開啟）、📈 統計（風險趨勢、監控與修復的統計圖表）、漏洞快訊、修復動作、運作 SOP。
 
 ## 功能
 
@@ -191,6 +191,8 @@ secaudit/
   watch.py               即時監看
   checks_resources.py    CPU / 記憶體異常與新常駐程式（背景取樣）
   projects.py            閒置專案判斷
+  stats.py               統計：每日計數、每小時資源取樣、統計頁籤的彙整
+  envtpl.py              寫死的機密 → 1Password + .env.tpl
   notify.py              Telegram、LLM
   report.py / sop.py     報告與 SOP
   app.py / web.py        排程、狀態、Web UI

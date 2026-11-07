@@ -175,6 +175,11 @@ class Watcher:
                     self.engine.scan("quick", source="watch", trigger=trig, online=False)  # 不連網，幾秒內完成
                     st = self.engine.status
                     new = st.get("last_report") if st.get("last_report") != before else ""
+                    try:
+                        from . import stats as _stats
+                        _stats.record_watch(len(trig), bool(new))
+                    except Exception:
+                        pass
                     ws["history"] = ([{"time": time.strftime("%Y-%m-%d %H:%M:%S"), "items": trig[:10],
                                        "changes": st.get("last_changes", 0) if new else 0, "report": new or "",
                                        "error": st.get("last_error", "")}] + ws.get("history", []))[:10]

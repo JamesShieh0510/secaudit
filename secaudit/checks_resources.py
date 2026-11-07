@@ -239,6 +239,11 @@ class ResourceMonitor:
                                          "severity": severity, "title": title, "detail": detail, "path": path})
         self.dirty = True
         print("[resources] %s：%s" % (title, key), flush=True)
+        try:
+            from . import stats as _stats
+            _stats.record_resource_event(severity)
+        except Exception:
+            pass
 
     # ---------- 常駐程式 ----------
     def check_resident(self, procs):
@@ -452,6 +457,11 @@ class ResourceMonitor:
         st.update(last=time.strftime("%H:%M:%S"), known=len(self.state["known"]), events=len(self.state["events"]),
                   cpu="%.0f%%" % (self.total[-1][0] if self.total else 0), swap_gb=round(s.get("swap_mb", 0) / 1024, 1),
                   pressure={1: "正常", 2: "警告", 4: "危險"}.get(s.get("pressure"), "?"))
+        try:
+            from . import stats as _stats
+            _stats.record_resource_sample(self.total[-1][0] if self.total else 0, s.get("swap_mb", 0) / 1024, s.get("pressure", 1))
+        except Exception:
+            pass
         new = any(id(e) not in before and e["severity"] != "info" for e in self.state["events"])
         if self.dirty:
             self._save()

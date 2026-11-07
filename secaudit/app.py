@@ -181,6 +181,15 @@ class Engine:
                 _write_private(os.path.join(DATA, "state.json"), new_state)
             self._prune_reports(cfg)
             self.status["last_check"] = time.strftime("%H:%M:%S")
+            try:        # 統計：沒有另存報告的快速掃描也要計數
+                from . import stats as _stats
+                cnt = {}
+                for f in result.get("findings", []):
+                    cnt[f["severity"]] = cnt.get(f["severity"], 0) + 1
+                _stats.record_scan(mode, source, cnt, len(changes or []), sum(1 for c in (changes or []) if c.get("attention")),
+                                   result.get("duration_sec"))
+            except Exception:
+                pass
             if name:
                 self.status.update(last_report=name, last_changes=len(changes))
             else:

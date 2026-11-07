@@ -151,6 +151,15 @@ def make_handler(engine: Engine, token: str, port: int):
             if u.path == "/":
                 with open(os.path.join(STATIC, "index.html"), "rb") as fh:
                     return self._send(200, fh.read(), "text/html; charset=utf-8")
+            if u.path == "/api/stats":
+                from . import stats as stats_mod
+                try:
+                    days = max(0, min(3650, int((qs.get("days") or ["30"])[0])))
+                except ValueError:
+                    days = 30
+                group = (qs.get("group") or ["full"])[0]
+                group = group if group in ("full", "quick", "watch") else "full"
+                return self._send(200, stats_mod.build(engine, days, group))
             if u.path == "/api/resources":
                 # 資源監控 24 小時內的事件（頁首「常駐程式 / CPU / 記憶體」卡片點進來看）
                 d = _app_read(os.path.join(DATA, "resources.json"), {})
