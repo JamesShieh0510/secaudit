@@ -177,7 +177,8 @@ def make_handler(engine: Engine, token: str, port: int):
                     "config": {k: cfg.get(k) for k in ("quick_interval_min", "full_scan_hour", "online", "llm_enabled",
                                                        "ollama_host", "ollama_model", "vulnfeed_hours", "reminder_enabled",
                                                        "reminder_weekday", "reminder_hour", "escalate_days", "secure_vault", "secure_dir",
-                                                       "idle_project_days")},
+                                                       "idle_project_days", "envtpl_style", "envtpl_run", "envtpl_guide",
+                                                       "envtpl_vault")},
                     "secrets": {"telegram": bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID")),
                                 "ollama": bool(os.environ.get("OLLAMA_API_KEY"))},
                 })
@@ -293,6 +294,11 @@ def make_handler(engine: Engine, token: str, port: int):
                 cfg["reminder_hour"] = min(23, max(0, cfg.get("reminder_hour", 9)))
                 cfg["escalate_days"] = min(90, max(1, cfg.get("escalate_days", 7)))
                 cfg["idle_project_days"] = min(3650, max(7, cfg.get("idle_project_days", 30)))
+                if body.get("envtpl_style") in ("op-run", "op-inject"):
+                    cfg["envtpl_style"] = body["envtpl_style"]
+                for k, n in (("envtpl_run", 200), ("envtpl_guide", 300)):
+                    if k in body:
+                        cfg[k] = str(body[k]).replace("\n", " ").strip()[:n]
                 cfg["quick_interval_min"] = max(5, cfg["quick_interval_min"])
                 cfg["full_scan_hour"] = min(23, max(0, cfg["full_scan_hour"]))
                 save_config(cfg)
@@ -374,7 +380,7 @@ def make_handler(engine: Engine, token: str, port: int):
                     opts = webauthn.request_options("add-key", actions.key_add_binding(body["reg"]))
                 elif purpose == "secure-cfg":
                     opts = webauthn.request_options("secure-cfg", actions.secure_cfg_binding(
-                        str(body.get("vault", ""))[:100], str(body.get("dir", ""))[:500]))
+                        str(body.get("vault", ""))[:100], str(body.get("dir", ""))[:500], str(body.get("env_vault", ""))[:100]))
                 elif purpose == "del-key":
                     opts = webauthn.request_options("del-key", "del|" + str(body.get("id", "")))
                 else:
@@ -404,7 +410,8 @@ def make_handler(engine: Engine, token: str, port: int):
                 ok, msg = actions.secure_settings_update(str(body.get("vault", ""))[:100], str(body.get("dir", ""))[:500],
                                                          method=str(body.get("method", "touchid")),
                                                          assertion=body.get("assertion") if isinstance(body.get("assertion"), dict) else None,
-                                                         port=port)
+                                                         port=port, env_vault=str(body.get("env_vault", ""))[:100]
+                                                         if "env_vault" in body else None)
                 return self._send(200 if ok else 409, {"ok": ok, "error": msg})
             if path in ("/api/ack", "/api/unack"):
                 # 「已確認無害」會降低警示，所以每次新增 / 取消都發 Telegram，讓使用者知道

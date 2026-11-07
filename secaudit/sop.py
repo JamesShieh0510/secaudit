@@ -159,6 +159,8 @@ def build_sop(cfg: dict, targets: list):
                   "還原：雙擊 DMG、輸入 1Password「secaudit 封存專案：路徑」項目裡的密碼，把檔案複製回原本位置。"])]
 
     from .actions import ARCHIVE_WORKERS as _aw, DOWNLOAD_WORKERS as _dw
+    from . import envtpl as _E
+    _ES = _E.settings(cfg)
     B += [("h", "2-3. 修復動作留下的處理紀錄"),
           ("ul", ["每次修復動作處理了某個檔案，都會在那個資料夾留下 secaudit-處理紀錄.md（同一個資料夾的紀錄會一直往後加），"
                   "寫明處理前、處理後、怎麼還原，以及依據哪份報告、用什麼授權。",
@@ -175,14 +177,16 @@ def build_sop(cfg: dict, targets: list):
     B += [("h", "2-5. 📦 依專案整理的供應鏈問題"),
           ("ul", ["報告的「📦 依專案」頁籤把套件漏洞、專案指定的執行環境版本，依所在專案（git 根目錄）合併，風險高的專案排前面。",
                   "每個專案有「📋 複製給 AI Agent」：複製一段修復指示（漏洞清單、要升級到的最小版本、怎麼驗證、"
-                  "用 bash ~/op-env-run.sh -e 執行、先不要 commit），貼給那個專案的 AI 就能直接開始；也可以下載成 .md。"])]
+                  "專案有 .env.tpl 時要怎麼執行、先不要 commit），貼給那個專案的 AI 就能直接開始；也可以下載成 .md。"])]
 
     B += [("h", "2-4. 寫死的機密 → 1Password + .env.tpl"),
-          ("ul", ["依照 ~/projects/ENV_1PASSWORD_GUIDE.md：值放進 1Password vault「Dev Env」（每個專案一筆 env | ~/<專案>/.env），"
-                  "專案的 .env.tpl 加上 op:// 引用；明文 .env 整份轉成 .env.tpl，op inject 還原後逐字比對一致才刪除原檔。",
+          ("ul", ["值放進 1Password vault「%s」（每個專案一筆 env | ~/<專案>/.env），專案的 .env.tpl 加上 %s；"
+                  "明文 .env 整份轉成 .env.tpl，從 1Password 讀回比對一致才刪除原檔。vault、格式（op run / op inject）、"
+                  "執行指令都在「⚙️ 設定」，vault 修改需要 Touch ID。" % (_ES["vault"], _E.ref(_ES, "<項目ID>", "VAR")),
                   "Python / JS / TS / Go / shell / docker compose / 文件裡「整個字串就是機密」的寫法，自動改成讀環境變數並做語法檢查；"
                   "其他情況只搬值，改法寫在處理紀錄。改寫前原檔存成 1Password 文件，還原只要一行 op document get。",
-                  "處理後執行專案要用 bash ~/op-env-run.sh -e <指令>；專案根目錄的 secaudit-處理紀錄.md 寫了 pm2、docker、CI、VS Code 怎麼調整，以及怎麼還原。",
+                  "處理後執行專案要用 %s；專案根目錄的 secaudit-處理紀錄.md 寫了 pm2、docker、CI、VS Code 怎麼調整，以及怎麼還原。"
+                  % _E.run_cmd(_ES, "<指令>"),
                   "預覽依處理方式分類；「含機密的檔案」預覽裡，App 自己的憑證、本機開發帳密、第三方範例這幾類可以整類標記為已確認無害。",
                   "修復動作一次只跑一個；跑的時候可以把下一個動作「排入佇列」（排隊時就授權），前一個完成後自動開始，在「📜 執行紀錄」可以取消排隊。"])]
 

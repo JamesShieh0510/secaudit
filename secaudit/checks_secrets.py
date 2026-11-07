@@ -158,7 +158,7 @@ def report_file_secrets(ctx: ScanContext, path: str, text: str):
     elif code or git == "tracked":
         # 程式碼 / 已提交的檔案：封存刪檔會讓專案壞掉，也清不掉 git 歷史，真正的處理是撤銷 + 改讀環境變數
         fix = ("① 到服務後台撤銷並更換這個機密%s。"
-               "② 程式改成從環境變數讀取，新值放進 .env.tpl 的 op:// 引用（bash ~/op-env-run.sh 執行時注入）。"
+               "② 程式改成從環境變數讀取，新值放進 .env.tpl 的 op:// 引用，執行時由 1Password 注入（可以用修復動作「🧷 寫死的機密 → 1Password + .env.tpl」）。"
                "不要把整個檔案封存或刪除：%s。" % (
                    "（已提交到 git，歷史裡永遠有舊值）" if git == "tracked" else "",
                    "這是程式碼／設定檔，刪掉專案就無法執行" if code else "已提交到 git，刪掉也清不掉歷史")) + \

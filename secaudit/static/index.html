@@ -224,8 +224,14 @@ body.noscroll{overflow:hidden}
         <label class="cfg" title="有問題的專案超過這個天數沒有更新，報告會列在「💤 閒置專案」，可以批次封存成加密 DMG">專案幾天沒更新算閒置<input type="number" id="c_idle" min="7" max="3650" style="width:80px"></label>
         <label class="cfg">封存機密檔案用的 1Password vault<input type="text" id="c_vault" style="max-width:160px"></label>
         <label class="cfg">加密 DMG 存放資料夾<input type="text" id="c_sdir" style="max-width:160px"></label>
+        <label class="cfg" title="「🧷 寫死的機密 → .env.tpl」把機密存進這個 vault；空白 = 跟上面封存用的 vault 相同">.env.tpl 機密存放的 vault<input type="text" id="c_evault" style="max-width:160px" placeholder="（同上）"></label>
         <div class="row" style="justify-content:flex-end"><button type="button" id="saveSecure">🔒 儲存封存設定（Touch ID）</button><button type="button" id="saveSecureY" style="display:none">🔑 用 YubiKey 儲存封存設定</button></div>
-        <div id="secureMsg" class="muted" style="text-align:right">這兩項決定機密檔案被送去哪裡，修改需要 Touch ID，並會發 Telegram 通知。</div>
+        <div id="secureMsg" class="muted" style="text-align:right">這三項決定機密被送去哪裡，修改需要 Touch ID，並會發 Telegram 通知。</div>
+        <label class="cfg" title="op run：1Password 官方用法，.env.tpl 放 op://…，執行 op run --env-file=.env.tpl -- 指令；op inject：.env.tpl 放 {{ op://… }}，用自己的腳本產生 .env">.env.tpl 格式
+          <select id="c_estyle" style="font:inherit;padding:6px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg)">
+            <option value="op-run">op run（1Password 官方，建議）</option><option value="op-inject">op inject（{{ op://… }} + 自訂腳本）</option></select></label>
+        <label class="cfg" title="處理紀錄、AI 修復指示裡「之後怎麼執行」用的指令；<指令> 會換成原本的指令。空白 = 依格式用預設">執行指令<input type="text" id="c_erun" style="max-width:230px" placeholder="op run --env-file=.env.tpl -- <指令>"></label>
+        <label class="cfg" title="團隊自己的 1Password / .env 說明文件（選填），會寫進處理紀錄">團隊說明文件<input type="text" id="c_eguide" style="max-width:230px" placeholder="（選填）"></label>
       </div>
       <div>
         <label class="cfg">AI 摘要<input type="checkbox" id="c_llm"></label>
@@ -537,7 +543,10 @@ function renderConfig(c, s) {
     $("#c_online").checked = c.online; $("#c_llm").checked = c.llm_enabled; $("#c_feed").value = c.vulnfeed_hours ?? 6;
     $("#c_rem").checked = c.reminder_enabled ?? true; $("#c_wd").value = c.reminder_weekday ?? 0; $("#c_rh").value = c.reminder_hour ?? 9; $("#c_esc").value = c.escalate_days ?? 7; $("#c_idle").value = c.idle_project_days ?? 30;
     $("#c_vault").value = c.secure_vault || "Personal"; $("#c_sdir").value = c.secure_dir || "~/Secure";
-    savedSecure = {vault: $("#c_vault").value, dir: $("#c_sdir").value}; secureDirty();
+    $("#c_evault").value = c.envtpl_vault || ""; $("#c_estyle").value = c.envtpl_style || "op-run";
+    $("#c_erun").value = c.envtpl_run || ""; $("#c_eguide").value = c.envtpl_guide || "";
+    $("#c_erun").placeholder = ($("#c_estyle").value === "op-inject") ? "op inject -i .env.tpl -o .env && <指令>" : "op run --env-file=.env.tpl -- <指令>";
+    savedSecure = {vault: $("#c_vault").value, dir: $("#c_sdir").value, ev: $("#c_evault").value}; secureDirty();
     $("#c_host").value = c.ollama_host; $("#c_model").value = c.ollama_model; cfgLoaded = true; hostHint();
   }
   const ok = v => v ? '<span style="color:var(--ok)">✓ 已設定</span>' : '<span style="color:var(--medium)">✗ 未設定</span>';
@@ -619,19 +628,24 @@ $("#add").onclick = async () => {
   targets.push({path:p, label:p.split("/").filter(Boolean).pop() || p, kind:"custom", enabled:true});
   $("#newPath").value = ""; await saveTargets(true);
 };
-let savedSecure = {vault: "", dir: ""};
-const secureChanged = () => $("#c_vault").value.trim() !== savedSecure.vault || $("#c_sdir").value.trim() !== savedSecure.dir;
+let savedSecure = {vault: "", dir: "", ev: ""};
+const secureChanged = () => $("#c_vault").value.trim() !== savedSecure.vault || $("#c_sdir").value.trim() !== savedSecure.dir ||
+  $("#c_evault").value.trim() !== savedSecure.ev;
 function secureDirty() {
   // vault / DMG 資料夾改了但還沒按「🔒 儲存封存設定」：提示，避免以為按一般的「儲存設定」就生效
-  if (secureChanged()) $("#secureMsg").innerHTML = '<span style="color:var(--medium)">⚠️ vault 或 DMG 資料夾已修改、還沒儲存：請按上面的「🔒 儲存封存設定」（需要 Touch ID）</span>';
+  if (secureChanged()) $("#secureMsg").innerHTML = '<span style="color:var(--medium)">⚠️ vault、DMG 資料夾或 .env.tpl vault 已修改、還沒儲存：請按上面的「🔒 儲存封存設定」（需要 Touch ID）</span>';
   else if (/還沒儲存/.test($("#secureMsg").textContent)) $("#secureMsg").textContent = "這兩項決定機密檔案被送去哪裡，修改需要 Touch ID，並會發 Telegram 通知。";
 }
 $("#c_vault").addEventListener("input", secureDirty); $("#c_sdir").addEventListener("input", secureDirty);
+$("#c_evault").addEventListener("input", secureDirty);
+$("#c_estyle").addEventListener("change", () => { $("#c_erun").placeholder = $("#c_estyle").value === "op-inject" ?
+  "op inject -i .env.tpl -o .env && <指令>" : "op run --env-file=.env.tpl -- <指令>"; });
 $("#saveCfg").onclick = async () => {
   const pendingSecure = secureChanged();
   const r = await api("/api/config", {quick_interval_min:+$("#c_quick").value, full_scan_hour:+$("#c_hour").value, online:$("#c_online").checked,
     llm_enabled:$("#c_llm").checked, ollama_host:$("#c_host").value, ollama_model:$("#c_model").value, vulnfeed_hours:+$("#c_feed").value,
-    reminder_enabled:$("#c_rem").checked, reminder_weekday:+$("#c_wd").value, reminder_hour:+$("#c_rh").value, escalate_days:+$("#c_esc").value, idle_project_days:+$("#c_idle").value});
+    reminder_enabled:$("#c_rem").checked, reminder_weekday:+$("#c_wd").value, reminder_hour:+$("#c_rh").value, escalate_days:+$("#c_esc").value, idle_project_days:+$("#c_idle").value,
+    envtpl_style:$("#c_estyle").value, envtpl_run:$("#c_erun").value.trim(), envtpl_guide:$("#c_eguide").value.trim()});
   if (r.error) { $("#cfgMsg").innerHTML = `<span style="color:var(--high)">❌ ${esc(r.error)}</span>`; return; }
   $("#cfgMsg").textContent = "已儲存，下一次 AI 摘要開始套用"; setTimeout(() => $("#cfgMsg").textContent = "", 3000);
   if (pendingSecure) { await saveSecure(); return; }   // 一般設定存好後，vault / DMG 資料夾另外走 Touch ID
@@ -662,15 +676,15 @@ $("#testOllama").onclick = async () => {
 };
 async function saveSecure(method) {
   method = method === "yubikey" ? "yubikey" : "touchid";
-  const vault = $("#c_vault").value.trim(), dir = $("#c_sdir").value.trim();
+  const vault = $("#c_vault").value.trim(), dir = $("#c_sdir").value.trim(), env_vault = $("#c_evault").value.trim();
   let assertion = null;
   $("#saveSecure").disabled = true;
   if (method === "yubikey") {
     $("#secureMsg").textContent = "請觸碰 YubiKey…";
-    try { assertion = await yubikeyAssert({purpose: "secure-cfg", vault, dir}); }
+    try { assertion = await yubikeyAssert({purpose: "secure-cfg", vault, dir, env_vault}); }
     catch (e) { $("#saveSecure").disabled = false; $("#secureMsg").innerHTML = `<span style="color:var(--high)">❌ ${esc(e.message || e)}（設定沒有改變）</span>`; return; }
-  } else $("#secureMsg").textContent = "請看螢幕上的 Touch ID 對話框（修改 1Password vault / DMG 資料夾）…";
-  const r = await api("/api/secure-settings", {vault, dir, method, assertion});
+  } else $("#secureMsg").textContent = "請看螢幕上的 Touch ID 對話框（修改存放機密的 1Password vault / DMG 資料夾）…";
+  const r = await api("/api/secure-settings", {vault, dir, env_vault, method, assertion});
   $("#saveSecure").disabled = false;
   $("#secureMsg").innerHTML = r.ok ? `<span style="color:var(--ok)">✅ 已儲存：vault「${esc($("#c_vault").value.trim())}」</span>` : `<span style="color:var(--high)">❌ ${esc(r.error || "失敗")}（設定沒有改變）</span>`;
   if (r.ok) cfgLoaded = false;   // 失敗時保留輸入框內容，不要被舊設定蓋回去

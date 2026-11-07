@@ -302,9 +302,11 @@ EXT_DIRS = re.compile(r"/\.(?:vscode|cursor|windsurf|antigravity-ide)[^/]*/exten
 
 def _node_pins(version):
     """哪些專案的 .nvmrc / .node-version 指定了這個 Node 版本（或同一個主版本）。略過編輯器擴充功能自己的原始碼。"""
+    from .app import load_config, load_targets
     major = version.split(".")[0]
     hits = []
-    for base in [HOME] + [os.path.join(HOME, d) for d in ("projects", "alphacurve", "leadcapital", "otso")]:
+    # 搜尋 Web UI 設定的掃描範圍（每個人放專案的位置不同）；家目錄只看前幾層
+    for base in [t.path for t in load_targets(load_config()) if t.enabled] or [HOME]:
         if not os.path.isdir(base):
             continue
         for dp, dns, fns in os.walk(base):
@@ -1248,35 +1250,41 @@ def _secure_1p(plan, s):
     return True, "已存進 1Password「%s」（vault %s）並刪除原檔" % (title, vault)
 
 
-def secure_cfg_binding(vault, out_dir):
-    """YubiKey challenge 綁定「要改成的 vault + 資料夾」：拿到的簽章不能拿去改成別的值。"""
+def secure_cfg_binding(vault, out_dir, env_vault=""):
+    """YubiKey challenge 綁定「要改成的 vault + 資料夾 + .env.tpl 用的 vault」：拿到的簽章不能拿去改成別的值。"""
     rp = os.path.realpath(os.path.expanduser((out_dir or "").strip()))
-    return "cfg|" + hashlib.sha256(("%s\n%s" % ((vault or "").strip(), rp)).encode()).hexdigest()
+    return "cfg|" + hashlib.sha256(("%s\n%s\n%s" % ((vault or "").strip(), rp, (env_vault or "").strip())).encode()).hexdigest()
 
 
-def secure_settings_update(vault, out_dir, method="touchid", assertion=None, port=0):
-    """更換封存用的 vault / DMG 資料夾：會改變機密被送去哪裡，所以要 Touch ID 或 YubiKey。回傳 (成功, 訊息)。"""
+def secure_settings_update(vault, out_dir, method="touchid", assertion=None, port=0, env_vault=None):
+    """更換封存用的 vault / DMG 資料夾 / .env.tpl 用的 vault：會改變機密被送去哪裡，所以要 Touch ID 或 YubiKey。回傳 (成功, 訊息)。"""
     from .app import load_config, save_config
     vault = (vault or "").strip()
     out_dir = (out_dir or "").strip()
     if not vault_ok(vault):
         return False, "vault 名稱只能用英數字、空白、底線、點、減號，最多 80 字，而且不能以 - 開頭"
+    cur_env = (load_config().get("envtpl_vault") or "").strip()
+    env_vault = cur_env if env_vault is None else env_vault.strip()
+    if env_vault and not vault_ok(env_vault):
+        return False, ".env.tpl 用的 vault 名稱只能用英數字、空白、底線、點、減號，最多 80 字，而且不能以 - 開頭"
     if not secure_dir_ok(out_dir):
         return False, "DMG 資料夾必須在家目錄（不能是家目錄本身）或 /Volumes 底下，而且不能是 secaudit 自己的資料夾"
     cfg = load_config()
     if cfg.get("secure_vault") == vault and os.path.realpath(os.path.expanduser(cfg.get("secure_dir", ""))) == \
-            os.path.realpath(os.path.expanduser(out_dir)):
+            os.path.realpath(os.path.expanduser(out_dir)) and env_vault == cur_env:
         return True, ""
-    ok, msg, how = _key_auth(method, assertion, "secure-cfg", secure_cfg_binding(vault, out_dir), port,
-                             "更換 secaudit 封存機密檔案用的 1Password vault 或 DMG 資料夾")
+    ok, msg, how = _key_auth(method, assertion, "secure-cfg", secure_cfg_binding(vault, out_dir, env_vault), port,
+                             "更換 secaudit 存放機密用的 1Password vault 或 DMG 資料夾")
     if not ok:
         return False, msg
     cfg["secure_vault"] = vault
     cfg["secure_dir"] = home_rel(os.path.realpath(os.path.expanduser(out_dir)))
+    cfg["envtpl_vault"] = env_vault
     save_config(cfg)
+    desc = "vault「%s」、DMG 資料夾 %s、.env.tpl 機密 vault「%s」" % (vault, cfg["secure_dir"], env_vault or vault)
     _log({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "action": "secure-settings", "ok": True, "method": how,
-          "message": "封存設定改為 vault「%s」、DMG 資料夾 %s" % (vault, cfg["secure_dir"]), "steps": []})
-    _notify("🔐 secaudit 封存設定已更換：vault「%s」、DMG 資料夾 %s（以 %s 授權）。不是你做的話請立即改回。" % (vault, cfg["secure_dir"], how))
+          "message": "存放機密的設定改為 " + desc, "steps": []})
+    _notify("🔐 secaudit 存放機密的設定已更換：%s（以 %s 授權）。不是你做的話請立即改回。" % (desc, how))
     return True, ""
 
 
@@ -1863,6 +1871,7 @@ def plan_env_tpl():
     from .diff import finding_key
     from .projects import project_root, tool_dir
     from .rules import is_placeholder
+    S = E.settings()
     name, fs = _latest_findings()
     steps, seen, skipped_tool = [], set(), 0
     for f in fs:
@@ -1923,14 +1932,17 @@ def plan_env_tpl():
     steps.sort(key=lambda x: order.get(x["group"], 9))
     for i, x in enumerate(steps):
         x["id"] = "e%d" % i
-    notes = ["依照 ~/projects/ENV_1PASSWORD_GUIDE.md：值放進 1Password vault「%s」，每個專案一筆「env | ~/<專案>/.env」項目、"
-             "每個變數一個欄位；專案的 .env.tpl 加上 VAR={{ op://%s/<項目ID>/VAR }}。專案已經有 .env.tpl 的話沿用同一筆項目。" % (E.VAULT, E.VAULT),
+    notes = ["值放進 1Password vault「%s」，每個專案一筆「env | ~/<專案>/.env」項目、每個變數一個欄位；專案的 .env.tpl 加上 "
+             "VAR=%s（格式：%s，可以在「⚙️ 設定」修改）。專案已經有 .env.tpl 的話沿用同一筆項目。" % (
+                 S["vault"], E.ref(S, "<項目ID>", "VAR"), "1Password 官方 op run" if S["style"] == "op-run" else "op inject 範本"),
              "程式改寫前，原檔會先存成 1Password 文件「secaudit 備份：路徑」，還原只要一行指令；改寫後做語法檢查"
              "（Python / JS / Go / shell），不通過就把原檔寫回去、只搬值。",
              "只自動改寫「整個字串就是機密」的寫法；嵌在比較長的字串、格式化字串，或檔案格式不支援環境變數（例如 alertmanager.yml、"
              "alembic.ini、JSON）時只搬值，程式改法寫在處理紀錄。",
-             "每個專案根目錄會留下 secaudit-處理紀錄.md：處理前 / 處理後、之後怎麼執行（openv -e、pm2、docker、CI）、怎麼還原。",
-             "之後執行這些專案要用 bash ~/op-env-run.sh -e <指令>；已提交到 git 的機密，舊值還在歷史裡，仍要到服務後台撤銷。"]
+             "每個專案根目錄會留下 secaudit-處理紀錄.md：處理前 / 處理後、之後怎麼執行（pm2、docker、CI）、怎麼還原。",
+             "之後執行這些專案要用 %s；已提交到 git 的機密，舊值還在歷史裡，仍要到服務後台撤銷。" % E.run_cmd(S, "<指令>")]
+    if S["guide"]:
+        notes.append("團隊的說明文件：%s" % S["guide"])
     if skipped_tool:
         notes.append("另有 %d 個檔案在工具自己的資料夾或第三方範例裡（例如 ~/.lmstudio、~/.move），不適合改寫，不列出；"
                      "可以在「含機密的檔案」預覽整類標記為已確認無害。" % skipped_tool)
@@ -1943,6 +1955,7 @@ def _envtpl(plan, s, ph=None):
     from . import envtpl as E
     ph = ph or (lambda t: status.update(phase=t))
     p, root, tpl = s["path"], s["root"], s["tpl"]
+    S = plan.setdefault("_envtpl", E.settings())
     if not _still_same(s):
         return False, "略過：預覽之後檔案被修改或移動了"
     with open(p, encoding="utf-8") as fh:
@@ -1950,17 +1963,17 @@ def _envtpl(plan, s, ph=None):
     kind = E.kind_of(p)
     with _op_lock:
         if not plan.get("_vault_ok"):
-            ph("確認 1Password vault「%s」（請留意 1Password 的授權視窗）" % E.VAULT)
-            ok, _, err = E._op(["vault", "get", E.VAULT, "--format", "json"])
+            ph("確認 1Password vault「%s」（請留意 1Password 的授權視窗）" % S["vault"])
+            ok, _, err = E._op(["vault", "get", S["vault"], "--format", "json"])
             if not ok:
-                return False, "讀不到 1Password vault「%s」：%s" % (E.VAULT, err or "可能沒有授權")
+                return False, "讀不到 1Password vault「%s」：%s" % (S["vault"], err or "可能沒有授權")
             plan["_vault_ok"] = True
     v0, iid = E.tpl_item(tpl) if os.path.exists(tpl) else ("", "")
-    if v0 and v0 != E.VAULT:
-        iid = ""          # 既有 .tpl 用的是別的 vault：另外建一筆在 Dev Env，避免改到別人的項目
+    if v0 and v0 != S["vault"]:
+        iid = ""          # 既有 .tpl 用的是別的 vault：另外在設定的 vault 建一筆，避免改到別人的項目
     title = "env | %s" % home_rel(p if kind == "env" else os.path.join(root, ".env"))
     if not iid:
-        iid, err = E.op_item_find(title)
+        iid, err = E.op_item_find(title, S["vault"])
         if iid is None:
             return False, "查詢 1Password 項目失敗：%s" % err
     jsec, restore, after = [], [], []
@@ -1971,21 +1984,26 @@ def _envtpl(plan, s, ph=None):
             return False, "已經有 %s，請手動合併；沒有處理" % home_rel(tpl)
         parsed = E.parse_env(text)
         ph("%s：原檔存成 1Password 文件" % s["label"])
-        did, dtitle, err = E.op_backup(p)
+        did, dtitle, err = E.op_backup(p, S["vault"])
         if not did:
             return False, "原檔備份到 1Password 失敗：%s；沒有處理" % err
-        _, fields = E.env_tpl_text(parsed, "X")
+        _, fields = E.env_tpl_text(parsed, "X", S)
         ph("%s：把 %d 個變數存進 1Password" % (s["label"], len(fields)))
-        iid, err = E.op_item_upsert(title, fields, iid)
+        iid, err = E.op_item_upsert(title, fields, iid, S["vault"])
         if not iid:
             return False, "存進 1Password 失敗：%s；原檔沒有動" % err
-        tpl_text, _ = E.env_tpl_text(parsed, iid)
-        ph("%s：用 op inject 還原並逐字比對" % s["label"])
-        ok, out, err = E._op(["inject"], tpl_text.encode("utf-8"))
-        same = ok and out.decode("utf-8") == text
-        del out
+        tpl_text, _ = E.env_tpl_text(parsed, iid, S)
+        if S["style"] == "op-inject":
+            ph("%s：用 op inject 還原並逐字比對" % s["label"])
+            ok, out, err = E._op(["inject"], tpl_text.encode("utf-8"))
+            same = ok and out.decode("utf-8") == text
+            del out
+        else:
+            ph("%s：逐一讀回 1Password 比對" % s["label"])
+            bad = E.op_verify(iid, fields, S["vault"])
+            same, err = not bad, "、".join(bad)
         if not same:
-            return False, "op inject 還原後和原檔不一致（%s），原檔沒有動；1Password 項目「%s」可以檢查或刪除" % (err or "內容不同", title)
+            return False, "從 1Password 還原後和原檔不一致（%s），原檔沒有動；1Password 項目「%s」可以檢查或刪除" % (err or "內容不同", title)
         fd = os.open(tpl, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(tpl_text)
@@ -1999,10 +2017,11 @@ def _envtpl(plan, s, ph=None):
         except Exception:
             pass
         after = ["`%s` 已刪除，改成 `%s`（%d 個變數：%s）" % (home_rel(p), home_rel(tpl), len(varnames), "、".join(varnames[:12])),
-                 "值在 1Password vault「%s」的「%s」（項目 ID `%s`）" % (E.VAULT, title, iid),
-                 "已用 op inject 還原並逐字比對，和原本的檔案完全一樣"]
-        restore = ["一行還原原檔：`op document get '%s' --vault '%s' --out-file '%s'`（文件「%s」）" % (did, E.VAULT, p, dtitle),
-                   "或用 op inject 從 .tpl 產生：`op inject -i '%s' -o '%s'`" % (tpl, p),
+                 "值在 1Password vault「%s」的「%s」（項目 ID `%s`）" % (S["vault"], title, iid),
+                 "已從 1Password 讀回比對，和原本的值完全一樣"]
+        restore = ["一行還原原檔：`op document get '%s' --vault '%s' --out-file '%s'`（文件「%s」）" % (did, S["vault"], p, dtitle),
+                   ("或用 op inject 從 .tpl 產生：`op inject -i '%s' -o '%s'`" % (tpl, p)) if S["style"] == "op-inject" else
+                   "（.env.tpl 是 op run 格式，不能直接用 op inject 還原，請用上面的指令）",
                    "還原後如果不再需要 .tpl，可以刪掉 `%s`" % home_rel(tpl)]
         summary = "已轉成 %s（%d 個變數），原檔已刪除" % (home_rel(tpl), len(varnames))
     else:
@@ -2015,7 +2034,7 @@ def _envtpl(plan, s, ph=None):
                 continue
             v = h["var"]
             if v in existing and iid:
-                ok, out, _ = E._op(["read", "op://%s/%s/%s" % (E.VAULT, iid, v)])
+                ok, out, _ = E._op(["read", "op://%s/%s/%s" % (S["vault"], iid, v)])
                 same = ok and out.decode().rstrip("\n") == h["value"]
                 del out
                 if same:
@@ -2041,15 +2060,15 @@ def _envtpl(plan, s, ph=None):
         did = dtitle = ""
         if done:
             ph("%s：原檔存成 1Password 文件" % s["label"])
-            did, dtitle, err = E.op_backup(p)
+            did, dtitle, err = E.op_backup(p, S["vault"])
             if not did:
                 return False, "原檔備份到 1Password 失敗：%s；沒有處理" % err
         if fields:
             ph("%s：把 %d 個值存進 1Password" % (s["label"], len(fields)))
-            iid, err = E.op_item_upsert(title, fields, iid)
+            iid, err = E.op_item_upsert(title, fields, iid, S["vault"])
             if not iid:
                 return False, "存進 1Password 失敗：%s；原檔沒有動" % err
-            bad = E.op_verify(iid, fields)
+            bad = E.op_verify(iid, fields, S["vault"])
             if bad:
                 return False, "1Password 讀回的值不一致（%s）；原檔沒有動" % "、".join(bad)
         add = [k for k in dict.fromkeys(h["var"] for h in hits) if k not in existing]
@@ -2058,11 +2077,11 @@ def _envtpl(plan, s, ph=None):
             fd = os.open(tpl, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             with os.fdopen(fd, "a", encoding="utf-8") as fh:
                 if newf:
-                    fh.write("# 機密由 1Password 注入：bash ~/op-env-run.sh -e <指令>（secaudit 產生）\n")
+                    fh.write("# 機密由 1Password 注入，執行：%s（secaudit 產生）\n" % E.run_cmd(S, "<指令>"))
                 elif not open(tpl, encoding="utf-8").read().endswith("\n"):
                     fh.write("\n")
                 for k in add:
-                    fh.write("%s={{ op://%s/%s/%s }}\n" % (k, E.VAULT, iid, k))
+                    fh.write("%s=%s\n" % (k, E.ref(S, iid, k)))
         if done:
             if not _still_same(s):
                 return False, "值已存進 1Password，但期間檔案被修改，沒有改寫程式"
@@ -2080,7 +2099,7 @@ def _envtpl(plan, s, ph=None):
         except Exception:
             pass
         ln = lambda h: text.count("\n", 0, h["start"]) + 1
-        after = ["值在 1Password vault「%s」的「%s」（項目 ID `%s`），變數：%s" % (E.VAULT, title, iid, "、".join(dict.fromkeys(h["var"] for h in hits))),
+        after = ["值在 1Password vault「%s」的「%s」（項目 ID `%s`），變數：%s" % (S["vault"], title, iid, "、".join(dict.fromkeys(h["var"] for h in hits))),
                  "`%s` %s" % (home_rel(tpl), "新增 %d 行引用（%s）" % (len(add), "、".join(add)) if add else "原本就有這些變數")]
         after += ["第 %d 行改成讀環境變數：%s" % (ln(h), how) for h, how in done]
         after += ["第 %d 行 %s 沒有自動改（%s）：值已經搬進 1Password，請手動把程式改成讀環境變數 %s" % (ln(h), h["var"], why, h["var"])
@@ -2090,7 +2109,7 @@ def _envtpl(plan, s, ph=None):
         if E.has_private_key(text):
             after.append("檔案裡的私鑰（例如 service account JSON）沒有搬：建議把整個檔案存成 1Password 文件，執行時用 "
                          "`op document get` 取出到暫存位置，或把 JSON 放進一個變數、程式改用 from_service_account_info 讀")
-        restore = (["一行還原原檔：`op document get '%s' --vault '%s' --out-file '%s'`（文件「%s」）" % (did, E.VAULT, p, dtitle)] if did else []) + \
+        restore = (["一行還原原檔：`op document get '%s' --vault '%s' --out-file '%s'`（文件「%s」）" % (did, S["vault"], p, dtitle)] if did else []) + \
                   (["或用 git：`git -C '%s' checkout -- '%s'`" % (root, os.path.relpath(p, root))] if git_tracked and done else []) + \
                   (["還原後如果不需要這些引用，可以把 %s 裡的 %s 刪掉（1Password 欄位留著也沒關係）" % (home_rel(tpl), "、".join(add))] if add else [])
         summary = "%s；%d 處改成讀環境變數、%d 處只搬值" % (home_rel(tpl), len(done), len(manual))
@@ -2101,14 +2120,14 @@ def _envtpl(plan, s, ph=None):
                       (["⚠️ 這個檔案已提交到 git：舊值永遠在 git 歷史裡，請到服務後台撤銷並更換，再把新值更新到 1Password"] if git_tracked else [])),
         ("處理前", ["檔案：`%s`（SHA-256 %s）" % (p, s["state"][0])] + _finding_lines(f)),
         ("處理後", after),
-        ("之後怎麼執行", E.RUN_HELP),
+        ("之後怎麼執行", E.run_help(S)),
         ("怎麼還原", restore or ["這次沒有改動原檔（只把值搬進 1Password 並加到 .env.tpl），不需要還原"]),
         ("相關資訊", _journal_basics() + ["依據報告：%s" % (plan.get("report") or "—")])])
     return True, summary + "；處理紀錄：%s" % home_rel(os.path.join(root, JOURNAL_NAME))
 
 
 def _ensure_gitignore_env(root):
-    """git 專案：確認 .env 被忽略（op-env-run.sh 會暫時產生 .env），沒有的話加進 .gitignore。"""
+    """git 專案：確認 .env 被忽略（注入腳本會暫時產生 .env），沒有的話加進 .gitignore。"""
     if not os.path.exists(os.path.join(root, ".git")):
         return
     try:
@@ -2121,7 +2140,7 @@ def _ensure_gitignore_env(root):
             with open(gi, encoding="utf-8", errors="replace") as fh:
                 tail = "" if fh.read().endswith("\n") else "\n"
         with open(gi, "a", encoding="utf-8") as fh:
-            fh.write("%s# op-env-run.sh 會暫時產生 .env（secaudit 加入）\n.env\n" % tail)
+            fh.write("%s# 執行時產生的 .env 不要提交（secaudit 加入）\n.env\n" % tail)
     except (OSError, subprocess.TimeoutExpired):
         pass
 
@@ -2625,8 +2644,10 @@ def _execute(plan, steps, key_name=None, preauth=False):
                                                     ("。" + plan["_summary"]) if plan.get("_summary") else ""))
         if plan["action"] == "env-tpl":
             done = [r for r in results if r["ok"]]
+            from . import envtpl as _E
             _notify("🧷 secaudit：%d 個檔案的機密已搬進 1Password 並改成 .env.tpl 引用，%d 個沒有處理。之後執行這些專案請用 "
-                    "bash ~/op-env-run.sh -e <指令>；每個專案根目錄有 secaudit-處理紀錄.md。" % (len(done), len(results) - len(done)))
+                    "%s；每個專案根目錄有 secaudit-處理紀錄.md。" % (len(done), len(results) - len(done),
+                                                                  _E.run_cmd(_E.settings(), "<指令>")))
         if plan["action"] == "archive-idle-projects":
             done = [r for r in results if r["ok"]]
             _notify("💤 secaudit 閒置專案封存結果：%d 個已封存成加密 DMG 並刪除原資料夾，%d 個沒有處理。%s" % (

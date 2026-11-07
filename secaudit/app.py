@@ -33,7 +33,12 @@ DEFAULT_CONFIG = {
     "secure_dir": "~/Secure",       # 加密 DMG 存放的資料夾
     "watch_enabled": True,          # 關鍵位置即時監看
     "resource_monitor": True,
-    "idle_project_days": 30,        # 有問題的專案超過幾天沒有更新 → 報告列為「閒置專案」，可以批次封存       # CPU / 記憶體異常與新常駐程式監控（每分鐘取樣）
+    "idle_project_days": 30,
+    # 「寫死的機密 → .env.tpl」：op-run = 1Password 官方 op run（.env.tpl 放 op://…）；op-inject = {{ op://… }} 範本 + 自己的注入腳本
+    "envtpl_style": "op-run",
+    "envtpl_run": "",               # 執行指令範本（<指令> 會換成原本的指令）；空白 = 依格式用預設
+    "envtpl_guide": "",             # 團隊自己的 1Password / .env 說明文件路徑（選填，會寫進處理紀錄）
+    "envtpl_vault": "",             # 存放機密的 vault；空白 = 跟封存用的 vault 相同。修改需要 Touch ID        # 有問題的專案超過幾天沒有更新 → 報告列為「閒置專案」，可以批次封存       # CPU / 記憶體異常與新常駐程式監控（每分鐘取樣）
     "watch_interval_sec": 10,        # 第一次建立基準時也通知一次
     "report_keep_days": 30,         # 一般報告保留天數
     "full_report_keep_days": 90,    # 完整掃描報告保留天數

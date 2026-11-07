@@ -165,6 +165,8 @@ TELEGRAM_BOT_TOKEN={{ op://<vault>/<item>/TELEGRAM_BOT_TOKEN }}
 | 視為可信任的 plugin marketplace | `secaudit/checks_ai.py` 的 `TRUSTED_MARKETPLACES` | 只檢查高風險隱藏字元，減少官方說明文件的誤報 |
 | 即時監看的位置 | `secaudit/watch.py` 的 `build_watch_list()` | |
 | 1Password vault | `OP_VAULT` 環境變數（`scripts/op-store.sh`） | 預設 `Personal`（個人帳號的預設 vault） |
+| 封存 / `.env.tpl` 用的 1Password vault、DMG 資料夾 | Web UI「常駐監控設定」→「🔒 儲存封存設定」 | 決定機密被送去哪裡，修改需要 Touch ID 並發 Telegram。預設 `Personal`；1Password Business / Teams 帳號的個人 vault 叫 `Private` |
+| `.env.tpl` 格式與執行指令 | Web UI「常駐監控設定」 | 預設 1Password 官方的 `op run --env-file=.env.tpl -- <指令>`（`.env.tpl` 放 `op://…`）；團隊有自己的注入腳本時改成 `op inject` 格式（`{{ op://… }}`）並填執行指令、說明文件 |
 
 ## 限制
 

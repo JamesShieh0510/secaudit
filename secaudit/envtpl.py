@@ -1,9 +1,9 @@
-"""寫死的機密 → 1Password（Dev Env）+ .env.tpl 的 op:// 引用，程式改成讀環境變數。
+"""寫死的機密 → 1Password + .env.tpl 的 op:// 引用，程式改成讀環境變數。
 
-依照 ~/projects/ENV_1PASSWORD_GUIDE.md 的慣例：
-  - 機密值放在 1Password vault「Dev Env」，每個專案一筆「API Credential」項目，標題 env | ~/<專案>/.env，每個變數一個欄位
-  - 專案根目錄的 .env.tpl 只放引用：VAR={{ op://Dev Env/<項目ID>/VAR }}
-  - 執行時用 bash ~/op-env-run.sh（程式直接讀環境變數時加 -e）
+  - 機密值放在設定的 1Password vault，每個專案一筆「API Credential」項目，標題 env | ~/<專案>/.env，每個變數一個欄位
+  - 專案根目錄的 .env.tpl 只放引用，兩種格式（Web UI 設定）：
+      op-run（預設，1Password 官方）：VAR=op://Vault/<項目ID>/VAR，執行 op run --env-file=.env.tpl -- <指令>
+      op-inject：VAR={{ op://Vault/<項目ID>/VAR }}，用 op inject 產生 .env 的自訂腳本執行
 
 安全原則：
   - 機密值只經由 stdin 傳給 op，不出現在指令參數；不寫進任何紀錄（處理紀錄只放遮罩值）
@@ -21,7 +21,42 @@ import time
 from .core import HOME, home_rel, mask
 from .rules import GENERIC_ASSIGN, SECRET_RULES, is_placeholder
 
-VAULT = "Dev Env"
+RUN_DEFAULT = {"op-run": "op run --env-file=.env.tpl -- <指令>", "op-inject": "op inject -i .env.tpl -o .env && <指令>"}
+
+
+def settings(cfg=None):
+    """{vault, style, run, guide}：都來自 Web UI 的設定，不寫死任何人的慣例。"""
+    if cfg is None:
+        from .app import load_config
+        cfg = load_config()
+    style = cfg.get("envtpl_style") if cfg.get("envtpl_style") in RUN_DEFAULT else "op-run"
+    return {"vault": (cfg.get("envtpl_vault") or cfg.get("secure_vault") or "Personal").strip(), "style": style,
+            "run": (cfg.get("envtpl_run") or "").strip() or RUN_DEFAULT[style], "guide": (cfg.get("envtpl_guide") or "").strip()}
+
+
+def ref(S, item_id, key):
+    r = "op://%s/%s/%s" % (S["vault"], item_id, key)
+    return "{{ %s }}" % r if S["style"] == "op-inject" else r
+
+
+def run_cmd(S, cmd="<原本的指令>"):
+    return S["run"].replace("<指令>", cmd)
+
+
+def run_help(S):
+    out = ["之後執行這個專案要透過：`%s`。程式現在直接讀環境變數，機密在執行時才由 1Password 注入。" % run_cmd(S)]
+    if S["style"] == "op-run":
+        out += ["`op run` 不會在磁碟上留下 .env；會自己讀 .env 檔案（dotenv）的程式，改成讀環境變數，或改用 op inject 格式。",
+                "pm2：`%s`，再加 `--update-env`；pm2 自動重啟、開機啟動也要經過 op run。" % run_cmd(S, "pm2 start <設定檔>"),
+                "docker compose：`%s`（compose 會用環境變數展開 ${變數}）。不要把機密寫進 Dockerfile。" % run_cmd(S, "docker compose up")]
+    else:
+        out += ["pm2：`%s`，再加 `--update-env`；pm2 自動重啟、開機啟動也要經過同一個指令。" % run_cmd(S, "pm2 start <設定檔>"),
+                "docker compose：`%s`。不要在 Dockerfile 裡 COPY .env。" % run_cmd(S, "docker compose up")]
+    out += ["VS Code / JetBrains 的 Run/Debug 不會經過上面的指令：改成在終端機啟動，或把啟動設定改成透過它執行。",
+            "CI/CD（GitHub Actions、Drone…）不會讀本機的 .env.tpl：要把同名的變數加到 CI 的 secrets。"]
+    if S.get("guide"):
+        out.append("團隊的說明文件：%s" % S["guide"])
+    return out
 
 RULE_VAR = {"anthropic-key": "ANTHROPIC_API_KEY", "openai-key": "OPENAI_API_KEY", "google-api-key": "GOOGLE_API_KEY",
             "aws-access-key": "AWS_ACCESS_KEY_ID", "github-token": "GITHUB_TOKEN", "slack-token": "SLACK_TOKEN",
@@ -279,18 +314,20 @@ def parse_env(text):
     return out
 
 
-def env_tpl_text(parsed, item_id, vault=VAULT):
+def env_tpl_text(parsed, item_id, S):
     lines, fields = [], {}
     for kind, d in parsed:
         if kind == "raw":
             lines.append(d)
             continue
         pre, key, eq, q, val, tail = d
+        if S["style"] == "op-run":
+            pre = re.sub(r"\bexport\s+", "", pre)      # op run --env-file 讀一般的 dotenv 行，不需要 export
         if val == "" or is_placeholder(val):
             lines.append("%s%s%s%s%s%s%s" % (pre, key, eq, q, val, q, tail))
             continue
         fields[key] = val
-        lines.append("%s%s%s%s{{ op://%s/%s/%s }}%s%s" % (pre, key, eq, q, vault, item_id, key, q, tail))
+        lines.append("%s%s%s%s%s%s%s" % (pre, key, eq, q, ref(S, item_id, key), q, tail))
     return "\n".join(lines), fields
 
 
@@ -300,7 +337,7 @@ def _op(argv, stdin=None, timeout=120):
     return _quiet_err(["op"] + argv, stdin_bytes=stdin, timeout=timeout, env=_op_env())
 
 
-def op_item_find(title, vault=VAULT):
+def op_item_find(title, vault):
     ok, out, err = _op(["item", "list", "--vault", vault, "--format", "json"])
     if not ok:
         return None, err or "讀不到 vault「%s」" % vault
@@ -313,7 +350,7 @@ def op_item_find(title, vault=VAULT):
     return "", ""
 
 
-def op_item_upsert(title, fields, item_id="", vault=VAULT):
+def op_item_upsert(title, fields, item_id, vault):
     """建立或更新 API Credential 項目：每個變數一個隱藏欄位。回傳 (項目 ID, 錯誤)。"""
     if not item_id:
         tpl = {"title": title, "category": "API_CREDENTIAL", "tags": ["secaudit", "env"],
@@ -343,7 +380,7 @@ def op_item_upsert(title, fields, item_id="", vault=VAULT):
     return (item_id, "") if ok else ("", err)
 
 
-def op_verify(item_id, fields, vault=VAULT):
+def op_verify(item_id, fields, vault):
     """逐一用 op read 讀回比對（值不輸出、不記錄）。回傳不一致的變數名稱清單。"""
     bad = []
     for k, v in fields.items():
@@ -354,7 +391,7 @@ def op_verify(item_id, fields, vault=VAULT):
     return bad
 
 
-def op_backup(path, vault=VAULT):
+def op_backup(path, vault):
     """原檔存成 1Password 文件（檔案內容由 op 自己讀，不經過指令參數）。回傳 (文件 ID, 標題, 錯誤)。"""
     title = "secaudit 備份：%s（%s）" % (home_rel(path), time.strftime("%Y-%m-%d %H:%M"))
     ok, out, err = _op(["document", "create", path, "--vault", vault, "--title", title, "--tags", "secaudit,secaudit/backup",
@@ -407,13 +444,3 @@ def write_atomic(path, text):
         if os.path.exists(tmp):
             os.remove(tmp)
         raise
-
-
-RUN_HELP = [
-    "之後執行這個專案要透過 `bash ~/op-env-run.sh -e <原本的指令>`（建議 alias：`openv`）。`-e` 會把 .env 匯出成環境變數，"
-    "因為程式現在是直接讀環境變數；如果專案本來就用 dotenv 讀 .env，可以不加 `-e`。monorepo 加 `-r`。",
-    "pm2：在專案資料夾執行 `openv -e pm2 start <設定檔> --update-env`；`pm2 resurrect`／開機自動啟動也要透過 openv。",
-    "docker compose：`openv -r docker compose up`（compose 會讀產生出來的 .env 展開 ${變數}）。不要在 Dockerfile 裡 COPY .env。",
-    "VS Code / JetBrains 的 Run/Debug 不會經過 op-env-run.sh：改成在終端機用 openv 啟動，或照 ~/projects/ENV_1PASSWORD_GUIDE.md §3 設定。",
-    "CI/CD（GitHub Actions、Drone）不會讀本機的 .env.tpl：要把同名的變數加到 CI 的 secrets。",
-]
