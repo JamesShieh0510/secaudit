@@ -17,11 +17,19 @@ MARKERS = ("package.json", "go.mod", "Cargo.toml", "pyproject.toml", "requiremen
            "composer.json", "pom.xml", "build.gradle", "Package.swift", "pubspec.yaml", "deno.json", "mix.exs")
 # 工具產生、不代表「你在改這個專案」的資料夾
 NOISE_DIRS = PRUNE_DIRS | {"dist", "build", "out", "target", "coverage", ".parcel-cache", ".svelte-kit", ".expo",
-                           ".angular", ".dart_tool", ".terraform", "vendor", "tmp", "logs", ".idea", ".vscode"}
+                           ".angular", ".dart_tool", ".terraform", "vendor", "tmp", "logs", ".idea", ".vscode",
+                           ".github", ".circleci"}
 # 工具（套件升級、secaudit 的修復動作、1Password 搬移）常會自動改動的檔案：改了也不代表你在開發這個專案
 TOOL_TOUCHED = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock", "go.sum", "go.mod", "Cargo.lock",
                 "poetry.lock", "Pipfile.lock", "Gemfile.lock", "composer.lock", "uv.lock", ".gitignore", ".npmrc",
-                ".DS_Store", ".tool-versions", ".nvmrc", ".python-version"}
+                ".DS_Store", ".tool-versions", ".nvmrc", ".python-version",
+                # CI 設定與 secaudit 自己的處理紀錄：搬機密、改 CI 也會動到，不代表你在開發這個專案
+                ".drone.yml", ".drone.yaml", ".gitlab-ci.yml", ".gitlab-ci.yaml", ".travis.yml", "Jenkinsfile",
+                "azure-pipelines.yml", "bitbucket-pipelines.yml", "secaudit-處理紀錄.md"}
+# 判斷「最後一次真的改程式的 commit」時排除的路徑（同上：CI、機密範本、lockfile、secaudit 紀錄）
+GIT_MAINT_EXCLUDE = [":(exclude,glob)**/%s" % x for x in (
+    ".github/**", ".circleci/**", ".drone.yml", ".drone.yaml", ".gitlab-ci.y*ml", ".travis.yml", "Jenkinsfile",
+    "*.tpl", ".env*", ".gitignore", ".npmrc", "*lock*", "go.sum", "go.mod", "Cargo.lock", "secaudit-*.md")]
 WALK_CAP = 60000          # 每個專案最多看幾個項目（超過就以目前看到的為準）
 # 雲端硬碟（iCloud、Google Drive…）：git 指令會讀檔案內容，碰到「僅限線上」的檔案就會觸發下載，所以只看修改時間
 CLOUD_MARKS = ("/Library/Mobile Documents/", "/Library/CloudStorage/")
@@ -140,17 +148,42 @@ def activity(root, quick=False):
             "git": False}
     cloud = in_cloud(root)
     info["cloud"] = cloud
+    if os.path.exists(os.path.join(root, ".git")) and not cloud:
+        # git 專案：沒有改動的檔案內容就等於某個 commit，修改時間會被 checkout / reset / rebase 改掉，不可信。
+        # 改成只看「和 git 不一樣」的檔案（沒 commit 的修改、新檔案）的修改時間，再加上最後一次真的改程式的 commit
+        ok, st = _git(root, "status", "--porcelain", "-z", "--untracked-files=normal", timeout=30)
+        if ok:
+            best, what = 0.0, ""
+            for ent in st.split("\0"):
+                rel = ent[3:] if len(ent) > 3 else ""
+                if not rel:
+                    continue
+                p = os.path.join(root, rel)
+                cands = [p]
+                if os.path.isdir(p):           # 整個新資料夾：看裡面的檔案（有上限）
+                    cands = []
+                    for dp, dns, fns in os.walk(p):
+                        dns[:] = [x for x in dns if x not in NOISE_DIRS]
+                        cands += [os.path.join(dp, f) for f in fns]
+                        if len(cands) > 2000:
+                            break
+                for c in cands:
+                    n = os.path.basename(c)
+                    if n in TOOL_TOUCHED or n.startswith(".env") or n.endswith(".tpl"):
+                        continue
+                    try:
+                        m = os.lstat(c).st_mtime
+                    except OSError:
+                        continue
+                    if m > best:
+                        best, what = m, c
     if os.path.exists(os.path.join(root, ".git")):
         info["git"] = True
-        ok, ct = (False, "") if cloud else _git(root, "log", "-1", "--format=%ct")
+        # 最後一次「真的改程式」的 commit：只動 CI、機密範本、lockfile 的維護 commit 不算。
+        # 不看 checkout / rebase / reset 這類 git 操作（工具或修復動作也會做，不代表你在開發）
+        ok, ct = (False, "") if cloud else _git(root, "log", "-1", "--format=%ct", "--", "." , *GIT_MAINT_EXCLUDE)
         if ok and ct.isdigit() and int(ct) > best:
             best, what = float(ct), "最後一次 commit"
-        try:
-            hm = os.stat(os.path.join(root, ".git", "logs", "HEAD")).st_mtime
-            if hm > best:
-                best, what = hm, "git 操作（commit / checkout）"
-        except OSError:
-            pass
     if info["git"] and not quick and cloud:
         info["remote"] = _remote_from_config(root)      # 只讀已下載的 .git/config，不跑 git 指令
         info["dirty"] = info["unpushed"] = None
