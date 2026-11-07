@@ -122,6 +122,9 @@ def main():
     sub.add_parser("serve")
     sub.add_parser("url")
     sub.add_parser("resources", help="查看 CPU / 記憶體 / 常駐程式監控是否在運作、最近的事件")
+    arc = sub.add_parser("archive", help="把指定的資料夾封存成加密 DMG（密碼存 1Password），驗證後刪除原資料夾")
+    arc.add_argument("paths", nargs="+", help="要封存的資料夾")
+    arc.add_argument("--yes", action="store_true", help="不再詢問確認（仍然需要 Touch ID）")
     sub.add_parser("test-notify", help="測試 Telegram 與 Ollama 設定")
     np_ = sub.add_parser("notify", help="透過執行中的常駐程式發 Telegram（不需要 1Password）")
     np_.add_argument("text")
@@ -142,6 +145,9 @@ def main():
     from secaudit.web import get_token, serve
 
     cfg = load_config()
+    if args.cmd == "archive":
+        from secaudit import actions
+        sys.exit(actions.archive_cli(args.paths, assume_yes=args.yes))
     if args.cmd == "resources":
         import json
         import time as _t

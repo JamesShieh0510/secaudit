@@ -77,6 +77,8 @@ python3 audit.py scan                          # 完整掃描（範圍在 Web UI
 python3 audit.py scan --no-home --path ~/code  # 只掃指定資料夾
 python3 audit.py test-notify                   # 測試 Telegram 與 Ollama 設定
 python3 audit.py url                           # 再次取得 Web UI 網址
+python3 audit.py resources                     # 確認 CPU / 記憶體 / 常駐程式監控在運作、看最近的事件
+python3 audit.py archive ~/old-project         # 把指定資料夾封存成加密 DMG（Touch ID、密碼存 1Password、驗證後刪除原資料夾）
 ```
 
 > 第一次完整掃描家目錄可能要花一段時間；建議先用 `--no-home --path <小資料夾>` 試跑。

@@ -2724,3 +2724,97 @@ def key_remove(kid, method, assertion, port):
           "message": "移除 YubiKey「%s」" % k["name"], "steps": []})
     _notify("🔑 secaudit 移除了 YubiKey「%s」（以 %s 授權）。" % (k["name"], how))
     return True, ""
+
+
+# ---------------------------------------------------------------- 命令列：指定資料夾封存
+def archive_cli(paths, assume_yes=False):
+    """python3 audit.py archive <資料夾>…：和 Web UI 的閒置專案封存同一套流程（Touch ID、1Password、驗證後才刪除、處理紀錄）。
+    不要求閒置天數（你自己指定要封存的），其他安全檢查照舊。回傳結束碼。"""
+    from . import projects as P
+    from .app import load_config
+    cfg = load_config()
+    vault = cfg.get("secure_vault", "Personal")
+    steps = []
+    for i, raw in enumerate(paths):
+        root = os.path.realpath(os.path.expanduser(raw))
+        if not os.path.isdir(root):
+            print("❌ 找不到資料夾：%s" % raw)
+            continue
+        if not _project_ok(root):
+            print("❌ 不能封存這個位置（家目錄 / 磁碟根目錄 / 掃描範圍根目錄 / ~/Library / secaudit 自己 / 工具資料夾）：%s" % home_rel(root))
+            continue
+        a = P.activity(root)
+        a.update(counts={"high": 0, "medium": 0, "low": 0}, titles=["你指定封存"], in_use=P.cwd_users([root])[root])
+        fo, sample = P.foreign_owned(root)
+        n, sz = P.cloud_only(root) if P.in_cloud(root) else (0, 0)
+        size = P.size_of(root)
+        print("\n📦 %s" % home_rel(root))
+        print("   最後活動：%s（%s），閒置 %s 天・大小 %s" % (a["last"], a["last_what"], a["idle_days"], P.human_size(size)))
+        print("   Git：%s" % (P.git_note(a) if a.get("git") else "不是 git 專案（DMG 是唯一的副本）"))
+        if n:
+            print("   ☁️ 有 %d 個檔案（%s）只在雲端，會先下載" % (n, P.human_size(sz)))
+        if a["in_use"]:
+            print("   ❌ 有程式開在裡面（%s），請先關掉再執行" % "、".join(a["in_use"][:3]))
+            continue
+        if fo:
+            print("   ❌ 有 %d 個檔案不屬於你（例如 %s），請先執行：sudo chown -R %s '%s'" % (fo, "、".join(sample), os.environ.get("USER", "$USER"), root))
+            continue
+        dmg = os.path.join(os.path.dirname(root), "%s.archive-%s.dmg" % (os.path.basename(root), time.strftime("%Y%m%d")))
+        print("   → 封存到 %s，驗證後刪除原資料夾" % home_rel(dmg))
+        steps.append({"id": "p%d" % i, "label": home_rel(root), "detail": "", "kind": "archive-project", "path": root,
+                      "last_ts": a["last_ts"], "dmg": dmg, "info": dict(a, size=size)})
+    if not steps:
+        return 1
+    print("\nDMG 密碼會存進 1Password vault「%s」；原資料夾驗證後直接刪除（不進垃圾桶）。" % vault)
+    if not assume_yes:
+        try:
+            ans = input("確定要封存上面 %d 個資料夾嗎？輸入 yes 繼續：" % len(steps)).strip().lower()
+        except EOFError:
+            ans = ""
+        if ans != "yes":
+            print("已取消，沒有做任何改動。")
+            return 1
+    reason = "執行 secaudit 修復：把指定的資料夾封存成加密 DMG 並刪除原資料夾（共 %d 個）" % len(steps)
+    _notify("🔒 secaudit 正在請求 Touch ID 授權（命令列封存 %d 個資料夾：%s）。不是你按的話請按取消。" % (
+        len(steps), "、".join(s["label"] for s in steps[:3])))
+    print("請用 Touch ID 授權…")
+    ok, msg = authorize(reason)
+    if not ok:
+        print("❌ 沒有授權：%s" % msg)
+        return 1
+    plan = {"vault": vault, "report": "命令列指定", "action": "archive-idle-projects", "title": "命令列封存", "reason": reason}
+    status.update(running=False, method="Touch ID（命令列）", started=time.strftime("%Y-%m-%d %H:%M:%S"), cancel=False)
+    results = []
+    last = [""]
+
+    def ph(t):
+        if t != last[0]:
+            last[0] = t
+            print("   …%s" % t, flush=True)
+
+    with _op_lock:
+        okv, why, vid = _vault_private(vault) if vault_ok(vault) else (False, "設定的 vault 不合法", "")
+    if not okv:
+        print("❌ %s" % why)
+        return 1
+    plan["_vault_id"] = vid
+    for s in steps:
+        print("\n▶ %s" % s["label"])
+        pre, err = _archive_prekey(plan, s, vid)
+        if not pre:
+            r = (False, "無法把密碼存進 1Password（%s）；原資料夾沒有動" % err)
+        else:
+            try:
+                r = _archive_project(plan, s, ph, pre)
+            except Exception as e:
+                r = (False, "%s: %s；原資料夾沒有刪除" % (type(e).__name__, str(e)[:200]))
+        print("   %s %s" % ("✅" if r[0] else "❌", r[1]))
+        results.append({"id": s["id"], "label": s["label"], "ok": r[0], "output": r[1]})
+    okn = sum(1 for r in results if r["ok"])
+    msg = "命令列封存：%d 個資料夾，成功 %d、失敗 %d" % (len(results), okn, len(results) - okn)
+    _log({"time": status["started"], "finished": time.strftime("%Y-%m-%d %H:%M:%S"), "action": "archive-idle-projects",
+          "ok": okn == len(results), "method": "Touch ID（命令列）", "message": msg,
+          "steps": [{"id": r["id"], "label": r["label"], "ok": r["ok"]} for r in results]})
+    _notify("💤 secaudit %s。%s" % (msg, "；".join(r["label"] for r in results if r["ok"])[:300]))
+    print("\n%s" % msg)
+    return 0 if okn == len(results) else 2
