@@ -229,7 +229,10 @@ def _system_checks(ctx, cache):
 
 
 def _old_paths(f):
-    """舊報告問題的路徑（套件漏洞會用「；」列出多個專案，最後可能有「等 N 個專案」）。"""
+    """舊報告問題的路徑（套件漏洞會用「；」列出多個專案，最後可能有「等 N 個專案」）。
+    有完整專案清單（projects 欄位）時用它：path 只放前 5 個，只看 path 會漏掉其他專案，它們會被誤當成已改善。"""
+    if f.get("projects"):
+        return [os.path.expanduser(x) for x in f["projects"].split("\n") if x.strip()]
     out = []
     for x in (f.get("path") or "").split("；"):
         x = x.split(" 等 ")[0].split("（")[0].strip()
