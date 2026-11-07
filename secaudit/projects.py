@@ -30,6 +30,47 @@ TOOL_TOUCHED = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb",
 GIT_MAINT_EXCLUDE = [":(exclude,glob)**/%s" % x for x in (
     ".github/**", ".circleci/**", ".drone.yml", ".drone.yaml", ".gitlab-ci.y*ml", ".travis.yml", "Jenkinsfile",
     "*.tpl", ".env*", ".gitignore", ".npmrc", "*lock*", "go.sum", "go.mod", "Cargo.lock", "secaudit-*.md")]
+ARCHIVE_OUT = re.compile(r"\.archive-\d{8}(?:-\d{6})?\.(?:dmg|md)$")    # secaudit 封存產生的 DMG 與處理紀錄
+
+
+def _self_touched():
+    """secaudit 修復動作改過的檔案：{路徑: 改完後的 sha256}（data/touched.json）。"""
+    try:
+        from .app import DATA
+        import json as _j
+        with open(os.path.join(DATA, "touched.json"), encoding="utf-8") as fh:
+            d = _j.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def record_touched(paths):
+    """修復動作改完檔案後呼叫：記下內容雜湊。之後內容沒變就不算「你在開發」；你一改，雜湊不同就照常算。"""
+    import hashlib, json as _j
+    from .app import DATA, _write_private
+    t = _self_touched()
+    for p in paths:
+        try:
+            with open(p, "rb") as fh:
+                t[os.path.realpath(p)] = hashlib.sha256(fh.read()).hexdigest()
+        except OSError:
+            t.pop(os.path.realpath(p), None)
+    _write_private(os.path.join(DATA, "touched.json"), t)
+
+
+def _is_self_touched(p, touched):
+    h = touched.get(os.path.realpath(p))
+    if not h:
+        return False
+    import hashlib
+    try:
+        with open(p, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest() == h
+    except OSError:
+        return False
+
+
 WALK_CAP = 60000          # 每個專案最多看幾個項目（超過就以目前看到的為準）
 # 雲端硬碟（iCloud、Google Drive…）：git 指令會讀檔案內容，碰到「僅限線上」的檔案就會觸發下載，所以只看修改時間
 CLOUD_MARKS = ("/Library/Mobile Documents/", "/Library/CloudStorage/")
@@ -124,11 +165,12 @@ def activity(root, quick=False):
     """專案的最後活動時間與狀態。quick：只算最後活動時間（不查 remote / 未提交 / 未推送）。"""
     best, what = 0.0, ""
     files = dataless = dataless_bytes = 0
+    touched_any = _self_touched()
     capped = False
     for dp, dns, fns in os.walk(root):
         dns[:] = [d for d in dns if d not in NOISE_DIRS and not d.endswith(".egg-info")]
         for n in fns:        # 只看檔案：資料夾的修改時間在裡面新增 / 刪除任何東西（包括工具產生的）時都會變
-            if n in TOOL_TOUCHED or n.startswith(".env") or n.endswith(".tpl"):
+            if n in TOOL_TOUCHED or n.startswith(".env") or n.endswith(".tpl") or ARCHIVE_OUT.search(n):
                 continue
             files += 1
             try:
@@ -138,6 +180,8 @@ def activity(root, quick=False):
             if is_dataless(st):
                 dataless += 1
                 dataless_bytes += st.st_size
+            if st.st_mtime > best and touched_any and _is_self_touched(os.path.join(dp, n), touched_any):
+                continue
             if st.st_mtime > best:
                 best, what = st.st_mtime, os.path.join(dp, n)
         if files > WALK_CAP:
@@ -152,12 +196,13 @@ def activity(root, quick=False):
         # git 專案：沒有改動的檔案內容就等於某個 commit，修改時間會被 checkout / reset / rebase 改掉，不可信。
         # 改成只看「和 git 不一樣」的檔案（沒 commit 的修改、新檔案）的修改時間，再加上最後一次真的改程式的 commit
         ok, st = _git(root, "status", "--porcelain", "-z", "--untracked-files=normal", timeout=30)
+        touched = _self_touched()
         if ok:
             best, what = 0.0, ""
             for ent in st.split("\0"):
                 rel = ent[3:] if len(ent) > 3 else ""
-                if not rel:
-                    continue
+                if not rel or any(c in NOISE_DIRS for c in rel.rstrip("/").split("/")):
+                    continue        # __pycache__、node_modules、build… 這類工具產生的東西
                 p = os.path.join(root, rel)
                 cands = [p]
                 if os.path.isdir(p):           # 整個新資料夾：看裡面的檔案（有上限）
@@ -169,7 +214,8 @@ def activity(root, quick=False):
                             break
                 for c in cands:
                     n = os.path.basename(c)
-                    if n in TOOL_TOUCHED or n.startswith(".env") or n.endswith(".tpl"):
+                    if n in TOOL_TOUCHED or n.startswith(".env") or n.endswith(".tpl") or ARCHIVE_OUT.search(n) \
+                            or _is_self_touched(c, touched):
                         continue
                     try:
                         m = os.lstat(c).st_mtime

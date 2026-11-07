@@ -171,7 +171,10 @@ def check_dependencies(ctx: ScanContext, lockfiles, cache: dict):
         return
     ctx.report(CAT, "查詢 OSV 漏洞資料庫（%d 個 lockfile）" % len(lockfiles))
     where, dormant = {}, set()
+    from .projects import tool_dir
     for lf in lockfiles:
+        if tool_dir(lf):
+            continue        # ~/.move、~/.antigravity-ide 這類工具自己下載的快取 / 擴充功能，不是你的專案
         proj = home_rel(os.path.dirname(lf))
         # 備份碟裡的複本、超過一年沒動的專案：程式不會被執行，漏洞只有重新安裝 / 執行時才有影響
         try:

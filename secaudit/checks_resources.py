@@ -265,6 +265,10 @@ class ResourceMonitor:
             user = _from_user(chain)
             weak = kind in ("unsigned", "adhoc", "missing", "unknown")
             tunnel = os.path.basename(p["exe"]) in ("ssh", "autossh") and bool(SSH_TUNNEL.search(p["args"]))
+            # ssh 連線共用（ControlMaster / ControlPersist）：你開 ssh 連線時 fork 出來在背景保持連線，父程式結束後掛在 launchd 底下
+            mux = os.path.basename(p["exe"]) == "ssh" and bool(re.match(r"^ssh: \S+ \[mux\]$", p["args"].strip()))
+            if mux and not tunnel:
+                user = True
             if kind == "missing" or (weak and odd and not user) or (tunnel and not user):
                 sev = "high"
             elif user:
@@ -284,7 +288,9 @@ class ResourceMonitor:
                 rows.append("位置：⚠️ 在暫存 / 共享 / 隱藏資料夾裡執行，一般正式安裝的程式不會放這裡")
             if tunnel:
                 rows.append("通道：⚠️ ssh 帶了開通道的參數（-R 反向通道可以讓別人從遠端連回你的電腦，-D / -L 會轉送流量）")
-            rows.append("判斷：%s" % ("從你的終端機或 AI 助理啟動，很可能是你自己在跑的程式" if user else
+            rows.append("判斷：%s" % ("ssh 連線共用（ControlMaster）的背景程式：你開過的 ssh 連線留下來保持連線用的（例如 Warp 的 SSH），"
+                                       "不是你認得的連線再處理" if mux and not tunnel else
+                                       "從你的終端機或 AI 助理啟動，很可能是你自己在跑的程式" if user else
                                        "⚠️ 不是從你的終端機啟動（開機自動執行或背景服務），請確認你認得它" if sev != "low" else
                                        "有正式簽章的程式，確認是不是你最近安裝或開啟的 App"))
             self._event("resident", key, sev, "新出現的常駐程式：%s" % os.path.basename(key.split(" ")[0]),
@@ -334,8 +340,9 @@ class ResourceMonitor:
             if not (lol or kind in ("unsigned", "adhoc", "missing", "unknown")):
                 continue        # 有正式簽章的 App（瀏覽器、Slack…）不看，避免大量誤報
             chain = ancestry(procs, pid)
-            if _from_user(chain):
-                continue
+            if _from_user(chain) or (os.path.basename(p["exe"]) == "ssh" and re.match(r"^ssh: \S+ \[mux\]$", p["args"].strip())
+                                     and not SSH_TUNNEL.search(p["args"])):
+                continue        # 你自己的 ssh 連線共用（ControlMaster）
             key = "%s → %s:%s" % (norm_key(p["exe"], p["args"]), host, port)
             cur.add(key)
             first = seen.setdefault(key, now)

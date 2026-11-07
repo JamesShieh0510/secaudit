@@ -146,7 +146,8 @@ def build_sop(cfg: dict, targets: list):
                   "git 專案的最後活動：最後一次「真的改程式」的 commit（只動 CI 設定、.env 範本、lockfile、.npmrc 的維護 commit 不算），"
                   "以及目前和 git 不一樣的檔案（沒 commit 的修改、新檔案）的修改時間。沒有改動的檔案不看修改時間，"
                   "因為 checkout / reset / rebase 會改掉它；checkout 這類 git 操作本身也不算。不是 git 的專案看檔案修改時間，"
-                  "node_modules、建置輸出、lockfile、.env*、CI 設定、secaudit 處理紀錄這類常被工具或修復動作改動的檔案不算。",
+                  "node_modules、建置輸出、lockfile、.env*、CI 設定、secaudit 處理紀錄、封存產生的 .archive-日期.dmg / .md 這類常被工具或修復動作改動的檔案不算。"
+                  "修復動作改過的檔案會記下內容雜湊（data/touched.json），內容還是修復時那樣就不算你在開發；你一改就照常算。",
                   "超過 %d 天沒有更新、而且現在沒有程式（終端機、編輯器、dev server）開在裡面，就列在報告的「💤 閒置專案」，"
                   "問題旁邊也會標「💤 專案閒置 N 天」。天數可以在「常駐監控設定」修改。" % cfg.get("idle_project_days", 30),
                   "「📦 批次封存成加密 DMG」：每個專案在旁邊（同一層資料夾）產生一個 AES-256 加密、壓縮的 DMG，密碼存進 1Password。"

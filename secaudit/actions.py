@@ -1912,6 +1912,11 @@ def _envtpl(plan, s, ph=None):
             return False, "已產生 %s，但期間原檔被修改，沒有刪除原檔" % home_rel(tpl)
         os.remove(p)
         varnames = list(fields)
+        try:
+            from .projects import record_touched
+            record_touched([tpl])
+        except Exception:
+            pass
         after = ["`%s` 已刪除，改成 `%s`（%d 個變數：%s）" % (home_rel(p), home_rel(tpl), len(varnames), "、".join(varnames[:12])),
                  "值在 1Password vault「%s」的「%s」（項目 ID `%s`）" % (E.VAULT, title, iid),
                  "已用 op inject 還原並逐字比對，和原本的檔案完全一樣"]
@@ -1988,6 +1993,11 @@ def _envtpl(plan, s, ph=None):
                 E.write_atomic(p, text)
                 return False, "改寫後檔案裡還找得到原本的值（%s），已把原檔寫回去" % "、".join(leftover)
         _ensure_gitignore_env(root)
+        try:
+            from .projects import record_touched
+            record_touched([x for x in (p, tpl, os.path.join(root, ".gitignore")) if os.path.exists(x)])
+        except Exception:
+            pass
         ln = lambda h: text.count("\n", 0, h["start"]) + 1
         after = ["值在 1Password vault「%s」的「%s」（項目 ID `%s`），變數：%s" % (E.VAULT, title, iid, "、".join(dict.fromkeys(h["var"] for h in hits))),
                  "`%s` %s" % (home_rel(tpl), "新增 %d 行引用（%s）" % (len(add), "、".join(add)) if add else "原本就有這些變數")]
