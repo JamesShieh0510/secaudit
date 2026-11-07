@@ -55,6 +55,7 @@ section.tab{display:none}section.tab.on{display:block}
 .lane{display:grid;grid-template-columns:22px minmax(120px,1.2fr) 2fr auto;gap:8px;align-items:baseline;font-size:13px;padding:3px 6px;border-radius:6px;background:var(--card)}
 .lane span{text-align:left}.lane .ln{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.lane .lp{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .lane .lt{white-space:nowrap;font-variant-numeric:tabular-nums}
+.lane.stuck{background:color-mix(in srgb,var(--high) 12%,var(--card));color:var(--high)}
 @media (max-width:600px){.lane{grid-template-columns:22px 1fr auto}.lane .lp{grid-column:2/4}}
 .actwrap{display:grid;grid-template-columns:270px minmax(0,1fr);gap:14px;margin-top:12px;align-items:start}
 .actlist{display:flex;flex-direction:column;gap:6px}
@@ -71,6 +72,10 @@ section.tab{display:none}section.tab.on{display:block}
 .hrow{border-bottom:1px solid var(--line);padding:6px 2px}.hrow>summary{cursor:pointer;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;list-style:none}
 .hrow>summary::-webkit-details-marker{display:none}.hrow .ht{white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px}
 .hrow ul{margin:6px 0 4px;padding-left:20px;font-size:12px}
+.hrow .rerun{margin-left:auto;padding:3px 10px;font-size:12px}
+.actlist button.queued{opacity:.65;cursor:not-allowed;border-style:dashed}
+.qtag{margin-left:8px;font-size:11px;font-weight:600;color:var(--accent);border:1px solid var(--accent);border-radius:8px;padding:0 6px}
+.qrow{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;padding:6px 2px;border-bottom:1px solid var(--line)}.qrow button{margin-left:auto;padding:3px 10px;font-size:12px}
 .actempty{padding:40px 10px;text-align:center}
 .acthead{padding:14px 0 8px}.acthead .t{font-size:16px;font-weight:700}
 .actbar{position:sticky;top:44px;z-index:2;background:var(--card);display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}
@@ -80,7 +85,7 @@ section.tab{display:none}section.tab.on{display:block}
 .sgh{display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--code)}
 .sgh .sgt{flex:1;display:flex;align-items:baseline;gap:8px;border:0;background:none;padding:2px 0;text-align:left;cursor:pointer}
 .sgh .arrow{margin-left:auto;color:var(--muted);transition:transform .15s}.sgrp.fold .arrow{transform:rotate(-90deg)}
-.sgrp.fold .sgb{display:none}.sgb{padding:0 10px}.sgb .step:last-child{border-bottom:0}
+.sgrp.fold .sgb{display:none}.sgh .gack{padding:3px 10px;font-size:12px;white-space:nowrap}.sgb{padding:0 10px}.sgb .step:last-child{border-bottom:0}
 .step{display:flex;gap:10px;align-items:flex-start;padding:10px 4px;border-bottom:1px solid var(--line);cursor:pointer}
 .step:hover{background:var(--code)}.step input{margin-top:4px}
 .step .l{font-weight:600;word-break:break-all}.step .d{font-size:12px;color:var(--muted);margin-top:2px}.step .d div{margin:1px 0}
@@ -169,6 +174,7 @@ body.noscroll{overflow:hidden}
         </div>
         <div class="ppane on" data-p="preview" id="actPlan"><div class="muted actempty">← 先選一個修復動作，這裡會列出它要處理的項目，勾選後再授權執行。</div></div>
         <div class="ppane" data-p="log">
+          <div id="actQueue"></div>
           <div id="actRecent"></div>
           <h3 class="logh">全部執行紀錄</h3>
           <div id="actHistory" class="muted"></div>
@@ -742,7 +748,12 @@ async function loadActions() {
   if ($("#saveSecureY")) $("#saveSecureY").style.display = canKey() ? "" : "none";
   if (!document.activeElement || document.activeElement.id !== "keyName") renderKeys();
   actCatalog = Object.fromEntries(r.catalog.map(a => [a.id, a]));
-  $("#actList").innerHTML = r.catalog.map(a => `<button data-act="${esc(a.id)}" class="${a.id === actActive ? "on" : ""}"><span>${esc(a.icon)} ${esc(a.title)}</span>${a.hint ? `<span class="h">${esc(a.hint)}</span>` : ""}</button>`).join("");
+  actQueue = r.queue || [];
+  $("#actList").innerHTML = r.catalog.map(a => { const q = actQueue.find(x => x.action === a.id);
+    return `<button data-act="${esc(a.id)}" class="${a.id === actActive ? "on" : ""}${q ? " queued" : ""}" ${q ? "disabled" : ""}>
+      <span>${esc(a.icon)} ${esc(a.title)}${q ? `<span class="qtag">${q.state === "authorizing" ? "🔒 等待授權" : "🕒 已排隊"}</span>` : ""}</span>
+      ${q ? `<span class="h">${esc(q.n)} 項・${esc(q.queued_at.slice(11, 16))} 排隊，前一個完成後自動開始</span>` : a.hint ? `<span class="h">${esc(a.hint)}</span>` : ""}</button>`; }).join("");
+  renderQueue();
   document.querySelectorAll("#actList button[data-act]").forEach(b => b.onclick = () => previewAction(b.dataset.act));
   actRunning = !!r.status.running;
   renderActStatus(r.status);
@@ -751,10 +762,12 @@ async function loadActions() {
   $("#actHistory").innerHTML = r.history.length ? r.history.slice(0, 50).map(h => { const a = actCatalog[h.action] || {};
       const st = h.steps || [];
       return `<details class="hrow"><summary><span>${h.ok ? "✅" : "❌"}</span><span class="ht">${esc(h.time)}</span>
-        <b style="color:var(--fg)">${esc(a.icon || "🛠")} ${esc(a.title || h.action)}</b><span>${esc(h.message)}</span>${h.method ? `<span class="ht">${esc(h.method)}</span>` : ""}</summary>
+        <b style="color:var(--fg)">${esc(a.icon || "🛠")} ${esc(a.title || h.action)}</b><span>${esc(h.message)}</span>${h.method ? `<span class="ht">${esc(h.method)}</span>` : ""}
+        ${actCatalog[h.action] ? `<button type="button" class="rerun" data-act="${esc(h.action)}" title="重新預覽這個動作：已經處理好的項目不會再出現，勾選後授權執行">🔁 再執行一次</button>` : ""}</summary>
         ${st.length ? `<ul>${st.map(x => `<li>${x.ok ? "✅" : x.ok === false ? "❌" : "⏭"} ${esc(x.label)}</li>`).join("")}</ul>` : '<div class="muted">沒有步驟紀錄</div>'}</details>`; }).join("") +
       (r.history.length > 50 ? `<div class="muted" style="margin-top:6px">只顯示最近 50 筆，完整紀錄在 data/actions.jsonl</div>` : "")
     : '<div class="muted">尚無紀錄</div>';
+  $("#actHistory").querySelectorAll("button.rerun").forEach(b => b.onclick = e => { e.preventDefault(); e.stopPropagation(); previewAction(b.dataset.act); });
   clearTimeout(actTimer); actTimer = setTimeout(loadActions, r.status.running ? 1500 : 10000);
 }
 let actActive = "", actCatalog = {}, actSeq = 0;
@@ -775,7 +788,9 @@ function stepsGrouped(steps) {
   const fold = steps.length > 20;
   return order.map((g, i) => `<div class="sgrp${fold ? " fold" : ""}" data-g="${i}">
     <div class="sgh"><input type="checkbox" class="grpBox" title="勾選 / 取消這一類的全部項目">
-      <button type="button" class="sgt"><b>${esc(g)}</b> <span class="muted gcnt"></span><span class="arrow">▾</span></button></div>
+      <button type="button" class="sgt"><b>${esc(g)}</b> <span class="muted gcnt"></span><span class="arrow">▾</span></button>
+      ${by[g].some(s => s.ackable) ? `<button type="button" class="gack" data-ids="${esc(by[g].filter(s => s.ackable).map(s => s.id).join(","))}"
+        title="這一類通常不該搬走或刪除：整類標記為已確認無害，之後不再列為風險（檔案內容一改變標記就失效）">✅ 整類標記為已確認無害</button>` : ""}</div>
     <div class="sgb">${by[g].map(stepHtml).join("")}</div></div>`).join("");
 }
 // 修復預覽：一次只顯示一個動作；標題、勾選數與執行按鈕固定在頂端，項目再多也不用捲到最下面
@@ -812,8 +827,7 @@ async function previewAction(id, report, focus) {
   const boxes = [...document.querySelectorAll(".actStep")];
   const shown = () => boxes.filter(x => x.closest(".step").style.display !== "none");
   let count = () => { const n = boxes.filter(x => x.checked).length; if ($("#selCount")) $("#selCount").textContent = `已勾選 ${n} / ${boxes.length}`;
-    if ($("#actRun")) { $("#actRun").textContent = `🔒 Touch ID 執行（${n}）`; $("#actRun").disabled = !n || actRunning; }
-    if ($("#actRunY")) { $("#actRunY").textContent = `🔑 YubiKey 執行（${n}）`; $("#actRunY").disabled = !n || actRunning; } };
+    runLabels(n); };
   // 分類的總勾選框：全選 / 全不選這一類（有篩選時只作用在顯示中的項目），部分勾選時顯示「–」
   const syncGroups = () => document.querySelectorAll("#actSteps .sgrp").forEach(g => {
     const bs = [...g.querySelectorAll(".actStep")], n = bs.filter(x => x.checked).length, gb = g.querySelector(".grpBox");
@@ -824,6 +838,16 @@ async function previewAction(id, report, focus) {
   document.querySelectorAll("#actSteps .sgrp").forEach(g => {
     g.querySelector(".grpBox").onchange = e => { g.querySelectorAll(".actStep").forEach(x => { if (x.closest(".step").style.display !== "none") x.checked = e.target.checked; }); count(); };
     g.querySelector(".sgt").onclick = () => g.classList.toggle("fold");
+    const ab = g.querySelector(".gack");
+    if (ab) ab.onclick = async () => {
+      // 不用 confirm()：改成再按一次確認
+      if (!ab.dataset.arm) { ab.dataset.arm = "1"; ab.textContent = `確定標記這 ${ab.dataset.ids.split(",").length} 項？再按一次`;
+        clearTimeout(ab._t); ab._t = setTimeout(() => { delete ab.dataset.arm; ab.textContent = "✅ 整類標記為已確認無害"; }, 6000); return; }
+      clearTimeout(ab._t); ab.disabled = true; ab.textContent = "標記中…";
+      const r = await api("/api/actions/ack-steps", {plan_id: actPlan.plan_id, steps: ab.dataset.ids.split(",")});
+      ab.textContent = r.ok ? `✅ 已標記 ${r.done} 項，重新整理預覽…` : "❌ " + ((r.errors || [])[0] || "失敗");
+      if (r.ok) setTimeout(() => previewAction(actActive), 800);
+    };
   });
   boxes.forEach(x => x.onchange = count);
   if ($("#actFilter")) $("#actFilter").oninput = e => { const t = e.target.value.toLowerCase();
@@ -859,26 +883,54 @@ async function runAction(method) {
     catch (e) { $("#actStatus").innerHTML = `<span style="color:var(--high)">❌ ${esc(e.message || e)}</span>`; return; }
   }
   const r = await api("/api/actions/run", {plan_id:actPlan.plan_id, steps:ids, method, assertion});
+  if (r.queued) {
+    actPlan = null; actActive = ""; document.querySelectorAll("#actList button.on").forEach(b => b.classList.remove("on"));
+    $("#actPlan").innerHTML = `<div class="muted actempty">🕒 已排入佇列${method === "touchid" ? "（請在 Touch ID 視窗授權，通過後才會真的排進去）" : ""}。<br>
+      目前的動作完成後會自動開始；在「📜 執行紀錄」可以看到佇列或取消排隊。</div>`;
+    paneTab("log"); loadActions(); return;
+  }
   if (!r.started) { $("#actStatus").style.display = ""; $("#actStatus").innerHTML = `<span style="color:var(--high)">❌ ${esc(r.error)}</span>`; return; }
   actPlan = null; actActive = ""; document.querySelectorAll("#actList button.on").forEach(b => b.classList.remove("on"));
   $("#actPlan").innerHTML = '<div class="muted actempty">⏳ 已開始執行，進度在上方和「📜 執行紀錄」頁籤。<br>要做下一個動作，從左邊選一個就會回到預覽。</div>';
   paneTab("log"); $("#actStatus").scrollIntoView({block: "nearest"}); loadActions();
 }
-let actRunning = false, actWasRunning = false, actRunningInfo = null;
+let actRunning = false, actWasRunning = false, actRunningInfo = null, actQueue = [];
+// 佇列：在「📜 執行紀錄」頁籤最上面，每一項可以取消排隊
+function renderQueue() {
+  const el = $("#actQueue"); if (!el) return;
+  el.innerHTML = actQueue.length ? `<h3 class="logh">🕒 排隊中（${actQueue.length}）</h3>` + actQueue.map((q, i) => { const a = actCatalog[q.action] || {};
+    return `<div class="qrow"><span class="muted">${i + 1}.</span><b>${esc(a.icon || "🛠")} ${esc(a.title || q.title)}</b>
+      <span class="muted">${esc(q.n)} 項・${esc(q.method)}・${esc(q.queued_at.slice(11, 16))} 排隊</span>
+      ${q.state === "queued" ? `<button type="button" data-unq="${esc(q.qid)}">取消排隊</button>` : '<span class="muted">等待 Touch ID…</span>'}</div>`; }).join("") : "";
+  el.querySelectorAll("[data-unq]").forEach(b => b.onclick = async () => { b.disabled = true; await api("/api/actions/unqueue", {qid: b.dataset.unq}); loadActions(); });
+  const lb = $("#logBadge"); if (lb && actQueue.length && !lb.textContent) lb.textContent = "🕒" + actQueue.length;
+}
 const stepsHtml = rs => (rs || []).map(x => `<details><summary>${x.ok ? "✅" : x.skipped ? "⏭" : "❌"} ${esc(x.label)}</summary><pre style="white-space:pre-wrap;font-size:12px;max-height:260px;overflow:auto">${esc(x.output)}</pre></details>`).join("");
 // 一次只能執行一個修復動作（伺服器也會拒絕）：執行中時停用所有「執行」按鈕
-function lockRunButtons() {
-  const n0 = document.querySelectorAll(".actStep:checked").length;
-  ["#actRun", "#actRunY"].forEach(id => { const b = $(id); if (b) { b.disabled = actRunning || !n0; b.title = actRunning ? "目前有修復動作執行中，請等它完成" : ""; } });
-  const n = $("#actBusy"); if (n) n.style.display = actRunning ? "" : "none";
+const isQueued = id => actQueue.some(q => q.action === id);
+// 執行按鈕：沒有動作在跑 → 直接執行；有動作在跑 → 「排入佇列」（排隊時就授權）；這個動作已經排隊 → 停用
+function runLabels(n) {
+  const q = isQueued(actActive), verb = actRunning ? "排入佇列" : "執行";
+  const set = (id, icon, how) => { const b = $(id); if (!b) return;
+    b.textContent = q ? "🕒 已排隊" : `${actRunning ? "🕒" : icon} ${how} ${verb}（${n}）`;
+    b.disabled = !n || q;
+    b.title = q ? "這個動作已經在排隊了，可以在「📜 執行紀錄」取消排隊" :
+      actRunning ? "目前有修復動作執行中：現在授權，前一個完成後會自動開始" : ""; };
+  set("#actRun", "🔒", "Touch ID"); set("#actRunY", "🔑", "YubiKey");
+  const busy = $("#actBusy");
+  if (busy) { busy.style.display = actRunning || q ? "" : "none";
+    busy.textContent = q ? "🕒 這個動作已經排隊，前一個動作完成後會自動開始" : "目前有修復動作執行中：按下後會排入佇列，現在授權、完成後自動開始"; }
 }
+function lockRunButtons() { runLabels(document.querySelectorAll(".actStep:checked").length); }
 // 批次並行時：每個封存 worker、每個雲端下載各一行，附「這一步已經多久」
 const ago = t => { const x = Math.max(0, Math.round(Date.now() / 1000 - t)); return x >= 60 ? `${Math.floor(x / 60)} 分 ${x % 60} 秒` : `${x} 秒`; };
 function lanes(s) {
   const w = Object.entries(s.workers || {}).sort(), d = Object.entries(s.downloads || {});
   if (!w.length && !d.length) return "";
-  const row = (icon, name, x) => `<div class="lane"><span class="li">${icon}</span><span class="ln" title="${esc(name)}">${esc(name.split("/").slice(-2).join("/"))}</span>
-    <span class="lp">${esc(x.phase || "")}</span><span class="muted lt">${x.since ? ago(x.since) : ""}</span></div>`;
+  // 超過 5 分鐘沒有回報任何進度 → 標紅，可能卡住（建立 / 掛載 DMG 卡死 10 分鐘會自動終止）
+  const row = (icon, name, x) => { const idle = x.beat ? Date.now() / 1000 - x.beat : 0, bad = idle > 300;
+    return `<div class="lane${bad ? " stuck" : ""}"><span class="li">${bad ? "⚠️" : icon}</span><span class="ln" title="${esc(name)}">${esc(name.split("/").slice(-2).join("/"))}</span>
+    <span class="lp">${bad ? `${Math.floor(idle / 60)} 分鐘沒有進度，可能卡住・` : ""}${esc(x.phase || "")}</span><span class="muted lt">${x.since ? ago(x.since) : ""}</span></div>`; };
   return `<div class="lanes">${w.map(([k, x]) => row("📦", x.project || k, x)).join("")}${d.map(([k, x]) => row("☁️", k, x)).join("")}
     ${s.phase && /直接封存/.test(s.phase) ? `<div class="muted" style="margin-top:2px">${esc(s.phase)}</div>` : ""}</div>`;
 }

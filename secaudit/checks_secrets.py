@@ -349,3 +349,93 @@ def check_ssh_dir(ctx: ScanContext):
             detail="；".join(k.split()[-1][:40] for k in keys[:10]),
             why="攻擊者常在這裡加一把自己的公鑰當後門。請確認每一把都是你認得的。",
             fix="刪除不認得的行；若沒開遠端登入，可以整個清空。"))
+    n_keys = len([l for l in (text or "").splitlines() if l.strip() and not l.startswith("#")])
+    check_ssh_config(ctx, d)
+    check_remote_login(ctx, n_keys)
+
+
+# ~/.ssh/config 裡可以夾帶指令或開通道的設定：(指令, 風險, 說明)
+SSH_RISKY = {
+    "proxycommand": ("medium", "每次連線前會先執行這個指令（正常用途：跳板機、cloudflared、AWS SSM）"),
+    "localcommand": ("high", "連線成功後在你的電腦上執行這個指令（要搭配 PermitLocalCommand yes 才會生效）"),
+    "permitlocalcommand": ("medium", "允許 LocalCommand 執行指令"),
+    "remoteforward": ("medium", "把遠端主機的連接埠轉回你的電腦（反向通道：別人可以從那台主機連進你的電腦）"),
+    "dynamicforward": ("low", "在你的電腦開一個 SOCKS 代理"),
+    "localforward": ("low", "把你電腦的連接埠轉到遠端"),
+    "knownhostscommand": ("medium", "驗證主機時執行指令"),
+}
+SSH_CMD_BAD = re.compile(r"\b(?:curl|wget|nc|ncat|socat|bash\s+-c|sh\s+-c|zsh\s+-c|python[\d.]*\s+-c|perl\s+-e|osascript|base64)\b|/tmp/|/private/tmp/|/Users/Shared/")
+
+
+def check_ssh_config(ctx: ScanContext, d):
+    """分析 ~/.ssh/config（含 Include 進來的檔案）：會執行指令或開通道的設定逐行列出，內容一改就會在變動裡標 ⚠️。"""
+    import glob
+    files, seen = [os.path.join(d, "config")], set()
+    while files:
+        p = files.pop(0)
+        if p in seen or not os.path.isfile(p):
+            continue
+        seen.add(p)
+        text = read_text(p, ctx) or ""
+        host = "（全部主機）"
+        for i, raw in enumerate(text.splitlines(), 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            m = re.match(r"^(\w+)\s*=?\s*(.*)$", line)
+            if not m:
+                continue
+            key, val = m.group(1).lower(), m.group(2).strip()
+            if key in ("host", "match"):
+                host = line[:80]
+                if key == "match" and re.search(r"\bexec\b", val, re.I):
+                    _ssh_cfg_finding(ctx, p, i, line, "medium", "Match exec：比對主機時會執行指令", host)
+                continue
+            if key == "include":
+                for pat in val.split():
+                    pat = os.path.expanduser(pat)
+                    files += sorted(glob.glob(pat if os.path.isabs(pat) else os.path.join(d, pat)))
+                continue
+            if key in SSH_RISKY:
+                if key == "permitlocalcommand" and val.lower() != "yes":
+                    continue
+                sev, why = SSH_RISKY[key]
+                if SSH_CMD_BAD.search(val):
+                    sev = "high"
+                    why += "；⚠️ 指令裡有下載工具、shell、暫存資料夾這類常見於後門的寫法"
+                _ssh_cfg_finding(ctx, p, i, line, sev, why, host)
+
+
+def _mask_tokens(t):
+    """只遮罩看起來像金鑰 / token 的長字串（20 個字以上的英數混合），其他保持可讀。"""
+    return re.sub(r"[A-Za-z0-9_\-+/=]{20,}", lambda m: m.group(0)[:4] + "****" + m.group(0)[-4:], t)
+
+
+def _ssh_cfg_finding(ctx, p, i, line, sev, why, host):
+    rel = home_rel(p)
+    mask = _mask_tokens
+    ctx.inv("~/.ssh/config 指令", "%s:%d %s" % (rel, i, mask(line)[:160]), host)
+    ctx.add(Finding(rule="ssh-config-" + line.split()[0].lower()[:20], severity=sev, category=CAT,
+                    title="%s 有 %s 設定" % (rel, line.split()[0]), path=rel,
+                    detail="第 %d 行（%s）：%s\n%s" % (i, host, mask(line)[:300], why),
+                    why="~/.ssh/config 可以讓每次 ssh 連線自動執行指令或開通道，攻擊者會用它植入後門、把你的電腦接到他的主機。",
+                    fix="確認這一行是你自己加的、知道它的用途；不認得就刪除，並檢查最近有沒有不明的 ssh 連線。"))
+
+
+def check_remote_login(ctx: ScanContext, n_keys=0):
+    """macOS「遠端登入」（SSH 伺服器）有沒有開：看有沒有程式在聽 TCP 22。從關閉變成開啟會在變動裡標 ⚠️。"""
+    import subprocess
+    try:
+        out = subprocess.run(["netstat", "-an", "-p", "tcp"], capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    on = any(re.search(r"[.:]22\s+\S+\s+LISTEN\b", l) for l in out.splitlines())
+    ctx.inv("遠端登入（SSH 伺服器）", "狀態", "開啟" if on else "關閉")
+    if on:
+        ctx.add(Finding(rule="remote-login-on", severity="medium" if n_keys else "low", category=CAT,
+                        title="遠端登入（SSH 伺服器）是開著的" + ("，而且 authorized_keys 有 %d 把公鑰" % n_keys if n_keys else ""),
+                        path="系統設定 → 一般 → 共享 → 遠端登入",
+                        detail="有程式在聽 TCP 22，別人可以用 SSH 連進這台電腦%s。" % ("（authorized_keys 裡的公鑰不需要密碼）" if n_keys else ""),
+                        why="遠端登入加上一把不認得的公鑰，就是一個完整的後門；沒有在用的話建議關掉。",
+                        fix="不需要時到「系統設定 → 一般 → 共享」關閉「遠端登入」；需要的話確認 authorized_keys 每一把都認得。"))
+

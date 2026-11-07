@@ -185,6 +185,29 @@ def cloud_only(root):
     return n, size
 
 
+def foreign_owned(root, limit=3):
+    """資料夾裡不屬於你的檔案（例如用 sudo 產生、屬於 root 的檔案）。hdiutil create -srcfolder 遇到這種檔案
+    會等系統管理員授權，畫面上看不到視窗，就會一直卡住。只用 lstat，回傳 (數量, 前幾個的相對路徑與擁有者)。"""
+    import pwd
+    me, n, sample = os.getuid(), 0, []
+    for dp, dns, fns in os.walk(root):
+        for x in dns + fns:
+            p = os.path.join(dp, x)
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            if st.st_uid != me:
+                n += 1
+                if len(sample) < limit:
+                    try:
+                        who = pwd.getpwuid(st.st_uid).pw_name
+                    except KeyError:
+                        who = str(st.st_uid)
+                    sample.append("%s（%s）" % (os.path.relpath(p, root), who))
+    return n, sample
+
+
 def cloud_download(root, progress=None):
     """把專案裡「僅限線上」的檔案下載到這台電腦（讀第一個 byte 就會觸發 iCloud / File Provider 下載）。
     8 個同時下載，每個檔案最多等 2 分鐘、重試 3 次。回傳還沒下載到的檔案清單。

@@ -184,6 +184,7 @@ def make_handler(engine: Engine, token: str, port: int):
             if u.path == "/api/actions":
                 from . import actions, webauthn
                 return self._send(200, {"catalog": actions.catalog(), "status": actions.status, "history": actions.history(),
+                                        "queue": actions.queue_public(),
                                         "recent": actions.recent,
                                         "keys": webauthn.public_keys(),
                                         "localhost": self.headers.get("Host") == "localhost:%d" % port})
@@ -341,6 +342,15 @@ def make_handler(engine: Engine, token: str, port: int):
                 if text is None:
                     return self._send(404, {"error": "預覽已過期，請重新預覽"})
                 return self._send(200, {"markdown": text})
+            if path == "/api/actions/ack-steps":
+                # 「已確認無害」會降低警示：伺服器端發 Telegram（ack_steps 裡）
+                from . import actions
+                n, errs = actions.ack_steps(str(body.get("plan_id", "")), [str(x) for x in body.get("steps", [])][:500],
+                                            str(body.get("note", ""))[:200])
+                return self._send(200, {"ok": n > 0, "done": n, "errors": errs[:10]})
+            if path == "/api/actions/unqueue":
+                from . import actions
+                return self._send(200, {"ok": actions.unqueue(str(body.get("qid", "")))})
             if path == "/api/actions/cancel":
                 from . import actions
                 return self._send(200, {"ok": actions.cancel()})
@@ -351,6 +361,8 @@ def make_handler(engine: Engine, token: str, port: int):
                 ok, msg = actions.start(str(body.get("plan_id", "")), ids, method=str(body.get("method", "touchid")),
                                         assertion=body.get("assertion") if isinstance(body.get("assertion"), dict) else None,
                                         port=port)
+                if msg == "queued":
+                    return self._send(200, {"started": False, "queued": True})
                 return self._send(200 if ok else 409, {"started": ok, "error": msg})
             if path == "/api/auth/options":
                 # YubiKey 授權用的 challenge，綁定這次要授權的內容（某份預覽的某些步驟 / 某把要新增或刪除的金鑰）

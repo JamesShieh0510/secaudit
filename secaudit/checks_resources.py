@@ -34,7 +34,12 @@ REPEAT_SEC = 6 * 3600       # 同一個程式的同一種事件，6 小時內不
 ODD_LOC = re.compile(r"^(?:/tmp/|/private/tmp/|/private/var/tmp/|/var/tmp/|/private/var/folders/|/var/folders/|/Users/Shared/"
                      r"|%s/(?:Library/(?!Application Support/|Caches/ms-playwright/)[^/]*|\.[^/]+/(?!versions/|bin/))|/Library/Caches/)" % re.escape(HOME))
 # Apple 簽章但常被拿來長時間跑惡意腳本的工具：一樣要列入常駐程式清單
-LOLBIN = re.compile(r"/(?:osascript|python[\d.]*|perl[\d.]*|ruby|php|nc|ncat|socat|curl|wget|bash|sh|zsh|screen|tclsh)$")
+LOLBIN = re.compile(r"/(?:osascript|python[\d.]*|perl[\d.]*|ruby|php|nc|ncat|socat|curl|wget|bash|sh|zsh|screen|tclsh|"
+                    r"ssh|scp|sftp|rsync|autossh)$", re.I)      # re.I：macOS 的 python3 實際執行的是 …/MacOS/Python
+# ssh 開通道的參數：-R 反向（別人可以從遠端連回你的電腦）、-D SOCKS 代理、-L 轉發、-w tun 裝置、-o ...Forward
+SSH_TUNNEL = re.compile(r"(?:^|\s)-[a-zA-Z]*[RDLw](?:\s|\d|$)|-o\s*\S*(?:Forward|Tunnel)", re.I)
+NET_EVERY = 5              # 每 5 次取樣（約 5 分鐘）看一次對外連線
+NET_PERSIST = 300          # 同一條連線持續 5 分鐘以上才記錄
 TERMINAL = re.compile(r"(?:Warp|Terminal|iTerm2?|Visual Studio Code|Code|Cursor|Ghostty|kitty|Alacritty|WezTerm)\.app/")
 AI_TOOL = re.compile(r"(?:^|/)(?:claude|codex|cursor)$|/claude/versions/[^/]+$")
 
@@ -259,7 +264,8 @@ class ResourceMonitor:
             odd = bool(ODD_LOC.search(p["exe"])) or os.path.basename(p["exe"]).startswith(".")
             user = _from_user(chain)
             weak = kind in ("unsigned", "adhoc", "missing", "unknown")
-            if kind == "missing" or (weak and odd and not user):
+            tunnel = os.path.basename(p["exe"]) in ("ssh", "autossh") and bool(SSH_TUNNEL.search(p["args"]))
+            if kind == "missing" or (weak and odd and not user) or (tunnel and not user):
                 sev = "high"
             elif user:
                 sev = "info"            # 你自己從終端機 / AI 助理開的程式：只記在報告裡，不推播
@@ -276,6 +282,8 @@ class ResourceMonitor:
                     "資源：CPU %.0f%%、記憶體 %.0f MB" % (p["cpu"], p["rss_mb"])]
             if odd:
                 rows.append("位置：⚠️ 在暫存 / 共享 / 隱藏資料夾裡執行，一般正式安裝的程式不會放這裡")
+            if tunnel:
+                rows.append("通道：⚠️ ssh 帶了開通道的參數（-R 反向通道可以讓別人從遠端連回你的電腦，-D / -L 會轉送流量）")
             rows.append("判斷：%s" % ("從你的終端機或 AI 助理啟動，很可能是你自己在跑的程式" if user else
                                        "⚠️ 不是從你的終端機啟動（開機自動執行或背景服務），請確認你認得它" if sev != "low" else
                                        "有正式簽章的程式，確認是不是你最近安裝或開啟的 App"))
@@ -285,6 +293,64 @@ class ResourceMonitor:
             self.state["baseline"] = time.strftime("%Y-%m-%d %H:%M:%S")
             self.dirty = True
             print("[resources] 已建立常駐程式基準：%d 個執行檔" % len(known), flush=True)
+
+    # ---------- 對外連線 ----------
+    def check_net(self, procs):
+        """不是你開的「常被濫用的工具」（ssh、curl、nc、python…）或沒有正式簽章的程式，持續 5 分鐘以上連到外部 IP：
+        只記在報告裡、不推播（先觀察誤報）。看得到的只有你自己帳號的程式（lsof 不加 sudo 看不到 root 的）。"""
+        import ipaddress
+        self.net_n = getattr(self, "net_n", 0) + 1
+        if self.net_n % NET_EVERY:
+            return
+        try:
+            out = subprocess.run(["lsof", "-nP", "-iTCP", "-sTCP:ESTABLISHED", "-Fpn"], capture_output=True, text=True,
+                                 timeout=30, env=safe_env()).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return
+        seen = self.__dict__.setdefault("net_seen", {})
+        now, cur, pid = time.time(), set(), 0
+        for line in out.splitlines():
+            if line.startswith("p"):
+                pid = int(line[1:] or 0)
+                continue
+            if not line.startswith("n") or "->" not in line:
+                continue
+            remote = line[1:].split("->", 1)[1]
+            m = re.match(r"^\[?([^\]]+?)\]?:(\d+)$", remote)
+            if not m:
+                continue
+            host, port = m.group(1), m.group(2)
+            try:
+                ip = ipaddress.ip_address(host)
+                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast:
+                    continue
+            except ValueError:
+                continue
+            p = procs.get(pid)
+            if not p or not p["exe"].startswith("/") or pid == os.getpid():
+                continue
+            lol = bool(LOLBIN.search(p["exe"]))
+            kind, who = signer(p["exe"])
+            if not (lol or kind in ("unsigned", "adhoc", "missing", "unknown")):
+                continue        # 有正式簽章的 App（瀏覽器、Slack…）不看，避免大量誤報
+            chain = ancestry(procs, pid)
+            if _from_user(chain):
+                continue
+            key = "%s → %s:%s" % (norm_key(p["exe"], p["args"]), host, port)
+            cur.add(key)
+            first = seen.setdefault(key, now)
+            if now - first < NET_PERSIST:
+                continue
+            rows = ["程式：%s（pid %d）" % (home_rel(p["exe"]), pid), "指令：%s" % home_rel(p["args"][:240]),
+                    "連到：%s，連接埠 %s（已持續至少 %d 分鐘）" % (host, port, (now - first) // 60),
+                    "簽章：%s" % who, "由誰啟動（由近到遠）：%s" % _chain_text(chain, procs),
+                    "判斷：%s" % ("⚠️ ssh / nc 這類工具在背景長時間連到外部主機，可能是通道或資料外傳，請確認你認得" if re.search(
+                        r"/(?:ssh|autossh|nc|ncat|socat|scp|sftp|rsync)$", p["exe"]) else
+                                 "不是你開的程式在背景持續連到外部，確認你認得它（例如自己設定的同步、備份工具）")]
+            self._event("net", key, "info", "背景程式持續連到外部：%s → %s:%s" % (os.path.basename(p["exe"]), host, port),
+                        "\n".join(rows), path=home_rel(p["exe"]))
+        for k in [k for k in seen if k not in cur]:
+            del seen[k]
 
     # ---------- CPU / 記憶體 ----------
     def check_usage(self, procs, s):
@@ -370,6 +436,7 @@ class ResourceMonitor:
         before = {id(e) for e in self.state["events"]}
         self.check_usage(procs, s)
         self.check_resident(procs)
+        self.check_net(procs)
         now = time.time()
         with self.lock:
             self.state["events"] = [e for e in self.state["events"] if now - e["ts"] < EVENT_TTL]
@@ -414,13 +481,16 @@ def check_resources(ctx: ScanContext):
            "idle-cpu": "看「最吃 CPU 的程式」裡有沒有你不認得的，再看該程式的詳細資料。",
            "pressure": "關掉不用的 App；如果最吃記憶體的程式你不認得，先查它的來源。",
            "swap": "通常是同時開太多大型程式；如果最吃記憶體的程式你不認得，先查它的來源。",
-           "rss": "認得的程式（瀏覽器、AI 模型、編譯）可以忽略；不認得的先結束並查來源。"}
+           "rss": "認得的程式（瀏覽器、AI 模型、編譯）可以忽略；不認得的先結束並查來源。",
+           "net": "認得的話（自己設定的同步、備份、通道）可以忽略；不認得就結束這個程式（kill <pid>），"
+                  "查它是怎麼被啟動的（LaunchAgent、crontab），並檢查 ~/.ssh 與 authorized_keys。"}
     why = {"resident": "惡意程式通常會在背景長時間執行（回連控制伺服器、挖礦、側錄），新出現又不認得的常駐程式值得確認。",
            "cpu": "長時間吃滿 CPU、尤其在你沒用電腦時，是挖礦程式的典型特徵。",
            "idle-cpu": "你沒在用電腦時 CPU 還很忙，可能有程式在背景做你不知道的事（挖礦、加密檔案、上傳資料）。",
            "pressure": "記憶體不足會讓電腦變慢；也可能是有程式異常佔用記憶體。",
            "swap": "swap 暴增代表有程式突然佔用大量記憶體。",
-           "rss": "單一程式記憶體快速成長，可能是記憶體洩漏，也可能是程式在大量讀取 / 打包資料。"}
+           "rss": "單一程式記憶體快速成長，可能是記憶體洩漏，也可能是程式在大量讀取 / 打包資料。",
+           "net": "資料外傳、反向通道、回連控制伺服器，都會表現成「背景程式長時間連到外部主機」。"}
     for e in d.get("events", []):
         if now - e.get("ts", 0) >= EVENT_TTL:
             continue

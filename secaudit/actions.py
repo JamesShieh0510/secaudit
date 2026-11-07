@@ -613,6 +613,54 @@ def _secure_advice(f, git, p, default):
     return "；".join(steps)
 
 
+# 含機密的檔案：依「應該怎麼處理」分大類（預覽時整類勾選；不該搬走的類別可以整類標記為已確認無害）
+SECRET_GROUPS = [
+    ("✅ 可以直接搬走（文件、筆記裡的機密，沒有提交到 git）", False),
+    ("⚙️ 程式 / 設定檔：建議改成從環境變數或 1Password 讀取", False),
+    ("🔑 已提交到 git：要到服務後台撤銷並更換（搬走沒有用）", False),
+    ("🧩 App / 工具自己的憑證檔（建議保留，確認權限 600）", True),
+    ("🧪 本機開發 / 範例帳密（低風險）", True),
+    ("📦 第三方工具內建的範例（擴充功能、套件快取）", True),
+]
+SECRET_ACKABLE = {g for g, a in SECRET_GROUPS if a}
+
+
+def _secret_group(p, f, git):
+    from .projects import tool_dir
+    low = f.get("severity") == "low"
+    if tool_dir(p) or re.search(r"/(?:node_modules|vendor|site-packages|\.cargo/registry|extensions)/", p):
+        return SECRET_GROUPS[5][0] if low else SECRET_GROUPS[3][0]
+    if git == "tracked" and not low:
+        return SECRET_GROUPS[2][0]
+    if low:
+        return SECRET_GROUPS[4][0]
+    if os.path.splitext(p)[1].lower() in _CODE_EXT:
+        return SECRET_GROUPS[1][0]
+    return SECRET_GROUPS[0][0]
+
+
+def ack_steps(plan_id, step_ids, note=""):
+    """把預覽裡某些項目（通常是整個大類）標記為已確認無害。回傳 (成功數, 失敗訊息清單)。不會消耗這份預覽。"""
+    from . import acks
+    with _lock:
+        plan = _plans.get(plan_id)
+        if not plan or time.time() - plan["created"] > PLAN_TTL:
+            return 0, ["預覽已過期，請重新預覽"]
+        want = set(step_ids or [])
+        steps = [x for x in plan["steps"] if x["id"] in want and x.get("fkey")]
+    done, errs = 0, []
+    for x in steps:
+        ok, msg, _ = acks.add_from_report(plan.get("report", ""), x["fkey"], note or "從修復預覽整類標記：%s" % x.get("group", ""))
+        if ok:
+            done += 1
+        else:
+            errs.append("%s：%s" % (x["label"], msg))
+    if done:
+        _notify("✅ secaudit：已將 %d 個含機密的檔案標記為已確認無害（%s）。不是你做的話請到 Web UI 取消。" % (
+            done, "、".join(sorted({x.get("group", "")[:2] for x in steps}))))
+    return done, errs
+
+
 def _secure_plan(kind):
     from .app import load_config
     from .checks_secrets import _git_state
@@ -657,9 +705,18 @@ def _secure_plan(kind):
         advice = _secure_advice(f, git, p, default)
         if advice and not default:
             notes.insert(1, "👉 建議改用：" + advice)
+        from .diff import finding_key
+        grp = _secret_group(p, f, git)
+        if grp in SECRET_ACKABLE:
+            default = False
         steps.append({"id": "f%d" % len(steps), "label": home_rel(p), "detail": "；".join(notes), "kind": "secure-" + kind,
-                      "path": p, "state": st, "default": default, "git": git or "", "advice": advice,
+                      "path": p, "state": st, "default": default, "git": git or "", "advice": advice, "group": grp,
+                      "fkey": finding_key(f),
                       "finding": {k: f.get(k, "") for k in ("rule", "severity", "title", "detail")}})
+    order = {g: i for i, (g, _) in enumerate(SECRET_GROUPS)}
+    steps.sort(key=lambda x: order.get(x.get("group"), 9))
+    for i, x in enumerate(steps):
+        x["id"] = "f%d" % i
     title = "把含機密的檔案加密封存成 DMG，並刪除原檔" if kind == "dmg" else "把含機密的檔案存進 1Password，並刪除原檔"
     head = ["🔐 1Password vault：「%s」（%s）。執行前會確認這個 vault 只有你能存取，不是的話整個動作會中止。"
             "要更換請到「常駐監控設定」，修改需要 Touch ID。" % (vault, "DMG 的密碼存在這裡" if kind == "dmg" else "檔案存在這裡")]
@@ -781,6 +838,95 @@ def _dmg_rel(path):
     if rel.startswith("..") or "/../" in rel or os.path.isabs(rel):
         raise ValueError("路徑不在允許範圍")
     return rel
+
+
+STALL_SEC = 600            # hdiutil 連續 10 分鐘 CPU 沒動、輸出檔也沒長大 → 判定卡死
+
+
+def _tree_cpu(pid):
+    """某個程序與它所有子程序累計用掉的 CPU 秒數（ps 的 TIME 欄位）。"""
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,time="], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    kids, cpu = {}, {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        c, pp, t = int(parts[0]), int(parts[1]), parts[2]
+        kids.setdefault(pp, []).append(c)
+        sec = 0.0
+        for x in t.replace("-", ":").split(":"):          # [dd-]hh:mm:ss.xx
+            sec = sec * 60 + float(x)
+        cpu[c] = sec
+    total, todo = 0.0, [pid]
+    while todo:
+        x = todo.pop()
+        total += cpu.get(x, 0.0)
+        todo += kids.get(x, [])
+    return total
+
+
+def _run_watched(argv, stdin_bytes, out_path=None, ph=None, label="", timeout=4 * 3600, stall=None):
+    """執行 hdiutil 這類可能卡死的指令：每 5 秒看一次 CPU 時間與輸出檔大小，回報給 ph 當作存活訊號；
+    連續 stall 秒都沒有變化就終止它（連同子程序）。回傳 (成功, stderr 前 300 字, 是否因卡住被終止)。"""
+    import tempfile
+    stall = stall or STALL_SEC
+    with tempfile.TemporaryFile() as err:
+        try:
+            pr = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err, env=_env())
+        except OSError as e:
+            return False, str(e)[:300], False
+        try:
+            pr.stdin.write(stdin_bytes or b"")
+            pr.stdin.close()
+        except OSError:
+            pass
+        t0 = last = time.time()
+        sig = None
+        while pr.poll() is None:
+            time.sleep(5)
+            now = time.time()
+            size = os.path.getsize(out_path) if out_path and os.path.exists(out_path) else -1
+            cpu = _tree_cpu(pr.pid)
+            cur = (round(cpu or 0, 1), size)
+            if cur != sig:
+                sig, last = cur, now
+            el = int(now - t0)
+            if ph:
+                ph("%s（已經 %d 分 %d 秒・%s）" % (label, el // 60, el % 60,
+                                               "CPU 有在動" if now - last < 15 else "%d 秒沒有變化" % int(now - last)))
+            if now - last > stall or now - t0 > timeout:
+                stuck = now - last > stall
+                try:
+                    pr.terminate()
+                    pr.wait(15)
+                except subprocess.TimeoutExpired:
+                    pr.kill()
+                    pr.wait(15)
+                span = ("%d 分鐘" % (stall // 60)) if stall >= 60 else ("%d 秒" % stall)
+                return False, ("卡住：%s沒有任何進度（CPU 沒動、檔案沒長大），已自動終止" % span) if stuck else "超過時間上限，已終止", stuck
+        err.seek(0)
+        return pr.returncode == 0, err.read().decode("utf-8", "replace").strip()[:300], False
+
+
+def _detach_image(dmg):
+    """把某個 DMG 殘留的裝置卸載：hdiutil attach 失敗時，有時裝置已經接上、只是沒掛載成功，會一直佔著檔案。"""
+    import plistlib
+    ok, out = _quiet(["hdiutil", "info", "-plist"], timeout=60)
+    if not ok:
+        return
+    try:
+        info = plistlib.loads(out)
+    except Exception:
+        return
+    rp = os.path.realpath(dmg)
+    for im in info.get("images", []):
+        if os.path.realpath(im.get("image-path", "")) == rp:
+            for e in im.get("system-entities", [])[:1]:
+                if re.match(r"^/dev/disk\d+$", e.get("dev-entry", "")):
+                    _quiet(["hdiutil", "detach", e["dev-entry"], "-force"], timeout=120)
 
 
 def _detach(mnt):
@@ -1207,6 +1353,11 @@ def plan_archive_projects():
         if not os.access(os.path.dirname(a["root"]), os.W_OK):
             notes.append("⚠️ 上層資料夾是唯讀的，DMG 放不進去，預設不勾選")
             default = False
+        fo, sample = P.foreign_owned(a["root"])
+        if fo:
+            notes.append("⚠️ 有 %d 個檔案不屬於你（例如 %s），macOS 建立 DMG 時會等系統管理員授權而卡住，預設不勾選。"
+                         "要封存請先在終端機執行 sudo chown -R %s '%s'" % (fo, "、".join(sample), os.environ.get("USER", "$USER"), a["root"]))
+            default = False
         steps.append({"id": "p%d" % len(steps), "label": a["display"], "detail": "；".join(notes), "kind": "archive-project",
                       "group": _loc_group(a["root"]),
                       "path": a["root"], "last_ts": a["last_ts"], "default": default, "dmg": dmg, "info": a})
@@ -1246,7 +1397,43 @@ def plan_archive_projects():
             "reason": "執行 secaudit 修復：把閒置專案封存成加密 DMG 並刪除原資料夾（共 %d 個專案）" % len(steps)}
 
 
-def _archive_project(plan, s, ph=None):
+def _archive_prekey(plan, s, vid):
+    """批次開始時預先把這個專案的 DMG 密碼存進 1Password 並讀回確認（需要你在電腦前按 1Password 的授權）。
+    回傳 ((密碼, 項目名稱, DMG 路徑), "") 或 (None, 錯誤原因)。之後的下載、建立 DMG、驗證、刪除都不需要 1Password。"""
+    import secrets as _secrets
+    import socket
+    from . import projects as P
+    root, info = s["path"], s.get("info") or {}
+    dmg = s["dmg"]
+    if os.path.exists(dmg):
+        dmg = dmg[:-4] + time.strftime("-%H%M%S") + ".dmg"
+    title = "secaudit 封存專案：%s" % home_rel(root)
+    note = "\n".join([
+        "secaudit 封存專案（加密 DMG，密碼就是這個項目）",
+        "原本位置：%s" % home_rel(root), "完整路徑：%s" % root, "電腦：%s" % socket.gethostname(),
+        "建立時間：%s（授權：%s）" % (time.strftime("%Y-%m-%d %H:%M:%S"), status.get("method") or "—"),
+        "DMG：%s" % home_rel(dmg),
+        "最後活動：%s（%s），封存時已閒置 %s 天" % (info.get("last", ""), info.get("last_what", ""), info.get("idle_days", "")),
+        "Git：%s" % P.git_note(info),
+        "封存原因：專案已閒置，裡面有安全問題（%s）" % "、".join((info.get("titles") or [])[:3]),
+        "依據報告：%s" % (plan.get("report") or "—"),
+        "還原：雙擊 DMG、輸入這個項目的密碼，把裡面的檔案複製回「完整路徑」。DMG 旁邊的 .md 有詳細的處理紀錄。",
+        "⚠️ 如果找不到上面這個 DMG，表示封存沒有完成（原資料夾應該還在），這個項目可以刪除。",
+        "提醒：封存不等於撤銷。專案裡的金鑰如果曾經提交到 git 或外流，請到各服務撤銷並更換。"])
+    pw = _secrets.token_urlsafe(32)
+    with _op_lock:
+        iid, err = _op_create_pw_err(vid, title, pw, note)
+        if not iid:
+            return None, err or "可能是 1Password 的授權視窗沒有按允許，或授權已過期"
+        ok, got = _quiet(["op", "item", "get", iid, "--vault", vid, "--fields", "label=password", "--reveal"], env=_op_env())
+        same = ok and got.decode().strip() == pw
+        del got
+    if not same:
+        return None, "1Password 讀回的密碼和產生的不一致（項目「%s」可以刪除）" % title
+    return (pw, title, dmg), ""
+
+
+def _archive_project(plan, s, ph=None, pre=None):
     """封存一個專案；回傳 (ok, 摘要)。ph：回報目前步驟（批次並行時每個 worker 各自一行進度）。"""
     ph = ph or (lambda t: status.update(phase=t))
     import secrets as _secrets
@@ -1254,6 +1441,7 @@ def _archive_project(plan, s, ph=None):
     import tempfile
     from . import projects as P
     root, vault = s["path"], plan["vault"]
+    pre = pre or s.get("_pre")
     if not (vault_ok(vault) and _project_ok(root)):
         return False, "設定的 vault 不合法，或資料夾不在允許封存的範圍，沒有處理"
     ph("%s：確認還是閒置的" % s["label"])
@@ -1261,6 +1449,10 @@ def _archive_project(plan, s, ph=None):
     a.update({k: (s.get("info") or {}).get(k) for k in ("remote", "dirty", "unpushed", "has_upstream")})
     if a["last_ts"] > s["last_ts"]:
         return False, "預覽之後專案有更新（%s，%s），沒有處理" % (a["last"], a["last_what"])
+    fo, sample = P.foreign_owned(root)
+    if fo:
+        return False, ("未執行：有 %d 個檔案不屬於你（例如 %s），macOS 建立 DMG 時會卡在等系統管理員授權；"
+                       "請先 sudo chown -R 把資料夾改回你的帳號再封存" % (fo, "、".join(sample)))
     if P.cwd_users([root])[root]:
         return False, "有程式正開在這個資料夾裡（%s），沒有處理" % "、".join(P.cwd_users([root])[root][:3])
     if P.in_cloud(root):
@@ -1274,16 +1466,16 @@ def _archive_project(plan, s, ph=None):
         if bad:
             return False, "有 %d 個檔案從雲端下載不到（例如 %s），沒有封存；可以稍後再試" % (len(bad), home_rel(bad[0]))
     with _op_lock:      # 並行時一次只跑一個 op（避免同時跳出好幾個 1Password 授權視窗）
-        if plan.get("_op_failed"):
+        if plan.get("_op_failed") and not pre:
             return False, "未執行：1Password 無法使用，已停止後面的專案"
-        if not plan.get("_vault_id"):
+        if not plan.get("_vault_id") and not pre:
             ph("確認 1Password vault 只有你能存取（請留意 1Password 的授權視窗）")
             ok, why, vid = _vault_private(vault)
             if not ok:
                 plan["_op_failed"] = True
                 return False, why + "；沒有處理"
             plan["_vault_id"] = vid
-    vid = plan["_vault_id"]
+    vid = plan.get("_vault_id")
     ph("%s：計算每個檔案的 sha256" % s["label"])
     try:
         lab = s["label"]
@@ -1292,11 +1484,21 @@ def _archive_project(plan, s, ph=None):
         return False, "讀取原資料夾失敗：%s；沒有處理" % e
     nfile = sum(1 for v in before.values() if v[0] == "f")
     size = sum(v[1] for v in before.values())
-    dmg = s["dmg"]
-    if os.path.exists(dmg):
+    dmg = pre[2] if pre else s["dmg"]
+    if not pre and os.path.exists(dmg):
         dmg = dmg[:-4] + time.strftime("-%H%M%S") + ".dmg"
-    left = []
-    fail = lambda why: (False, why + "；原資料夾沒有刪除" + ("（留下：%s，可以刪除）" % "、".join(left) if left else ""))
+    left = ["1Password 項目「%s」" % pre[1]] if pre else []
+
+    def fail(why):
+        # 沒有通過驗證的 DMG 直接刪掉（原資料夾還在，留著只會讓人搞不清楚哪個是好的）
+        if os.path.isfile(dmg) and not os.path.isfile(dmg[:-4] + ".md"):
+            _detach_image(dmg)
+            try:
+                os.remove(dmg)
+                left[:] = [x for x in left if not x.startswith("DMG")]
+            except OSError:
+                pass
+        return (False, why + "；原資料夾沒有刪除" + ("（留下：%s，可以刪除）" % "、".join(left) if left else ""))
     title = "secaudit 封存專案：%s" % home_rel(root)
     info = s.get("info") or {}
     note = "\n".join([
@@ -1311,9 +1513,13 @@ def _archive_project(plan, s, ph=None):
         "依據報告：%s" % (plan.get("report") or "—"),
         "還原：雙擊 DMG、輸入這個項目的密碼，把裡面的檔案複製回「完整路徑」。",
         "提醒：封存不等於撤銷。專案裡的金鑰如果曾經提交到 git 或外流，請到各服務撤銷並更換。"])
-    pw = _secrets.token_urlsafe(32)
-    ph("%s：把 DMG 密碼存進 1Password" % s["label"])
-    with _op_lock:
+    if pre:
+        pw, title = pre[0], pre[1]
+        same = True
+    else:
+      pw = _secrets.token_urlsafe(32)
+      ph("%s：把 DMG 密碼存進 1Password" % s["label"])
+      with _op_lock:
         if plan.get("_op_failed"):
             return False, "未執行：1Password 存密碼失敗，已停止後面的專案；原資料夾沒有動"
         iid, err = _op_create_pw_err(vid, title, pw, note)
@@ -1328,16 +1534,21 @@ def _archive_project(plan, s, ph=None):
         return fail("1Password 讀回的密碼和產生的不一致")
     ph("%s：建立加密 DMG（%s，可能要幾分鐘）" % (s["label"], P.human_size(size)))
     vol = re.sub(r"[^\w.-]+", "-", os.path.basename(root)).strip("-")[:27] or "project"
-    argv = ["hdiutil", "create", "-quiet", "-srcfolder", root, "-fs", "APFS", "-format", "UDZO",
+    # 指定暫存映像的大小：hdiutil 自己估的大小有時太緊，會在複製途中 No space left on device
+    # （最後的 DMG 是壓縮過的，這個大小只影響建立時的暫存映像）
+    mb = int(size * 1.4 / 1e6 + nfile * 8192 / 1e6) + 100
+    argv = ["hdiutil", "create", "-quiet", "-size", "%dm" % mb, "-srcfolder", root, "-fs", "APFS", "-format", "UDZO",
             "-encryption", "AES-256", "-stdinpass", "-volname", vol, dmg]
     err = ""
-    for attempt in range(2):          # 同時跑好幾個 hdiutil 時偶爾會暫時失敗（資源忙碌），重試一次
-        ok, _, err = _quiet_err(argv, pw.encode(), timeout=4 * 3600)
+    for attempt in range(2):          # 同時跑好幾個 hdiutil 時偶爾會暫時失敗或卡死（有看門狗會終止），重試一次
+        ok, err, stuck = _run_watched(argv, pw.encode(), out_path=dmg, ph=ph,
+                                      label="%s：建立加密 DMG（%s）%s" % (s["label"], P.human_size(size), "・重試" if attempt else ""))
         if ok and os.path.isfile(dmg):
             break
+        _detach_image(dmg)
         if os.path.isfile(dmg):
             os.remove(dmg)
-        time.sleep(3)
+        time.sleep(5)
     if os.path.isfile(dmg):
         os.chmod(dmg, 0o600)
         left.append("DMG %s" % home_rel(dmg))
@@ -1347,12 +1558,15 @@ def _archive_project(plan, s, ph=None):
     mnt = tempfile.mkdtemp(prefix="mnt-", dir=SECURE_TMP)
     try:
         ph("%s：用 1Password 裡的密碼唯讀掛載 DMG，逐檔比對" % s["label"])
-        for attempt in range(2):
-            ok, _, err = _quiet_err(["hdiutil", "attach", dmg, "-stdinpass", "-nobrowse", "-readonly", "-noautoopen",
-                                     "-mountpoint", mnt], pw.encode(), timeout=600)
+        for attempt in range(5):     # 同時掛載好幾個 DMG 時會出現 Resource temporarily unavailable：排隊並重試
+            with _mount_lock:
+                ok, err, stuck = _run_watched(["hdiutil", "attach", dmg, "-stdinpass", "-nobrowse", "-readonly", "-noautoopen",
+                                               "-mountpoint", mnt], pw.encode(), ph=ph, timeout=900, stall=300,
+                                              label="%s：掛載 DMG 準備比對" % s["label"])
             if ok:
                 break
-            time.sleep(3)
+            _detach_image(dmg)         # 失敗時清掉殘留的裝置再重試
+            time.sleep(5 * (attempt + 1))
         if not ok:
             return fail("掛載 DMG 失敗（%s）" % (err.replace(pw, "****")[:200] or "沒有錯誤訊息"))
         try:
@@ -1408,9 +1622,10 @@ def _archive_project(plan, s, ph=None):
         home_rel(dmg), nfile, P.human_size(size), title, "；處理紀錄：%s" % home_rel(jp) if jp else "")
 
 
-ARCHIVE_WORKERS = 5        # 同時封存幾個專案（hdiutil 壓縮、sha256 都吃 CPU / 磁碟）
+ARCHIVE_WORKERS = 8        # 同時封存幾個專案（hdiutil 壓縮、sha256 都吃 CPU / 磁碟；掛載 DMG 另外排隊一次一個）
 DOWNLOAD_WORKERS = 2       # 同時從雲端下載幾個專案（每個專案內部再 8 個檔案並行）
 _op_lock = threading.Lock()
+_mount_lock = threading.Lock()     # hdiutil attach 一次一個
 
 
 def _archive_batch(plan, steps, results):
@@ -1430,11 +1645,11 @@ def _archive_batch(plan, steps, results):
             if kw.pop("_drop", False):
                 dct.pop(key, None)
             else:
-                dct.setdefault(key, {}).update(kw)
+                dct.setdefault(key, {}).update(kw, beat=time.time())
             status[name] = {k: dict(v) for k, v in dct.items()}
 
     def stopped():
-        return status.get("cancel") or plan.get("_op_failed")
+        return status.get("cancel")
 
     def record(s, ok, msg, skipped=False):
         with lock:
@@ -1443,7 +1658,48 @@ def _archive_batch(plan, steps, results):
 
     def skip(s):
         record(s, False, "未執行：你按了停止" if status.get("cancel") else
-               "未執行：1Password 存密碼失敗，已停止後面的專案（確認 1Password 授權後再重新執行）", True)
+               "未執行：1Password 存密碼失敗，已停止後面的專案（確認 1Password 授權後，在執行紀錄按「🔁 再執行一次」）", True)
+
+    # 先把需要你在場的步驟做完：確認 vault、為每個專案預先建立 1Password 密碼項目（會跳 1Password 授權視窗）。
+    # 之後的下載、建立 DMG、驗證、刪除都不需要 1Password，可以離開電腦。
+    vault = plan["vault"]
+    status["phase"] = "確認 1Password vault 只有你能存取（請留意 1Password 的授權視窗）"
+    with _op_lock:
+        okv, why, vid = _vault_private(vault) if vault_ok(vault) else (False, "設定的 vault 不合法", "")
+    if not okv:
+        plan["_op_failed"] = True
+        for s in steps:
+            record(s, False, why + "；沒有處理")
+        return
+    plan["_vault_id"] = vid
+    keyed = []
+    for s in list(steps):
+        fo, sample = P.foreign_owned(s["path"]) if os.path.isdir(s["path"]) else (0, [])
+        if fo:
+            record(s, False, "未執行：有 %d 個檔案不屬於你（例如 %s），macOS 建立 DMG 時會卡在等系統管理員授權；"
+                             "請先 sudo chown -R 把資料夾改回你的帳號再封存" % (fo, "、".join(sample)), True)
+            steps.remove(s)
+    for i, s in enumerate(steps):
+        if status.get("cancel"):
+            break
+        status["phase"] = ("預先在 1Password 建立密碼 %d / %d（請留在電腦前，看到 1Password 的授權視窗請按允許；"
+                           "全部建好後就可以離開）" % (i + 1, len(steps)))
+        pre, err = _archive_prekey(plan, s, vid)
+        if not pre:
+            plan["_op_failed"] = True
+            record(s, False, "無法把密碼存進 1Password（%s）；原資料夾沒有動" % err)
+            break
+        s["_pre"] = pre
+        keyed.append(s)
+    for s in steps:
+        if s not in keyed and not any(r["id"] == s["id"] for r in results):
+            skip(s)
+    if keyed:
+        _notify("🔐 secaudit：%d 個閒置專案的 DMG 密碼都已存進 1Password%s。接下來的下載、建立 DMG、驗證、刪除不需要你在場，"
+                "完成後會再通知你。" % (len(keyed), "（另有 %d 個因 1Password 失敗或停止而不處理）" % (len(steps) - len(keyed))
+                                       if len(keyed) < len(steps) else ""))
+    plan["_op_failed"] = False          # 已經建好密碼的專案照常封存（不再需要 1Password）
+    steps = keyed
 
     cloud = [s for s in steps if P.in_cloud(s["path"])]
     for s in steps:
@@ -1508,6 +1764,271 @@ def _archive_batch(plan, steps, results):
     status.update(workers={}, downloads={})
 
 
+# ---------------------------------------------------------------- 動作 8：寫死的機密 → 1Password + .env.tpl 引用
+ENV_GROUPS = [
+    "📄 明文 .env → .env.tpl（整份轉換，驗證後刪除原檔）",
+    "⚙️ 自動改寫成讀環境變數（Python / JS / TS / Go / shell / compose / 文件）",
+    "📝 只把值搬進 1Password + .env.tpl（需要手動改程式，改法寫在處理紀錄）",
+    "🧪 本機開發 / 範例帳密（低風險）",
+]
+
+
+def plan_env_tpl():
+    from . import envtpl as E
+    from .core import is_fixture_path
+    from .diff import finding_key
+    from .projects import project_root, tool_dir
+    from .rules import is_placeholder
+    name, fs = _latest_findings()
+    steps, seen, skipped_tool = [], set(), 0
+    for f in fs:
+        if f.get("rule") not in ("file-secrets", "plaintext-env") or not f.get("path"):
+            continue
+        p = os.path.expanduser(f["path"])
+        if p in seen or not _secure_ok(p):
+            continue
+        seen.add(p)
+        if tool_dir(p) or is_fixture_path(p):
+            skipped_tool += 1
+            continue
+        st = _file_state(p)
+        if not st:
+            continue
+        try:
+            with open(p, encoding="utf-8") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        kind = E.kind_of(p)
+        low = f.get("severity") == "low"
+        root = os.path.dirname(p) if kind == "env" else (project_root(p) or os.path.dirname(p))
+        tpl = (p + ".tpl") if kind == "env" else os.path.join(root, ".env.tpl")
+        lines = []
+        if kind == "env":
+            n = sum(1 for k, d in E.parse_env(text) if k == "kv" and d[4] and not is_placeholder(d[4]))
+            if not n:
+                continue
+            if os.path.exists(tpl):
+                lines.append("⚠️ 已經有 %s，請手動合併，這次不處理" % os.path.basename(tpl))
+            lines.append("整份轉成 %s：%d 個變數的值搬進 1Password，op inject 還原後逐字比對一致才刪除原檔" % (os.path.basename(tpl), n))
+            grp, default = ENV_GROUPS[0], not os.path.exists(tpl)
+        else:
+            hits = E.find(text)
+            if not hits and not E.has_private_key(text):
+                continue
+            new, done, manual = E.rewrite(text, kind, hits)
+            for h, how in done:
+                lines.append("第 %d 行 %s：%s" % (text.count("\n", 0, h["start"]) + 1, h["var"], how))
+            for h, why in manual:
+                lines.append("第 %d 行 %s：只搬值（%s）" % (text.count("\n", 0, h["start"]) + 1, h["var"], why))
+            if E.has_private_key(text):
+                lines.append("檔案裡有私鑰（例如 service account JSON）：這類檔案要改成執行時從環境變數或 1Password 取出，處理紀錄會寫改法")
+            auto = bool(done) and not manual and not E.has_private_key(text)
+            grp = ENV_GROUPS[3] if low else ENV_GROUPS[1] if auto else ENV_GROUPS[2]
+            default = auto and not low
+        if f.get("severity") != "low" and "已經提交到 git" in (f.get("detail") or ""):
+            lines.append("⚠️ 已提交到 git：舊值永遠留在 git 歷史，處理後仍要到服務後台撤銷並更換")
+        lines.append("專案：%s・.env.tpl：%s" % (home_rel(root), home_rel(tpl)))
+        steps.append({"id": "e%d" % len(steps), "label": home_rel(p), "detail": "；".join(lines), "kind": "envtpl",
+                      "path": p, "state": st, "root": root, "tpl": tpl, "group": grp, "default": default,
+                      "fkey": finding_key(f), "finding": {k: f.get(k, "") for k in ("rule", "severity", "title", "detail")}})
+    order = {g: i for i, g in enumerate(ENV_GROUPS)}
+    steps.sort(key=lambda x: order.get(x["group"], 9))
+    for i, x in enumerate(steps):
+        x["id"] = "e%d" % i
+    notes = ["依照 ~/projects/ENV_1PASSWORD_GUIDE.md：值放進 1Password vault「%s」，每個專案一筆「env | ~/<專案>/.env」項目、"
+             "每個變數一個欄位；專案的 .env.tpl 加上 VAR={{ op://%s/<項目ID>/VAR }}。專案已經有 .env.tpl 的話沿用同一筆項目。" % (E.VAULT, E.VAULT),
+             "程式改寫前，原檔會先存成 1Password 文件「secaudit 備份：路徑」，還原只要一行指令；改寫後做語法檢查"
+             "（Python / JS / Go / shell），不通過就把原檔寫回去、只搬值。",
+             "只自動改寫「整個字串就是機密」的寫法；嵌在比較長的字串、格式化字串，或檔案格式不支援環境變數（例如 alertmanager.yml、"
+             "alembic.ini、JSON）時只搬值，程式改法寫在處理紀錄。",
+             "每個專案根目錄會留下 secaudit-處理紀錄.md：處理前 / 處理後、之後怎麼執行（openv -e、pm2、docker、CI）、怎麼還原。",
+             "之後執行這些專案要用 bash ~/op-env-run.sh -e <指令>；已提交到 git 的機密，舊值還在歷史裡，仍要到服務後台撤銷。"]
+    if skipped_tool:
+        notes.append("另有 %d 個檔案在工具自己的資料夾或第三方範例裡（例如 ~/.lmstudio、~/.move），不適合改寫，不列出；"
+                     "可以在「含機密的檔案」預覽整類標記為已確認無害。" % skipped_tool)
+    return {"title": "把寫死的機密搬進 1Password，改成 .env.tpl 的 op:// 引用", "report": name, "steps": steps, "notes": notes,
+            "reason": "執行 secaudit 修復：把寫死的機密搬進 1Password 並改成 .env.tpl 引用（共 %d 個檔案）" % len(steps)}
+
+
+def _envtpl(plan, s, ph=None):
+    """處理一個檔案；回傳 (ok, 摘要)。"""
+    from . import envtpl as E
+    ph = ph or (lambda t: status.update(phase=t))
+    p, root, tpl = s["path"], s["root"], s["tpl"]
+    if not _still_same(s):
+        return False, "略過：預覽之後檔案被修改或移動了"
+    with open(p, encoding="utf-8") as fh:
+        text = fh.read()
+    kind = E.kind_of(p)
+    with _op_lock:
+        if not plan.get("_vault_ok"):
+            ph("確認 1Password vault「%s」（請留意 1Password 的授權視窗）" % E.VAULT)
+            ok, _, err = E._op(["vault", "get", E.VAULT, "--format", "json"])
+            if not ok:
+                return False, "讀不到 1Password vault「%s」：%s" % (E.VAULT, err or "可能沒有授權")
+            plan["_vault_ok"] = True
+    v0, iid = E.tpl_item(tpl) if os.path.exists(tpl) else ("", "")
+    if v0 and v0 != E.VAULT:
+        iid = ""          # 既有 .tpl 用的是別的 vault：另外建一筆在 Dev Env，避免改到別人的項目
+    title = "env | %s" % home_rel(p if kind == "env" else os.path.join(root, ".env"))
+    if not iid:
+        iid, err = E.op_item_find(title)
+        if iid is None:
+            return False, "查詢 1Password 項目失敗：%s" % err
+    jsec, restore, after = [], [], []
+    git_tracked = "已經提交到 git" in ((s.get("finding") or {}).get("detail") or "")
+
+    if kind == "env":
+        if os.path.exists(tpl):
+            return False, "已經有 %s，請手動合併；沒有處理" % home_rel(tpl)
+        parsed = E.parse_env(text)
+        ph("%s：原檔存成 1Password 文件" % s["label"])
+        did, dtitle, err = E.op_backup(p)
+        if not did:
+            return False, "原檔備份到 1Password 失敗：%s；沒有處理" % err
+        _, fields = E.env_tpl_text(parsed, "X")
+        ph("%s：把 %d 個變數存進 1Password" % (s["label"], len(fields)))
+        iid, err = E.op_item_upsert(title, fields, iid)
+        if not iid:
+            return False, "存進 1Password 失敗：%s；原檔沒有動" % err
+        tpl_text, _ = E.env_tpl_text(parsed, iid)
+        ph("%s：用 op inject 還原並逐字比對" % s["label"])
+        ok, out, err = E._op(["inject"], tpl_text.encode("utf-8"))
+        same = ok and out.decode("utf-8") == text
+        del out
+        if not same:
+            return False, "op inject 還原後和原檔不一致（%s），原檔沒有動；1Password 項目「%s」可以檢查或刪除" % (err or "內容不同", title)
+        fd = os.open(tpl, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(tpl_text)
+        if not _still_same(s):
+            return False, "已產生 %s，但期間原檔被修改，沒有刪除原檔" % home_rel(tpl)
+        os.remove(p)
+        varnames = list(fields)
+        after = ["`%s` 已刪除，改成 `%s`（%d 個變數：%s）" % (home_rel(p), home_rel(tpl), len(varnames), "、".join(varnames[:12])),
+                 "值在 1Password vault「%s」的「%s」（項目 ID `%s`）" % (E.VAULT, title, iid),
+                 "已用 op inject 還原並逐字比對，和原本的檔案完全一樣"]
+        restore = ["一行還原原檔：`op document get '%s' --vault '%s' --out-file '%s'`（文件「%s」）" % (did, E.VAULT, p, dtitle),
+                   "或用 op inject 從 .tpl 產生：`op inject -i '%s' -o '%s'`" % (tpl, p),
+                   "還原後如果不再需要 .tpl，可以刪掉 `%s`" % home_rel(tpl)]
+        summary = "已轉成 %s（%d 個變數），原檔已刪除" % (home_rel(tpl), len(varnames))
+    else:
+        hits = E.find(text)
+        existing = E.tpl_vars(tpl)
+        used, by_val, reused = set(existing), {}, set()
+        for h in hits:
+            if h["value"] in by_val:
+                h["var"] = by_val[h["value"]]
+                continue
+            v = h["var"]
+            if v in existing and iid:
+                ok, out, _ = E._op(["read", "op://%s/%s/%s" % (E.VAULT, iid, v)])
+                same = ok and out.decode().rstrip("\n") == h["value"]
+                del out
+                if same:
+                    by_val[h["value"]] = v
+                    reused.add(v)            # .env.tpl 已經有同名、同值的變數：直接沿用
+                    continue
+            n = 2
+            while v in used:
+                v = "%s_%d" % (h["var"], n)
+                n += 1
+            h["var"] = v
+            used.add(v)
+            by_val[h["value"]] = v
+        new, done, manual = E.rewrite(text, kind, hits)
+        syntax_note = ""
+        if done:
+            okc, errc = E.syntax_ok(p, kind, new)
+            if not okc:
+                syntax_note = "改寫後語法檢查沒過（%s），改成只搬值、原檔不動" % errc[:160]
+                manual = [(h, "改寫後語法檢查沒過") for h, _ in done] + manual
+                done, new = [], text
+        fields = {h["var"]: h["value"] for h in hits if h["var"] not in reused}
+        did = dtitle = ""
+        if done:
+            ph("%s：原檔存成 1Password 文件" % s["label"])
+            did, dtitle, err = E.op_backup(p)
+            if not did:
+                return False, "原檔備份到 1Password 失敗：%s；沒有處理" % err
+        if fields:
+            ph("%s：把 %d 個值存進 1Password" % (s["label"], len(fields)))
+            iid, err = E.op_item_upsert(title, fields, iid)
+            if not iid:
+                return False, "存進 1Password 失敗：%s；原檔沒有動" % err
+            bad = E.op_verify(iid, fields)
+            if bad:
+                return False, "1Password 讀回的值不一致（%s）；原檔沒有動" % "、".join(bad)
+        add = [k for k in dict.fromkeys(h["var"] for h in hits) if k not in existing]
+        if add:
+            newf = not os.path.exists(tpl)
+            fd = os.open(tpl, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as fh:
+                if newf:
+                    fh.write("# 機密由 1Password 注入：bash ~/op-env-run.sh -e <指令>（secaudit 產生）\n")
+                elif not open(tpl, encoding="utf-8").read().endswith("\n"):
+                    fh.write("\n")
+                for k in add:
+                    fh.write("%s={{ op://%s/%s/%s }}\n" % (k, E.VAULT, iid, k))
+        if done:
+            if not _still_same(s):
+                return False, "值已存進 1Password，但期間檔案被修改，沒有改寫程式"
+            E.write_atomic(p, new)
+            with open(p, encoding="utf-8") as fh:
+                after_text = fh.read()
+            leftover = [h["var"] for h, _ in done if h["value"] in after_text]
+            if leftover:
+                E.write_atomic(p, text)
+                return False, "改寫後檔案裡還找得到原本的值（%s），已把原檔寫回去" % "、".join(leftover)
+        _ensure_gitignore_env(root)
+        ln = lambda h: text.count("\n", 0, h["start"]) + 1
+        after = ["值在 1Password vault「%s」的「%s」（項目 ID `%s`），變數：%s" % (E.VAULT, title, iid, "、".join(dict.fromkeys(h["var"] for h in hits))),
+                 "`%s` %s" % (home_rel(tpl), "新增 %d 行引用（%s）" % (len(add), "、".join(add)) if add else "原本就有這些變數")]
+        after += ["第 %d 行改成讀環境變數：%s" % (ln(h), how) for h, how in done]
+        after += ["第 %d 行 %s 沒有自動改（%s）：值已經搬進 1Password，請手動把程式改成讀環境變數 %s" % (ln(h), h["var"], why, h["var"])
+                  for h, why in manual]
+        if syntax_note:
+            after.append(syntax_note)
+        if E.has_private_key(text):
+            after.append("檔案裡的私鑰（例如 service account JSON）沒有搬：建議把整個檔案存成 1Password 文件，執行時用 "
+                         "`op document get` 取出到暫存位置，或把 JSON 放進一個變數、程式改用 from_service_account_info 讀")
+        restore = (["一行還原原檔：`op document get '%s' --vault '%s' --out-file '%s'`（文件「%s」）" % (did, E.VAULT, p, dtitle)] if did else []) + \
+                  (["或用 git：`git -C '%s' checkout -- '%s'`" % (root, os.path.relpath(p, root))] if git_tracked and done else []) + \
+                  (["還原後如果不需要這些引用，可以把 %s 裡的 %s 刪掉（1Password 欄位留著也沒關係）" % (home_rel(tpl), "、".join(add))] if add else [])
+        summary = "%s；%d 處改成讀環境變數、%d 處只搬值" % (home_rel(tpl), len(done), len(manual))
+    f = s.get("finding") or {}
+    _journal(os.path.join(root, JOURNAL_NAME), "寫死的機密 → 1Password + .env.tpl：%s" % os.path.relpath(p, root), [
+        ("為什麼處理", ["`%s` 裡寫死了機密（%s）。寫死在檔案裡的值會被備份、同步、複製到別的專案，也會被讀得到檔案的程式（包括 AI 助手）看到"
+                       % (home_rel(p), f.get("title", ""))] +
+                      (["⚠️ 這個檔案已提交到 git：舊值永遠在 git 歷史裡，請到服務後台撤銷並更換，再把新值更新到 1Password"] if git_tracked else [])),
+        ("處理前", ["檔案：`%s`（SHA-256 %s）" % (p, s["state"][0])] + _finding_lines(f)),
+        ("處理後", after),
+        ("之後怎麼執行", E.RUN_HELP),
+        ("怎麼還原", restore or ["這次沒有改動原檔（只把值搬進 1Password 並加到 .env.tpl），不需要還原"]),
+        ("相關資訊", _journal_basics() + ["依據報告：%s" % (plan.get("report") or "—")])])
+    return True, summary + "；處理紀錄：%s" % home_rel(os.path.join(root, JOURNAL_NAME))
+
+
+def _ensure_gitignore_env(root):
+    """git 專案：確認 .env 被忽略（op-env-run.sh 會暫時產生 .env），沒有的話加進 .gitignore。"""
+    if not os.path.exists(os.path.join(root, ".git")):
+        return
+    try:
+        r = subprocess.run(["git", "-C", root, "check-ignore", "-q", ".env"], capture_output=True, timeout=10)
+        if r.returncode == 0:
+            return
+        gi = os.path.join(root, ".gitignore")
+        tail = ""
+        if os.path.exists(gi):
+            with open(gi, encoding="utf-8", errors="replace") as fh:
+                tail = "" if fh.read().endswith("\n") else "\n"
+        with open(gi, "a", encoding="utf-8") as fh:
+            fh.write("%s# op-env-run.sh 會暫時產生 .env（secaudit 加入）\n.env\n" % tail)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 # ---------------------------------------------------------------- 對外介面
 ACTIONS = {
     "redact-transcripts": ("🔑", "遮罩 AI 對話紀錄裡的金鑰", plan_redact),
@@ -1517,6 +2038,7 @@ ACTIONS = {
     "secure-files-1p": ("🔐", "含機密的檔案 → 1Password", plan_secure_1p),
     "fix-key-perms": ("🔏", "私鑰權限改成只有自己可讀", plan_key_perms),
     "archive-idle-projects": ("💤", "閒置專案 → 整個封存成加密 DMG", plan_archive_projects),
+    "env-tpl": ("🧷", "寫死的機密 → 1Password + .env.tpl 引用", plan_env_tpl),
 }
 
 # 報告裡每個問題可以用的修復動作（按鈕會帶到 Web UI 預覽，授權後才執行）
@@ -1587,7 +2109,8 @@ def make_plan(action, report="", focus=""):
             del _plans[k]
         _plans[pid] = dict(plan, action=action, created=now)
     public = [{"id": s["id"], "label": s["label"], "detail": s["detail"], "default": s.get("default", True),
-               "group": s.get("group", "")} for s in plan["steps"]]
+               "group": s.get("group", ""), "ackable": s.get("group", "") in SECRET_ACKABLE and bool(s.get("fkey"))}
+              for s in plan["steps"]]
     return {"plan_id": pid, "action": action, "title": plan["title"], "report": plan.get("report", ""),
             "steps": public, "notes": plan.get("notes", [])}
 
@@ -1755,11 +2278,75 @@ def yubikey_options(plan_id, step_ids):
     return webauthn.request_options("run", _binding(plan_id, step_ids))
 
 
-def start(plan_id, step_ids, method="touchid", assertion=None, port=0):
-    """回傳 (是否開始, 訊息)。method = touchid（背景跳 Touch ID）或 yubikey（先驗證 assertion）。進度看 status。"""
+# ---------------------------------------------------------------- 排隊執行
+# 已經有動作在跑時，下一個動作可以先排隊：排隊當下就完成 Touch ID / YubiKey 授權，輪到它時直接開始。
+# 同一種動作只能排一個；執行前每個步驟照常重新確認（檔案被封存 / 移走的會略過）。
+queue = []          # [{"qid", "plan", "steps", "key_name", "method", "queued_at", "state"}]
+
+
+def queue_public():
+    return [{"qid": q["qid"], "action": q["plan"]["action"], "title": q["plan"]["title"], "n": len(q["steps"]),
+             "queued_at": q["queued_at"], "method": q["method"], "state": q["state"]} for q in queue]
+
+
+def unqueue(qid):
+    with _lock:
+        for q in list(queue):
+            if q["qid"] == qid and q["state"] == "queued":
+                queue.remove(q)
+                return True
+    return False
+
+
+def _run_next():
+    """目前的動作結束後呼叫：有排隊的就開始下一個。"""
     with _lock:
         if status["running"]:
-            return False, "已經有一個修復動作在進行"
+            return
+        q = next((x for x in queue if x["state"] == "queued"), None)
+        if not q:
+            return
+        queue.remove(q)
+        plan, steps = q["plan"], q["steps"]
+        status.update(running=True, phase="執行中（排隊的動作）", action=plan["action"],
+                      done=0, total=len(steps), current="", step_since=time.time(), cancel=False,
+                      title=plan["title"], started=time.strftime("%Y-%m-%d %H:%M:%S"), finished="", ok=None,
+                      message="", results=[], method=q["method"] + "（排隊時授權）")
+    _notify("▶️ secaudit 開始執行排隊的修復動作：%s（%d 項，%s 排隊時已授權）" % (plan["title"], len(steps), q["queued_at"]))
+    threading.Thread(target=_execute, args=(plan, steps, q["key_name"], True), daemon=True).start()
+
+
+def _enqueue(plan, steps, key_name, method_label):
+    q = {"qid": uuid.uuid4().hex[:12], "plan": plan, "steps": steps, "key_name": key_name, "method": method_label,
+         "queued_at": time.strftime("%Y-%m-%d %H:%M:%S"), "state": "queued"}
+    with _lock:
+        queue.append(q)
+    _notify("🕒 secaudit 已排隊修復動作：%s（%d 項，%s 授權）。目前的動作完成後會自動開始。不是你做的話請到 Web UI 取消排隊。" % (
+        plan["title"], len(steps), method_label))
+    _run_next()          # 剛好前一個已經結束的話，馬上開始
+
+
+def _enqueue_touchid(plan, steps):
+    """Touch ID 會擋住，放到背景：授權通過才加入佇列。"""
+    reason = (plan.get("reason") or "執行 secaudit 修復「%s」" % plan["title"]) + "（排隊，等目前的動作完成後執行）"
+    _notify("🔒 secaudit 正在請求 Touch ID 授權，把修復動作排入佇列：%s。不是你按的話請按取消。" % plan["title"])
+    ok, msg = authorize(reason)
+    if ok:
+        _enqueue(plan, steps, None, "Touch ID")
+    else:
+        with _lock:
+            for q in list(queue):
+                if q.get("pending") == plan.get("action"):
+                    queue.remove(q)
+        _notify("❌ secaudit：Touch ID 沒有通過，沒有排隊：%s（%s）" % (plan["title"], msg))
+
+
+def start(plan_id, step_ids, method="touchid", assertion=None, port=0):
+    """回傳 (是否開始, 訊息)。method = touchid（背景跳 Touch ID）或 yubikey（先驗證 assertion）。進度看 status。
+    已經有動作在跑：改成排隊（訊息以「queued」開頭）。"""
+    with _lock:
+        if any(q["plan"]["action"] == (_plans.get(plan_id) or {}).get("action") for q in queue):
+            return False, "這個動作已經在排隊了"
         plan = _plans.get(plan_id)
         if not plan or time.time() - plan["created"] > PLAN_TTL:
             return False, "預覽已過期，請重新預覽"
@@ -1777,8 +2364,31 @@ def start(plan_id, step_ids, method="touchid", assertion=None, port=0):
     elif method != "touchid":
         return False, "未知的授權方式"
     with _lock:
-        if status["running"] or _plans.pop(plan_id, None) is None:
-            return False, "預覽已被使用或已有動作在進行"
+        if _plans.pop(plan_id, None) is None:
+            return False, "預覽已被使用，請重新預覽"
+        busy = status["running"]
+        if busy and method == "touchid":
+            # 先佔住這個動作的排隊位置（避免 Touch ID 還沒按完又被重複送出）
+            queue.append({"qid": "pending-" + plan["action"], "plan": plan, "steps": steps, "key_name": None,
+                          "method": "Touch ID（等待授權）", "queued_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                          "state": "authorizing", "pending": plan["action"]})
+    if busy:
+        if key_name:
+            _enqueue(plan, steps, key_name, "YubiKey「%s」" % key_name)
+        else:
+            def go():
+                try:
+                    _enqueue_touchid(plan, steps)
+                finally:
+                    with _lock:
+                        for q in list(queue):
+                            if q.get("pending") == plan["action"]:
+                                queue.remove(q)
+            threading.Thread(target=go, daemon=True).start()
+        return False, "queued"
+    with _lock:
+        if status["running"]:
+            return False, "已經有一個修復動作在進行，請再按一次排入佇列"
         status.update(running=True, phase="等待 Touch ID" if not key_name else "執行中", action=plan["action"],
                       done=0, total=len(steps), current="", step_since=time.time(), cancel=False,
                       title=plan["title"], started=time.strftime("%Y-%m-%d %H:%M:%S"), finished="", ok=None,
@@ -1787,12 +2397,14 @@ def start(plan_id, step_ids, method="touchid", assertion=None, port=0):
     return True, ""
 
 
-def _execute(plan, steps, key_name=None):
+def _execute(plan, steps, key_name=None, preauth=False):
     results = []
     try:
         labels = "、".join(s["label"] for s in steps[:4]) + ("…等 %d 項" % len(steps) if len(steps) > 4 else "")
         reason = plan.get("reason") or "執行 secaudit 修復「%s」：%s" % (plan["title"], labels)
-        if key_name:
+        if preauth:
+            pass        # 排隊時已經授權過
+        elif key_name:
             _notify("🔑 secaudit 已用 YubiKey「%s」授權並開始執行：%s。不是你做的話請立即檢查。" % (key_name, reason))
         else:
             _notify("🔒 secaudit 正在請求 Touch ID 授權修復動作：%s。不是你按的話請按取消。" % reason)
@@ -1857,6 +2469,11 @@ def _execute(plan, steps, key_name=None):
                 r = _secure_1p(plan, s)
             elif s["kind"] == "archive-project":
                 r = _archive_project(plan, s)
+            elif s["kind"] == "envtpl":
+                try:
+                    r = _envtpl(plan, s)
+                except Exception as e:
+                    r = (False, "%s: %s" % (type(e).__name__, str(e)[:200]))
             elif s["kind"] == "chmod":
                 if not _still_same(s):
                     r = (False, "略過：檔案在預覽之後被修改、移動或換成 symlink")
@@ -1904,6 +2521,10 @@ def _execute(plan, steps, key_name=None):
         fails = sum(1 for r in results if not r["ok"])
         status.update(ok=not fails, message="完成，%d 個步驟%s%s" % (len(results), "，%d 個失敗" % fails if fails else "全部成功",
                                                                 ("。" + plan["_summary"]) if plan.get("_summary") else ""))
+        if plan["action"] == "env-tpl":
+            done = [r for r in results if r["ok"]]
+            _notify("🧷 secaudit：%d 個檔案的機密已搬進 1Password 並改成 .env.tpl 引用，%d 個沒有處理。之後執行這些專案請用 "
+                    "bash ~/op-env-run.sh -e <指令>；每個專案根目錄有 secaudit-處理紀錄.md。" % (len(done), len(results) - len(done)))
         if plan["action"] == "archive-idle-projects":
             done = [r for r in results if r["ok"]]
             _notify("💤 secaudit 閒置專案封存結果：%d 個已封存成加密 DMG 並刪除原資料夾，%d 個沒有處理。%s" % (
@@ -1924,6 +2545,7 @@ def _execute(plan, steps, key_name=None):
               "method": status.get("method", ""),
               "message": status["message"], "steps": [{"id": r["id"], "label": r["label"], "ok": r["ok"]} for r in results]
               or [{"id": s["id"], "label": s["label"], "ok": None} for s in steps]})
+        threading.Thread(target=_run_next, daemon=True).start()      # 有排隊的動作就接著做
 
 
 def _log(entry):
