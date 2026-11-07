@@ -62,6 +62,15 @@ section.tab{display:none}section.tab.on{display:block}
 .actlist button .h{font-size:12px;color:var(--muted)}
 .actlist button.on{border-color:var(--accent);box-shadow:inset 3px 0 0 var(--accent);background:var(--code);font-weight:600}
 .actmain{border:1px solid var(--line);border-radius:12px;padding:0 14px 12px;min-height:160px}
+.ptabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin:0 -14px;padding:0 8px}
+.ptabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:none;padding:10px 12px;font-size:14px;color:var(--muted);cursor:pointer}
+.ptabs button.on{color:var(--fg);border-bottom-color:var(--accent);font-weight:600}
+.ptabs .badge:not(:empty){display:inline-block;margin-left:6px;min-width:18px;padding:0 5px;border-radius:9px;background:var(--medium);color:#fff;font-size:11px;line-height:18px;text-align:center}
+.ppane{display:none}.ppane.on{display:block}
+.logh{font-size:14px;margin:16px 0 6px}
+.hrow{border-bottom:1px solid var(--line);padding:6px 2px}.hrow>summary{cursor:pointer;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;list-style:none}
+.hrow>summary::-webkit-details-marker{display:none}.hrow .ht{white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px}
+.hrow ul{margin:6px 0 4px;padding-left:20px;font-size:12px}
 .actempty{padding:40px 10px;text-align:center}
 .acthead{padding:14px 0 8px}.acthead .t{font-size:16px;font-weight:700}
 .actbar{position:sticky;top:44px;z-index:2;background:var(--card);display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}
@@ -153,10 +162,19 @@ body.noscroll{overflow:hidden}
         <button id="allMd" style="margin-top:8px;width:100%" title="所有修復動作的預覽（預設勾選）＋需要手動處理的問題，彙整成一份 Markdown。只讀，不會執行任何動作">⬇ 全部修復預覽 Markdown</button>
         <div class="muted" id="allMdMsg"></div>
       </div>
-      <div class="actmain" id="actPlan"><div class="muted actempty">← 先選一個修復動作，這裡會列出它要處理的項目，勾選後再授權執行。</div></div>
+      <div class="actmain">
+        <div class="ptabs" role="tablist">
+          <button type="button" data-p="preview" class="on" role="tab">👁 預覽</button>
+          <button type="button" data-p="log" role="tab">📜 執行紀錄<span class="badge" id="logBadge"></span></button>
+        </div>
+        <div class="ppane on" data-p="preview" id="actPlan"><div class="muted actempty">← 先選一個修復動作，這裡會列出它要處理的項目，勾選後再授權執行。</div></div>
+        <div class="ppane" data-p="log">
+          <div id="actRecent"></div>
+          <h3 class="logh">全部執行紀錄</h3>
+          <div id="actHistory" class="muted"></div>
+        </div>
+      </div>
     </div>
-    <div id="actRecent"></div>
-    <details style="margin-top:10px"><summary class="muted">執行紀錄</summary><div id="actHistory" class="muted"></div></details>
   </div>
 
   <div class="card" id="ackCard">
@@ -730,10 +748,23 @@ async function loadActions() {
   renderActStatus(r.status);
   renderRecent(r.recent || []);
   lockRunButtons();
-  $("#actHistory").innerHTML = r.history.length ? r.history.map(h => `<div>${esc(h.time)}　${h.ok ? "✅" : "❌"} ${esc(h.action)}　${esc(h.message)}${h.method ? `　<span class="muted">（${esc(h.method)}）</span>` : ""}</div>`).join("") : "尚無紀錄";
+  $("#actHistory").innerHTML = r.history.length ? r.history.slice(0, 50).map(h => { const a = actCatalog[h.action] || {};
+      const st = h.steps || [];
+      return `<details class="hrow"><summary><span>${h.ok ? "✅" : "❌"}</span><span class="ht">${esc(h.time)}</span>
+        <b style="color:var(--fg)">${esc(a.icon || "🛠")} ${esc(a.title || h.action)}</b><span>${esc(h.message)}</span>${h.method ? `<span class="ht">${esc(h.method)}</span>` : ""}</summary>
+        ${st.length ? `<ul>${st.map(x => `<li>${x.ok ? "✅" : x.ok === false ? "❌" : "⏭"} ${esc(x.label)}</li>`).join("")}</ul>` : '<div class="muted">沒有步驟紀錄</div>'}</details>`; }).join("") +
+      (r.history.length > 50 ? `<div class="muted" style="margin-top:6px">只顯示最近 50 筆，完整紀錄在 data/actions.jsonl</div>` : "")
+    : '<div class="muted">尚無紀錄</div>';
   clearTimeout(actTimer); actTimer = setTimeout(loadActions, r.status.running ? 1500 : 10000);
 }
 let actActive = "", actCatalog = {}, actSeq = 0;
+// 右邊的「預覽 / 執行紀錄」頁籤：選動作時切到預覽，開始執行時切到執行紀錄
+function paneTab(p) {
+  document.querySelectorAll(".ptabs button").forEach(b => b.classList.toggle("on", b.dataset.p === p));
+  document.querySelectorAll(".ppane").forEach(x => x.classList.toggle("on", x.dataset.p === p));
+  if (p === "log") $("#logBadge").textContent = "";
+}
+document.querySelectorAll(".ptabs button").forEach(b => b.onclick = () => paneTab(b.dataset.p));
 const stepHtml = s => `<label class="step${s.default === false ? " nodef" : ""}"><input type="checkbox" class="actStep" value="${esc(s.id)}" data-def="${s.default === false ? 0 : 1}" ${s.default === false ? "" : "checked"}>
   <span style="min-width:0"><div class="l">${esc(s.label)}</div><div class="d">${String(s.detail || "").split("；").filter(Boolean).map(x => `<div>${esc(x)}</div>`).join("")}</div></span></label>`;
 // 有分類（例如閒置專案依位置分）就分組顯示：每組一個總勾選框，項目多時預設收合
@@ -749,7 +780,7 @@ function stepsGrouped(steps) {
 }
 // 修復預覽：一次只顯示一個動作；標題、勾選數與執行按鈕固定在頂端，項目再多也不用捲到最下面
 async function previewAction(id, report, focus) {
-  actActive = id; const seq = ++actSeq;
+  actActive = id; const seq = ++actSeq; paneTab("preview");
   document.querySelectorAll("#actList button[data-act]").forEach(b => b.classList.toggle("on", b.dataset.act === id));
   const a = actCatalog[id] || {icon: "🛠", title: id};
   $("#actPlan").innerHTML = `<div class="acthead"><div class="t">${esc(a.icon)} ${esc(a.title)}</div><div class="muted">產生預覽中…</div></div>`;
@@ -830,8 +861,8 @@ async function runAction(method) {
   const r = await api("/api/actions/run", {plan_id:actPlan.plan_id, steps:ids, method, assertion});
   if (!r.started) { $("#actStatus").style.display = ""; $("#actStatus").innerHTML = `<span style="color:var(--high)">❌ ${esc(r.error)}</span>`; return; }
   actPlan = null; actActive = ""; document.querySelectorAll("#actList button.on").forEach(b => b.classList.remove("on"));
-  $("#actPlan").innerHTML = '<div class="muted actempty">⏳ 已開始執行，進度顯示在上方。完成後的結果在下方「最近的執行結果」。</div>';
-  $("#actStatus").scrollIntoView({block: "nearest"}); loadActions();
+  $("#actPlan").innerHTML = '<div class="muted actempty">⏳ 已開始執行，進度在上方和「📜 執行紀錄」頁籤。<br>要做下一個動作，從左邊選一個就會回到預覽。</div>';
+  paneTab("log"); $("#actStatus").scrollIntoView({block: "nearest"}); loadActions();
 }
 let actRunning = false, actWasRunning = false, actRunningInfo = null;
 const stepsHtml = rs => (rs || []).map(x => `<details><summary>${x.ok ? "✅" : x.skipped ? "⏭" : "❌"} ${esc(x.label)}</summary><pre style="white-space:pre-wrap;font-size:12px;max-height:260px;overflow:auto">${esc(x.output)}</pre></details>`).join("");
@@ -871,6 +902,8 @@ function renderActStatus(s) {
     if ($("#actStop")) $("#actStop").onclick = async () => { $("#actStop").disabled = true; await api("/api/actions/cancel", {}); loadActions(); };
   } else if (actWasRunning) {
     $("#actStatus").style.display = "none";
+    // 執行完了：不在「執行紀錄」頁籤時，標一個「新」提醒去看結果
+    if (!document.querySelector('.ptabs button[data-p="log"].on')) $("#logBadge").textContent = "新";
   }
   $("#tbFix").textContent = s.running ? (s.total ? `${s.done || 0}/${s.total}` : "執行中") : "";
   actRunningInfo = s.running ? s : null;
@@ -878,9 +911,10 @@ function renderActStatus(s) {
   actWasRunning = s.running;
 }
 function renderRecent(list) {
-  $("#actRecent").innerHTML = list.length ? `<div class="muted" style="margin-top:10px">最近的執行結果（常駐程式重啟後清空；摘要保留在執行紀錄）</div>` +
+  $("#actRecent").innerHTML = list.length ? `<h3 class="logh">這次啟動後的執行結果<span class="muted" style="font-weight:400">（含每一項的輸出；常駐程式重啟後清空，摘要保留在下方）</span></h3>` +
     list.map((x, i) => `<details class="note" data-okey="recent-${esc(x.started)}" ${OPEN.has("recent-" + x.started) || (i === 0 && !OPEN.size) ? "open" : ""}>
-      <summary>${x.ok ? "✅" : "❌"} ${esc(x.title)}：${esc(x.message)}<span class="muted">（${esc(x.started)}・${esc(x.method || "")}）</span></summary>${stepsHtml(x.results)}</details>`).join("") : "";
+      <summary>${x.ok ? "✅" : "❌"} ${esc(x.title)}：${esc(x.message)}<span class="muted">（${esc(x.started)}・${esc(x.method || "")}）</span></summary>${stepsHtml(x.results)}</details>`).join("")
+    : '<div class="muted actempty" style="padding:20px 10px">這次啟動後還沒有執行過修復動作。</div>';
 }
 loadActions();
 refresh();
