@@ -170,6 +170,21 @@ def activity(root, quick=False):
     return info
 
 
+def cloud_only(root):
+    """整個資料夾（包括 node_modules 等）有幾個「僅限線上」的檔案、合計多大。只用 lstat，不會觸發下載。"""
+    n = size = 0
+    for dp, dns, fns in os.walk(root):
+        for f in fns:
+            try:
+                st = os.lstat(os.path.join(dp, f))
+            except OSError:
+                continue
+            if is_dataless(st):
+                n += 1
+                size += st.st_size
+    return n, size
+
+
 def cloud_download(root, progress=None):
     """把專案裡「僅限線上」的檔案下載到這台電腦（讀第一個 byte 就會觸發 iCloud / File Provider 下載）。
     8 個同時下載，每個檔案最多等 2 分鐘、重試 3 次。回傳還沒下載到的檔案清單。

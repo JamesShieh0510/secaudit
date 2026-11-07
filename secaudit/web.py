@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import acks as acks_mod
 from .app import DATA, REPORTS, Engine, load_config, load_targets, normalize_host, save_config
+from .app import _read as _app_read
 from .core import home_rel
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -150,6 +151,13 @@ def make_handler(engine: Engine, token: str, port: int):
             if u.path == "/":
                 with open(os.path.join(STATIC, "index.html"), "rb") as fh:
                     return self._send(200, fh.read(), "text/html; charset=utf-8")
+            if u.path == "/api/resources":
+                # 資源監控 24 小時內的事件（頁首「常駐程式 / CPU / 記憶體」卡片點進來看）
+                d = _app_read(os.path.join(DATA, "resources.json"), {})
+                cut = time.time() - 86400
+                ev = [e for e in d.get("events", []) if e.get("ts", 0) >= cut]
+                return self._send(200, {"events": ev[::-1], "baseline": d.get("baseline", ""),
+                                        "status": engine.status.get("resources") or {}})
             if u.path in VENDOR:
                 with open(os.path.join(STATIC, u.path[len("/static/"):]), "rb") as fh:
                     data = fh.read()
@@ -333,6 +341,9 @@ def make_handler(engine: Engine, token: str, port: int):
                 if text is None:
                     return self._send(404, {"error": "預覽已過期，請重新預覽"})
                 return self._send(200, {"markdown": text})
+            if path == "/api/actions/cancel":
+                from . import actions
+                return self._send(200, {"ok": actions.cancel()})
             if path == "/api/actions/run":
                 # 會修改系統：伺服器端一定先跳 Touch ID，通過後才執行預覽過的步驟
                 from . import actions

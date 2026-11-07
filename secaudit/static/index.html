@@ -47,8 +47,15 @@ section.tab{display:none}section.tab.on{display:block}
 .metric .v{font-size:22px;font-weight:700;line-height:1.3;margin:2px 0;font-variant-numeric:tabular-nums;white-space:nowrap}
 .metric .v small{font-size:13px;font-weight:500;color:var(--muted);margin-left:2px}
 .metric .s{font-size:12px;line-height:1.4;color:var(--muted);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.metric.go{cursor:pointer;transition:border-color .15s,transform .15s}.metric.go:hover{border-color:var(--accent);transform:translateY(-1px)}
+.metric.go:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .metric.warn{border-color:var(--medium)}.metric.warn .flag{color:var(--medium);font-weight:600}
 .keyfold>summary{cursor:pointer;font-weight:600}
+.lanes{margin-top:8px;display:flex;flex-direction:column;gap:3px}
+.lane{display:grid;grid-template-columns:22px minmax(120px,1.2fr) 2fr auto;gap:8px;align-items:baseline;font-size:13px;padding:3px 6px;border-radius:6px;background:var(--card)}
+.lane span{text-align:left}.lane .ln{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.lane .lp{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lane .lt{white-space:nowrap;font-variant-numeric:tabular-nums}
+@media (max-width:600px){.lane{grid-template-columns:22px 1fr auto}.lane .lp{grid-column:2/4}}
 .actwrap{display:grid;grid-template-columns:270px minmax(0,1fr);gap:14px;margin-top:12px;align-items:start}
 .actlist{display:flex;flex-direction:column;gap:6px}
 .actlist button{text-align:left;display:flex;flex-direction:column;gap:2px;padding:10px 12px;width:100%}
@@ -219,6 +226,12 @@ body.noscroll{overflow:hidden}
   </div>
   </section>
 </div>
+<div class="modal" id="infoModal" role="dialog" aria-modal="true" aria-labelledby="infoTitle">
+  <div class="box" style="max-width:820px;align-self:center;max-height:100%">
+    <div class="bar"><b id="infoTitle" style="flex:1"></b><button id="infoClose" aria-label="關閉">✕ 關閉</button></div>
+    <div id="infoBody" style="overflow:auto;padding:14px 16px;flex:1;min-height:0"></div>
+  </div>
+</div>
 <div class="modal" id="rptModal" role="dialog" aria-modal="true" aria-labelledby="rptTitle">
   <div class="box">
     <div class="bar"><b id="rptTitle" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></b>
@@ -254,6 +267,54 @@ function renderMermaid(root) {
   mermaidReady.then(() => mermaid.run({nodes})).then(() => root.querySelectorAll(".mmd-note").forEach(x => x.remove()))
     .catch(e => root.querySelectorAll(".mmd-note").forEach(x => x.textContent = "⚠️ " + e.message + "，以下顯示原始碼"));
 }
+// 頁首指標卡片點進來的細節（即時監看、資源監控事件）
+const SEV_TXT = {high: "高", medium: "中", low: "低", info: "只記錄"};
+function openInfo(title, html) {
+  $("#infoTitle").textContent = title; $("#infoBody").innerHTML = html;
+  $("#infoModal").classList.add("on"); document.body.classList.add("noscroll"); $("#infoClose").focus();
+}
+function closeInfo() { $("#infoModal").classList.remove("on"); if (!rptModal.classList.contains("on")) document.body.classList.remove("noscroll"); }
+async function showMetric(go) {
+  if (go.startsWith("tab:")) { showTab(go.slice(4)); $("#tabs").scrollIntoView({block: "start", behavior: "smooth"}); return; }
+  if (go === "watch") {
+    const w = (state && state.status && state.status.watch) || {};
+    const pend = w.pending_items || [], hist = w.history || [];
+    openInfo("⚡ 即時監看", `<div class="muted">每 ${esc(w.interval ?? 10)} 秒檢查 ${esc(w.paths)} 處關鍵位置的大小、修改時間、inode（不讀內容）。
+        偵測到變動後先等 ${esc(w.debounce ?? 20)} 秒沒有新變動（最久 ${esc(w.max_wait ?? 90)} 秒）再跑一次不連網的快速掃描，
+        把同一批變動合併成一則通知。只改了修改時間、內容沒變的，掃描後不會算成變動。</div>
+      <h3 style="font-size:15px;margin:14px 0 6px">變動合併中（${pend.length}）</h3>
+      ${pend.length ? `<table><tr><th>位置</th><th>第一次偵測到</th></tr>${pend.map(x => `<tr><td>${esc(x.label)}</td><td>${esc(x.since)}</td></tr>`).join("")}</table>
+        <div class="muted" style="margin-top:4px">像 Chrome 擴充功能、~/Library 隱藏資料夾這類常常在變的位置，會反覆出現在這裡；等一下就會被掃描。</div>`
+        : '<div class="muted">目前沒有。</div>'}
+      <h3 style="font-size:15px;margin:14px 0 6px">最近的觸發（${hist.length}）</h3>
+      ${hist.length ? `<table><tr><th>時間</th><th>變動的位置</th><th>掃描結果</th></tr>${hist.map(h => `<tr><td style="white-space:nowrap">${esc(h.time.slice(5))}</td>
+          <td>${esc(h.items.join("、"))}</td><td>${h.error ? `<span style="color:var(--high)">錯誤：${esc(h.error)}</span>` :
+          h.report ? `${esc(h.changes)} 項變動・<a href="#reports/${esc(h.report)}" style="color:var(--info)">開啟報告</a>` : '<span class="muted">沒有實際變動（只是時間改了）</span>'}</td></tr>`).join("")}</table>`
+        : `<div class="muted">常駐程式重啟後還沒有觸發。${w.last_trigger ? "上次觸發：" + esc(w.last_trigger) : ""}</div>`}`);
+    return;
+  }
+  if (go === "resources") {
+    openInfo("📈 資源監控", '<div class="muted">載入中…</div>');
+    const r = await api("/api/resources"), st = r.status || {};
+    if (!r.events) { $("#infoBody").innerHTML = '<div class="muted">常駐程式還是舊版本，重啟 secaudit 後就能看到事件細節。</div>'; return; }
+    $("#infoBody").innerHTML = `<div class="muted">每分鐘取樣 CPU、記憶體壓力、swap 和所有程式。最後一次 ${esc(st.last || "—")}：
+        CPU ${esc(st.cpu ?? "-")}、記憶體壓力 ${esc(st.pressure ?? "-")}、swap ${esc(st.swap_gb ?? "-")} GB、已知常駐程式 ${esc(st.known ?? "-")} 個。
+        基準建立於 ${esc(r.baseline || "—")}。同一個程式的同一種事件 6 小時內只記一次。</div>
+      <h3 style="font-size:15px;margin:14px 0 6px">24 小時內的事件（${r.events.length}）</h3>
+      ${r.events.length ? r.events.map(e => `<details class="note" style="margin:6px 0">
+          <summary style="cursor:pointer"><span class="kind" style="background:var(--${e.severity === "info" ? "code" : e.severity});color:${e.severity === "info" ? "var(--muted)" : "#fff"}">${esc(SEV_TXT[e.severity] || e.severity)}</span>
+          ${esc(e.time.slice(5, 16))}　<b>${esc(e.title)}</b></summary>
+          <div style="white-space:pre-wrap;word-break:break-all;font-size:13px;margin-top:6px">${esc(e.detail || "")}</div>
+          ${e.path ? `<div class="muted" style="margin-top:4px"><code>${esc(e.path)}</code></div>` : ""}</details>`).join("")
+        : '<div class="muted">24 小時內沒有異常 👍</div>'}`;
+  }
+}
+document.getElementById("metrics").addEventListener("click", e => { const c = e.target.closest(".metric[data-go]"); if (c) showMetric(c.dataset.go); });
+document.getElementById("metrics").addEventListener("keydown", e => { const c = e.target.closest(".metric[data-go]"); if (c && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); showMetric(c.dataset.go); } });
+document.getElementById("infoClose").onclick = closeInfo;
+document.getElementById("infoModal").addEventListener("click", e => { if (e.target.id === "infoModal") closeInfo(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeInfo(); });
+document.getElementById("infoBody").addEventListener("click", e => { if (e.target.closest('a[href^="#reports/"]')) closeInfo(); });
 // SOP 每次切到分頁都重新抓，設定改過就會反映
 async function loadSop() {
   try {
@@ -373,33 +434,35 @@ function renderStatus(st) {
 function renderMetrics(st) {
   const cfg = (state && state.config) || {};
   const plain = h => String(h || "").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ");
-  const card = (k, v, sub, opt = {}) => `<div class="metric${opt.warn ? " warn" : ""}" title="${esc(opt.title || plain(k + "：" + v.replace(/<small>/g, "") + "\n" + sub))}">
+  const card = (k, v, sub, opt = {}) => `<div class="metric${opt.warn ? " warn" : ""}${opt.go ? " go" : ""}" ${opt.go ? `data-go="${opt.go}" role="button" tabindex="0"` : ""} title="${esc(opt.title || plain(k + "：" + v.replace(/<small>/g, "") + "\n" + sub) + (opt.go ? "\n（點一下看細節）" : ""))}">
     <div class="k">${k}</div><div class="v">${v}</div><div class="s">${sub || "&nbsp;"}</div></div>`;
   // 「11-08 03:00」→ 時間大字、日期小字，窄卡片也放得下
   const hm = t => { const m = String(t || "").match(/^(\d\d-\d\d) (\d\d:\d\d)/); return m ? `${m[2]}<small>${m[1]}</small>` : esc(String(t || "—")); };
   const out = [];
   if (st.next_quick) {
-    out.push(card("🔁 下次快速掃描", hm(st.next_quick), `每 ${esc(cfg.quick_interval_min ?? "?")} 分鐘${st.last_check ? "・上次 " + esc(String(st.last_check).slice(-8, -3)) : ""}`));
-    out.push(card("🗂 下次完整掃描", hm(st.next_full), st.last_report ? "上次報告 " + esc(st.last_report) : ""));
+    out.push(card("🔁 下次快速掃描", hm(st.next_quick), `每 ${esc(cfg.quick_interval_min ?? "?")} 分鐘${st.last_check ? "・上次 " + esc(String(st.last_check).slice(-8, -3)) : ""}`, {go: "tab:reports"}));
+    out.push(card("🗂 下次完整掃描", hm(st.next_full), st.last_report ? "上次報告 " + esc(st.last_report) : "", {go: "tab:reports"}));
   }
   if (st.watch) {
     const w = st.watch, lt = String(w.last_trigger || ""), at = lt.split("（")[0];
     out.push(card("⚡ 即時監看", `${esc(w.paths)}<small>處</small>`,
-      w.pending ? `<span class="flag">${esc(w.pending)} 處變動待確認</span>` : (at ? "上次觸發 " + esc(at) : `每輪 ${esc(w.cost_ms ?? "-")} ms`),
-      {warn: !!w.pending, title: (lt ? "上次觸發 " + lt + "\n" : "") + "每輪 " + (w.cost_ms ?? "-") + " ms"}));
+      w.pending ? `<span class="flag">${esc(w.pending)} 處變動合併中</span>` : (at ? "上次觸發 " + esc(at) : `每輪 ${esc(w.cost_ms ?? "-")} ms`),
+      {warn: !!w.pending, go: "watch"}));
   }
   if (st.resources) {
     const r = st.resources, cpu = String(r.cpu ?? "-").replace(/%$/, "");
     out.push(card("📈 CPU", `${esc(cpu)}<small>%</small>`, `整台使用率・${esc(r.last || "")} 取樣`,
-      {warn: +cpu >= 80, title: "資源監控每分鐘取樣，最後一次 " + (r.last || "")}));
+      {warn: +cpu >= 80, go: "resources"}));
     out.push(card("🧠 記憶體", esc(r.pressure ?? "-"), `記憶體壓力・swap ${esc(r.swap_gb)} GB`,
-      {warn: r.pressure && r.pressure !== "正常", title: "macOS 記憶體壓力：正常 / 警告 / 緊急；swap 是已經換到磁碟的記憶體"}));
+      {warn: r.pressure && r.pressure !== "正常", go: "resources"}));
     out.push(card("🧩 常駐程式", `${esc(r.known)}<small>個</small>`,
       r.events ? `<span class="flag">24 小時內 ${esc(r.events)} 件事件</span>` : "24 小時內沒有異常",
-      {warn: !!r.events, title: "資源監控每分鐘取樣，最後一次 " + (r.last || "")}));
+      {warn: !!r.events, go: "resources"}));
   }
+  if (actRunningInfo) out.unshift(card("🛠 修復動作執行中", actRunningInfo.total ? `${actRunningInfo.done}<small>/ ${actRunningInfo.total}</small>` : "…",
+    esc(actRunningInfo.current || actRunningInfo.phase || ""), {warn: true, go: "tab:fix"}));
   if (st.next_reminder) out.push(card("📋 未處理提醒", hm(st.next_reminder), st.escalated ? '<span class="flag">有逾期高風險，每天提醒</span>' : "每週一次",
-    {warn: !!st.escalated}));
+    {warn: !!st.escalated, go: "tab:reports"}));
   $("#metrics").innerHTML = out.join("");
 }
 
@@ -770,23 +833,48 @@ async function runAction(method) {
   $("#actPlan").innerHTML = '<div class="muted actempty">⏳ 已開始執行，進度顯示在上方。完成後的結果在下方「最近的執行結果」。</div>';
   $("#actStatus").scrollIntoView({block: "nearest"}); loadActions();
 }
-let actRunning = false, actWasRunning = false;
-const stepsHtml = rs => (rs || []).map(x => `<details><summary>${x.ok ? "✅" : "❌"} ${esc(x.label)}</summary><pre style="white-space:pre-wrap;font-size:12px;max-height:260px;overflow:auto">${esc(x.output)}</pre></details>`).join("");
+let actRunning = false, actWasRunning = false, actRunningInfo = null;
+const stepsHtml = rs => (rs || []).map(x => `<details><summary>${x.ok ? "✅" : x.skipped ? "⏭" : "❌"} ${esc(x.label)}</summary><pre style="white-space:pre-wrap;font-size:12px;max-height:260px;overflow:auto">${esc(x.output)}</pre></details>`).join("");
 // 一次只能執行一個修復動作（伺服器也會拒絕）：執行中時停用所有「執行」按鈕
 function lockRunButtons() {
   const n0 = document.querySelectorAll(".actStep:checked").length;
   ["#actRun", "#actRunY"].forEach(id => { const b = $(id); if (b) { b.disabled = actRunning || !n0; b.title = actRunning ? "目前有修復動作執行中，請等它完成" : ""; } });
   const n = $("#actBusy"); if (n) n.style.display = actRunning ? "" : "none";
 }
+// 批次並行時：每個封存 worker、每個雲端下載各一行，附「這一步已經多久」
+const ago = t => { const x = Math.max(0, Math.round(Date.now() / 1000 - t)); return x >= 60 ? `${Math.floor(x / 60)} 分 ${x % 60} 秒` : `${x} 秒`; };
+function lanes(s) {
+  const w = Object.entries(s.workers || {}).sort(), d = Object.entries(s.downloads || {});
+  if (!w.length && !d.length) return "";
+  const row = (icon, name, x) => `<div class="lane"><span class="li">${icon}</span><span class="ln" title="${esc(name)}">${esc(name.split("/").slice(-2).join("/"))}</span>
+    <span class="lp">${esc(x.phase || "")}</span><span class="muted lt">${x.since ? ago(x.since) : ""}</span></div>`;
+  return `<div class="lanes">${w.map(([k, x]) => row("📦", x.project || k, x)).join("")}${d.map(([k, x]) => row("☁️", k, x)).join("")}
+    ${s.phase && /直接封存/.test(s.phase) ? `<div class="muted" style="margin-top:2px">${esc(s.phase)}</div>` : ""}</div>`;
+}
 function renderActStatus(s) {
   // 執行中才顯示即時進度；完成的結果放在下方「最近的執行結果」，不會被下一次執行蓋掉
   if (s.running) {
     $("#actStatus").style.display = "";
-    $("#actStatus").innerHTML = `⏳ ${esc(s.title)}（${esc(s.method || "")}）：${esc(s.phase)}${s.phase === "等待 Touch ID" ? "（請看螢幕上的系統對話框）" : ""}` + stepsHtml(s.results);
+    const rs = s.results || [], ok = rs.filter(x => x.ok).length, skip = rs.filter(x => x.skipped).length, bad = rs.length - ok - skip, tot = s.total || 0;
+    const pct = tot ? Math.round(100 * (s.done || 0) / tot) : 0;
+    const secs = s.step_since ? Math.max(0, Math.round(Date.now() / 1000 - s.step_since)) : 0;
+    const dur = secs >= 60 ? `${Math.floor(secs / 60)} 分 ${secs % 60} 秒` : `${secs} 秒`;
+    const keep = $("#actStatus").querySelector("details[open]") ? " open" : "";
+    $("#actStatus").innerHTML = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <b>⏳ ${esc(s.title)}</b><span class="muted">${esc(s.method || "")}・${esc(s.started || "")} 開始</span><span style="flex:1"></span>
+        <button type="button" id="actStop" ${s.cancel ? "disabled" : ""} style="${"total" in s ? "" : "display:none"}">${s.cancel ? "停止中…（正在做的做完就停）" : "⏹ 停止（正在做的做完後）"}</button></div>
+      ${tot ? `<div class="prog" style="margin:8px 0 4px"><span style="width:${pct}%;animation:none;margin:0"></span></div>
+      <div class="muted">已完成 ${s.done || 0} / ${tot}・✅ 成功 ${ok}・❌ 失敗 ${bad}${skip ? `・⏭ 未執行 ${skip}` : ""}・${pct}%</div>` : ""}
+      ${lanes(s) || `<div style="margin-top:6px">▶ ${esc(s.phase)}${s.phase === "等待 Touch ID" ? "（請看螢幕上的系統對話框）" : ""}</div>`}
+      <div class="muted">${s.step_since && !lanes(s) ? `這一步已經 ${dur}・` : ""}畫面每 1.5 秒更新（${new Date().toLocaleTimeString()}）</div>
+      ${rs.length ? `<details style="margin-top:6px"${keep}><summary class="muted" style="cursor:pointer">已完成的項目（${rs.length}）</summary>${stepsHtml(rs.slice().reverse())}</details>` : ""}`;
+    if ($("#actStop")) $("#actStop").onclick = async () => { $("#actStop").disabled = true; await api("/api/actions/cancel", {}); loadActions(); };
   } else if (actWasRunning) {
     $("#actStatus").style.display = "none";
   }
-  $("#tbFix").textContent = s.running ? "執行中" : "";
+  $("#tbFix").textContent = s.running ? (s.total ? `${s.done || 0}/${s.total}` : "執行中") : "";
+  actRunningInfo = s.running ? s : null;
+  if (state) renderMetrics(state.status);
   actWasRunning = s.running;
 }
 function renderRecent(list) {

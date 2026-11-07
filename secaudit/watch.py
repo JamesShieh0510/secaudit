@@ -150,7 +150,8 @@ class Watcher:
 
     def run(self):
         self._rebuild()
-        self.engine.status["watch"] = {"paths": len(self.items), "last_trigger": "", "pending": 0}
+        self.engine.status["watch"] = {"paths": len(self.items), "last_trigger": "", "pending": 0, "pending_items": [],
+                                       "history": [], "interval": self.interval, "debounce": self.debounce, "max_wait": self.max_wait}
         while True:
             t0 = time.time()
             changed = self.poll()
@@ -159,7 +160,9 @@ class Watcher:
                 self.pending.setdefault(c, now)
                 self.last_change = now
             ws = self.engine.status["watch"]
-            ws.update(paths=len(self.items), pending=len(self.pending), cost_ms=int((time.time() - t0) * 1000))
+            ws.update(paths=len(self.items), pending=len(self.pending), cost_ms=int((time.time() - t0) * 1000),
+                      pending_items=[{"label": k, "since": time.strftime("%H:%M:%S", time.localtime(v))}
+                                     for k, v in sorted(self.pending.items(), key=lambda x: x[1])])
             if self.pending:
                 first = min(self.pending.values())
                 quiet = now - self.last_change >= self.debounce
@@ -168,5 +171,11 @@ class Watcher:
                     self.pending = {}
                     ws["last_trigger"] = "%s（%s）" % (time.strftime("%H:%M:%S"), "、".join(trig[:3]))
                     print("[watch] 偵測到變動：%s → 執行快速掃描" % "、".join(trig), flush=True)
+                    before = self.engine.status.get("last_report")
                     self.engine.scan("quick", source="watch", trigger=trig, online=False)  # 不連網，幾秒內完成
+                    st = self.engine.status
+                    new = st.get("last_report") if st.get("last_report") != before else ""
+                    ws["history"] = ([{"time": time.strftime("%Y-%m-%d %H:%M:%S"), "items": trig[:10],
+                                       "changes": st.get("last_changes", 0) if new else 0, "report": new or "",
+                                       "error": st.get("last_error", "")}] + ws.get("history", []))[:10]
             time.sleep(self.interval)

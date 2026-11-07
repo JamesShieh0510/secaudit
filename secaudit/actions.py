@@ -37,7 +37,15 @@ _plans = {}
 _lock = threading.Lock()
 _lock_bin = threading.Lock()
 status = {"running": False, "phase": "", "action": "", "title": "", "started": "", "finished": "", "ok": None,
-          "message": "", "results": []}
+          "message": "", "results": [], "done": 0, "total": 0, "current": "", "step_since": 0, "cancel": False}
+
+
+def cancel():
+    """要求停止：目前這一步做完後停下，剩下的步驟標成「未執行」（不會中斷到一半，例如刪除資料夾中途）。"""
+    if not status["running"]:
+        return False
+    status["cancel"] = True
+    return True
 recent = []   # 最近 5 次執行的完整結果（含輸出），只放記憶體；data/actions.jsonl 只記摘要
 
 
@@ -706,6 +714,61 @@ def _op_item_create_password(vault, title, password, note):
     return iid if re.match(r"^[a-z0-9]{10,40}$", iid) else ""
 
 
+# ---------------------------------------------------------------- 處理紀錄（留在被處理的資料夾裡）
+JOURNAL_NAME = "secaudit-處理紀錄.md"
+_journal_lock = threading.Lock()
+
+
+def _journal(md_path, title, sections):
+    """在被處理的檔案旁邊留一份 Markdown：處理前 / 處理後 / 怎麼還原，之後找檔案或交給 AI 時有脈絡。
+    同一個檔案會一直往後加（新的在最後）。不含任何機密值；寫不進去（例如唯讀資料夾）不影響修復結果。回傳寫入的路徑或空字串。"""
+    head = ("# secaudit 處理紀錄\n\n> 這個檔案由 secaudit 自動產生。每次修復動作處理了這個資料夾裡的東西，都會在這裡記下"
+            "處理前、處理後與還原方式，方便之後找檔案，或交給 AI 了解當時的脈絡。不含任何機密值（金鑰都已遮罩），可以安全保留。\n")
+    out = ["", "## %s　%s" % (time.strftime("%Y-%m-%d %H:%M:%S"), title), ""]
+    for name, lines in sections:
+        lines = [x for x in lines if x]
+        if lines:
+            out += ["**%s**" % name, ""] + ["- %s" % x for x in lines] + [""]
+    try:
+        with _journal_lock:
+            new = not os.path.exists(md_path)
+            fd = os.open(md_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as fh:
+                fh.write((head if new else "") + "\n".join(out))
+        return md_path
+    except OSError:
+        return ""
+
+
+def _journal_basics():
+    return ["執行：secaudit 修復動作（%s 授權）" % (status.get("method") or "—"), "電腦：%s" % __import__("socket").gethostname()]
+
+
+def _finding_lines(f):
+    f = f or {}
+    sev = {"high": "高", "medium": "中", "low": "低"}.get(f.get("severity"), f.get("severity", ""))
+    return ["偵測到的問題：%s（風險 %s，規則 %s）" % (f.get("title", ""), sev, f.get("rule", "")) if f.get("title") else "",
+            "細節（值已遮罩）：%s" % f["detail"][:400] if f.get("detail") else ""]
+
+
+def _op_create_pw_err(vault, title, password, note):
+    """同 _op_item_create_password，另外回傳 op 的錯誤訊息（stderr；op 不會把密碼寫進 stderr）。"""
+    tpl = {"title": title, "category": "PASSWORD", "tags": ["secaudit"],
+           "fields": [{"id": "password", "type": "CONCEALED", "purpose": "PASSWORD", "label": "password", "value": password},
+                      {"id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain", "value": note}]}
+    ok, out, err = _quiet_err(["op", "item", "create", "--vault", vault, "--format", "json", "-"],
+                              json.dumps(tpl).encode(), env=_op_env())
+    iid = ""
+    if ok:
+        try:
+            iid = str(json.loads(out.decode()).get("id", ""))
+        except ValueError:
+            iid = ""
+    del out
+    err = err.replace(password, "****") if err else ""
+    return (iid, "") if re.match(r"^[a-z0-9]{10,40}$", iid) else ("", err[:200])
+
+
 def _dmg_rel(path):
     """DMG 內的相對路徑：home/… 或 volumes/…，一定在掛載點底下，不會有 ..。"""
     rp = os.path.realpath(path)
@@ -832,6 +895,15 @@ def _secure_dmg(plan, steps):
             continue
         try:
             os.remove(s["path"])
+            sha, mt, sz = s["state"]
+            _journal(os.path.join(os.path.dirname(s["path"]), JOURNAL_NAME), "含機密的檔案 → 加密 DMG：%s" % os.path.basename(s["path"]), [
+                ("處理前", ["檔案：`%s`" % s["path"], "大小 %d bytes・修改時間 %s・SHA-256 %s" % (
+                    sz, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mt / 1e9)), sha)] + _finding_lines(s.get("finding"))),
+                ("處理後", ["已移進加密 DMG `%s`（DMG 內的路徑 `%s`）" % (dmg, rels[s["id"]]), "原檔已刪除",
+                           "密碼：1Password vault「%s」的「%s」" % (vault, title)]),
+                ("怎麼還原", ["雙擊 DMG、輸入 1Password 裡的密碼，把 `%s` 複製回 `%s`" % (rels[s["id"]], s["path"]),
+                             "提醒：封存不等於撤銷，這個機密如果曾經外流，請到服務後台撤銷並更換"]),
+                ("相關資訊", _journal_basics() + ["依據報告：%s" % (plan.get("report") or "—")])])
             res.append((s, True, "已封存進 %s 並刪除原檔" % home_rel(dmg)))
         except OSError as e:
             res.append((s, False, "已封存，但刪除原檔失敗：%s" % e))
@@ -938,6 +1010,14 @@ def _secure_1p(plan, s):
         os.remove(s["path"])
     except OSError as e:
         return False, "已存進 1Password「%s」，但刪除原檔失敗：%s" % (title, e)
+    sha, mt, sz = s["state"]
+    _journal(os.path.join(os.path.dirname(s["path"]), JOURNAL_NAME), "含機密的檔案 → 1Password：%s" % os.path.basename(s["path"]), [
+        ("處理前", ["檔案：`%s`" % s["path"], "大小 %d bytes・修改時間 %s・SHA-256 %s" % (
+            sz, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mt / 1e9)), sha)] + _finding_lines(s.get("finding"))),
+        ("處理後", ["已存成 1Password 文件「%s」（vault %s），下載回來比對 sha256 一致" % (title, plan["vault"]), "原檔已刪除"]),
+        ("怎麼還原", ["`op document get %s --vault '%s' --out-file '%s'`" % (did, plan["vault"], s["path"]),
+                     "提醒：封存不等於撤銷，這個機密如果曾經外流，請到服務後台撤銷並更換"]),
+        ("相關資訊", _journal_basics() + ["依據報告：%s" % (plan.get("report") or "—")])])
     return True, "已存進 1Password「%s」（vault %s）並刪除原檔" % (title, vault)
 
 
@@ -1043,10 +1123,12 @@ def _project_ok(root):
     return rp not in tg and not any(_inside(t, rp) for t in tg)
 
 
-def _tree(root):
+def _tree(root, progress=None):
     """{相對路徑: (類型, 大小, sha256 或 symlink 目標)}，略過 .DS_Store（Finder 打開資料夾就會改寫）。"""
     out = {}
     for dp, dns, fns in os.walk(root):
+        if progress and len(out) and len(out) % 500 < len(dns) + len(fns):
+            progress(len(out))
         for n in dns + fns:
             if n == ".DS_Store":
                 continue
@@ -1114,6 +1196,8 @@ def plan_archive_projects():
                  "大小 %s" % P.human_size(a.get("size")), "Git：" + P.git_note(a),
                  "封存到 %s" % home_rel(dmg), "⚠️ 驗證成功後會刪除整個原資料夾"]
         default = True
+        if P.in_cloud(a["root"]):
+            a["dataless"], a["dataless_bytes"] = P.cloud_only(a["root"])     # 包括 node_modules，封存需要整個資料夾
         if a["dataless"]:
             notes.append("☁️ 有 %d 個檔案（約 %s）只在雲端，會先下載到這台電腦再封存；任何一個下載不到就不封存" % (
                 a["dataless"], P.human_size(a.get("dataless_bytes"))))
@@ -1162,8 +1246,9 @@ def plan_archive_projects():
             "reason": "執行 secaudit 修復：把閒置專案封存成加密 DMG 並刪除原資料夾（共 %d 個專案）" % len(steps)}
 
 
-def _archive_project(plan, s):
-    """封存一個專案；回傳 (ok, 摘要)。"""
+def _archive_project(plan, s, ph=None):
+    """封存一個專案；回傳 (ok, 摘要)。ph：回報目前步驟（批次並行時每個 worker 各自一行進度）。"""
+    ph = ph or (lambda t: status.update(phase=t))
     import secrets as _secrets
     import socket
     import tempfile
@@ -1171,31 +1256,38 @@ def _archive_project(plan, s):
     root, vault = s["path"], plan["vault"]
     if not (vault_ok(vault) and _project_ok(root)):
         return False, "設定的 vault 不合法，或資料夾不在允許封存的範圍，沒有處理"
-    status["phase"] = "%s：確認還是閒置的" % s["label"]
+    ph("%s：確認還是閒置的" % s["label"])
     a = P.activity(root, quick=True)
     a.update({k: (s.get("info") or {}).get(k) for k in ("remote", "dirty", "unpushed", "has_upstream")})
     if a["last_ts"] > s["last_ts"]:
         return False, "預覽之後專案有更新（%s，%s），沒有處理" % (a["last"], a["last_what"])
     if P.cwd_users([root])[root]:
         return False, "有程式正開在這個資料夾裡（%s），沒有處理" % "、".join(P.cwd_users([root])[root][:3])
+    if P.in_cloud(root):
+        a["dataless"], a["dataless_bytes"] = P.cloud_only(root)    # activity() 略過 node_modules，這裡要整個資料夾
     if a["dataless"]:
         if not P.in_cloud(root):
             return False, "有 %d 個檔案只在雲端（佔位檔），沒有處理" % a["dataless"]
-        status["phase"] = "%s：從雲端下載 %d 個檔案（約 %s）" % (s["label"], a["dataless"], P.human_size(a.get("dataless_bytes")))
+        ph("%s：從雲端下載 %d 個檔案（約 %s）" % (s["label"], a["dataless"], P.human_size(a.get("dataless_bytes"))))
         lab = s["label"]
-        bad = P.cloud_download(root, lambda d, n: status.update(phase="%s：從雲端下載檔案 %d / %d" % (lab, d, n)))
+        bad = P.cloud_download(root, lambda d, n: ph("%s：從雲端下載檔案 %d / %d" % (lab, d, n)))
         if bad:
             return False, "有 %d 個檔案從雲端下載不到（例如 %s），沒有封存；可以稍後再試" % (len(bad), home_rel(bad[0]))
-    if not plan.get("_vault_id"):
-        status["phase"] = "確認 1Password vault 只有你能存取（請留意 1Password 的授權視窗）"
-        ok, why, vid = _vault_private(vault)
-        if not ok:
-            return False, why + "；沒有處理"
-        plan["_vault_id"] = vid
+    with _op_lock:      # 並行時一次只跑一個 op（避免同時跳出好幾個 1Password 授權視窗）
+        if plan.get("_op_failed"):
+            return False, "未執行：1Password 無法使用，已停止後面的專案"
+        if not plan.get("_vault_id"):
+            ph("確認 1Password vault 只有你能存取（請留意 1Password 的授權視窗）")
+            ok, why, vid = _vault_private(vault)
+            if not ok:
+                plan["_op_failed"] = True
+                return False, why + "；沒有處理"
+            plan["_vault_id"] = vid
     vid = plan["_vault_id"]
-    status["phase"] = "%s：計算每個檔案的 sha256" % s["label"]
+    ph("%s：計算每個檔案的 sha256" % s["label"])
     try:
-        before = _tree(root)
+        lab = s["label"]
+        before = _tree(root, lambda n: ph("%s：計算每個檔案的 sha256（已讀 %d 個）" % (lab, n)))
     except OSError as e:
         return False, "讀取原資料夾失敗：%s；沒有處理" % e
     nfile = sum(1 for v in before.values() if v[0] == "f")
@@ -1220,35 +1312,51 @@ def _archive_project(plan, s):
         "還原：雙擊 DMG、輸入這個項目的密碼，把裡面的檔案複製回「完整路徑」。",
         "提醒：封存不等於撤銷。專案裡的金鑰如果曾經提交到 git 或外流，請到各服務撤銷並更換。"])
     pw = _secrets.token_urlsafe(32)
-    status["phase"] = "%s：把 DMG 密碼存進 1Password" % s["label"]
-    iid = _op_item_create_password(vid, title, pw, note)
-    if not iid:
-        return fail("無法把密碼存進 1Password（可能沒有授權）")
-    left.append("1Password 項目「%s」" % title)
-    ok, got = _quiet(["op", "item", "get", iid, "--vault", vid, "--fields", "label=password", "--reveal"], env=_op_env())
-    same = ok and got.decode().strip() == pw
-    del got
+    ph("%s：把 DMG 密碼存進 1Password" % s["label"])
+    with _op_lock:
+        if plan.get("_op_failed"):
+            return False, "未執行：1Password 存密碼失敗，已停止後面的專案；原資料夾沒有動"
+        iid, err = _op_create_pw_err(vid, title, pw, note)
+        if not iid:
+            plan["_op_failed"] = True
+            return fail("無法把密碼存進 1Password（%s）" % (err or "可能是 1Password 的授權視窗沒有按允許，或授權已過期"))
+        left.append("1Password 項目「%s」" % title)
+        ok, got = _quiet(["op", "item", "get", iid, "--vault", vid, "--fields", "label=password", "--reveal"], env=_op_env())
+        same = ok and got.decode().strip() == pw
+        del got
     if not same:
         return fail("1Password 讀回的密碼和產生的不一致")
-    status["phase"] = "%s：建立加密 DMG（%s，可能要幾分鐘）" % (s["label"], P.human_size(size))
+    ph("%s：建立加密 DMG（%s，可能要幾分鐘）" % (s["label"], P.human_size(size)))
     vol = re.sub(r"[^\w.-]+", "-", os.path.basename(root)).strip("-")[:27] or "project"
-    ok, _ = _quiet(["hdiutil", "create", "-quiet", "-srcfolder", root, "-fs", "APFS", "-format", "UDZO",
-                    "-encryption", "AES-256", "-stdinpass", "-volname", vol, dmg], pw.encode(), timeout=4 * 3600)
+    argv = ["hdiutil", "create", "-quiet", "-srcfolder", root, "-fs", "APFS", "-format", "UDZO",
+            "-encryption", "AES-256", "-stdinpass", "-volname", vol, dmg]
+    err = ""
+    for attempt in range(2):          # 同時跑好幾個 hdiutil 時偶爾會暫時失敗（資源忙碌），重試一次
+        ok, _, err = _quiet_err(argv, pw.encode(), timeout=4 * 3600)
+        if ok and os.path.isfile(dmg):
+            break
+        if os.path.isfile(dmg):
+            os.remove(dmg)
+        time.sleep(3)
     if os.path.isfile(dmg):
         os.chmod(dmg, 0o600)
         left.append("DMG %s" % home_rel(dmg))
     if not ok or not os.path.isfile(dmg):
-        return fail("建立 DMG 失敗（可能是空間不夠或有讀不到的檔案）")
+        return fail("建立 DMG 失敗（%s）" % (err.replace(pw, "****")[:200] or "可能是空間不夠或有讀不到的檔案"))
     os.makedirs(SECURE_TMP, mode=0o700, exist_ok=True)
     mnt = tempfile.mkdtemp(prefix="mnt-", dir=SECURE_TMP)
     try:
-        status["phase"] = "%s：用 1Password 裡的密碼唯讀掛載 DMG，逐檔比對" % s["label"]
-        ok, _ = _quiet(["hdiutil", "attach", dmg, "-stdinpass", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mnt],
-                       pw.encode(), timeout=600)
+        ph("%s：用 1Password 裡的密碼唯讀掛載 DMG，逐檔比對" % s["label"])
+        for attempt in range(2):
+            ok, _, err = _quiet_err(["hdiutil", "attach", dmg, "-stdinpass", "-nobrowse", "-readonly", "-noautoopen",
+                                     "-mountpoint", mnt], pw.encode(), timeout=600)
+            if ok:
+                break
+            time.sleep(3)
         if not ok:
-            return fail("掛載 DMG 失敗")
+            return fail("掛載 DMG 失敗（%s）" % (err.replace(pw, "****")[:200] or "沒有錯誤訊息"))
         try:
-            after = _tree(mnt)
+            after = _tree(mnt, lambda n: ph("%s：逐檔比對 DMG（已比對 %d 個）" % (s["label"], n)))
         except OSError:
             after = None
         for junk in (".fseventsd", ".Trashes", ".Spotlight-V100", ".TemporaryItems"):   # 磁碟區本身會有的系統資料夾
@@ -1264,15 +1372,140 @@ def _archive_project(plan, s):
     if after != before:
         diff = sorted(k for k in set(before) | set(after or {}) if before.get(k) != (after or {}).get(k))[:3]
         return fail("DMG 內容和原資料夾不一致（例如 %s）" % "、".join(diff))
-    status["phase"] = "%s：確認原資料夾沒有被改過，刪除" % s["label"]
+    ph("%s：確認原資料夾沒有被改過，刪除" % s["label"])
+    cnt = info.get("counts") or {}
+    jbefore = ["資料夾：`%s`" % root, "內容：%d 個檔案、%s" % (nfile, P.human_size(size)),
+               "最後活動：%s（%s），處理時已閒置 %s 天" % (a["last"], a["last_what"], a["idle_days"]),
+               "Git：%s" % P.git_note(a),
+               "報告列出的問題：高 %s、中 %s、低 %s（%s）" % (cnt.get("high", 0), cnt.get("medium", 0), cnt.get("low", 0),
+                                                       "、".join((info.get("titles") or [])[:3]))]
+    jrestore = ["雙擊 `%s`，輸入 1Password「%s」（vault %s）裡的密碼" % (os.path.basename(dmg), title, vault),
+                "把磁碟區裡的所有檔案複製回 `%s`" % root,
+                "或用終端機：`hdiutil attach '%s'`（會詢問密碼）" % dmg]
+    jmd = dmg[:-4] + ".md"
     try:
         if _tree(root) != before:
+            _journal(jmd, "封存成加密 DMG（原資料夾保留）", [
+                ("處理前", jbefore), ("處理後", ["已建立 `%s`，但封存期間原資料夾被修改，**沒有刪除原資料夾**" % dmg]),
+                ("相關資訊", _journal_basics() + ["依據報告：%s" % (plan.get("report") or "—")])])
             return False, "已封存到 %s，但封存期間原資料夾被修改，沒有刪除" % home_rel(dmg)
         shutil.rmtree(root)
     except OSError as e:
+        _journal(jmd, "封存成加密 DMG（刪除原資料夾失敗）", [
+            ("處理前", jbefore), ("處理後", ["已建立並驗證 `%s`" % dmg, "刪除原資料夾失敗：%s（可能留下部分檔案）" % e]),
+            ("怎麼還原", jrestore), ("相關資訊", _journal_basics())])
         return False, "已封存到 %s，但刪除原資料夾失敗：%s" % (home_rel(dmg), e)
-    return True, "已封存到 %s（%d 個檔案、%s；密碼在 1Password「%s」）並刪除原資料夾" % (
-        home_rel(dmg), nfile, P.human_size(size), title)
+    jp = _journal(jmd, "閒置專案封存成加密 DMG", [
+        ("為什麼處理", ["專案已經閒置、裡面有安全問題（明文金鑰、有漏洞的套件等），整個封存比一個一個修更省事"]),
+        ("處理前", jbefore),
+        ("處理後", ["已封存成 `%s`（AES-256 加密、壓縮）" % dmg,
+                   "用 1Password 裡的密碼唯讀掛載，%d 個檔案的大小與 sha256 全部一致" % nfile,
+                   "原資料夾 `%s` 已刪除%s" % (root, "（iCloud 會在「最近刪除」保留 30 天）" if P.in_cloud(root) else ""),
+                   "密碼：1Password vault「%s」的「%s」" % (vault, title)]),
+        ("怎麼還原", jrestore),
+        ("相關資訊", _journal_basics() + ["依據報告：%s" % (plan.get("report") or "—")])])
+    return True, "已封存到 %s（%d 個檔案、%s；密碼在 1Password「%s」）並刪除原資料夾%s" % (
+        home_rel(dmg), nfile, P.human_size(size), title, "；處理紀錄：%s" % home_rel(jp) if jp else "")
+
+
+ARCHIVE_WORKERS = 5        # 同時封存幾個專案（hdiutil 壓縮、sha256 都吃 CPU / 磁碟）
+DOWNLOAD_WORKERS = 2       # 同時從雲端下載幾個專案（每個專案內部再 8 個檔案並行）
+_op_lock = threading.Lock()
+
+
+def _archive_batch(plan, steps, results):
+    """閒置專案批次封存：不需要下載的直接進封存佇列，雲端專案先在背景下載，下載完再排進佇列，
+    由 ARCHIVE_WORKERS 個 worker 同時封存。按停止或 1Password 失敗時：不再開始新的專案，正在做的會做完。"""
+    import queue
+    from concurrent.futures import ThreadPoolExecutor
+    from . import projects as P
+    lock = threading.Lock()
+    ready = queue.Queue()
+    workers, downloads = {}, {}
+    status.update(total=len(steps), done=len(results), workers={}, downloads={})
+
+    def put(dct, name, key, **kw):
+        """更新某個 worker / 下載的進度，並換上新的快照（網頁讀狀態時不會碰到正在修改的 dict）。"""
+        with lock:
+            if kw.pop("_drop", False):
+                dct.pop(key, None)
+            else:
+                dct.setdefault(key, {}).update(kw)
+            status[name] = {k: dict(v) for k, v in dct.items()}
+
+    def stopped():
+        return status.get("cancel") or plan.get("_op_failed")
+
+    def record(s, ok, msg, skipped=False):
+        with lock:
+            results.append({"id": s["id"], "label": s["label"], "ok": ok, "output": msg, "skipped": skipped})
+            status.update(results=list(results), done=len(results))
+
+    def skip(s):
+        record(s, False, "未執行：你按了停止" if status.get("cancel") else
+               "未執行：1Password 存密碼失敗，已停止後面的專案（確認 1Password 授權後再重新執行）", True)
+
+    cloud = [s for s in steps if P.in_cloud(s["path"])]
+    for s in steps:
+        if s not in cloud:
+            ready.put(s)
+
+    def download(s):
+        if stopped():
+            return skip(s)
+        lab = s["label"]
+        put(downloads, "downloads", lab, phase="檢查有哪些檔案只在雲端", since=time.time())
+        try:
+            n, size = P.cloud_only(s["path"]) if os.path.isdir(s["path"]) else (0, 0)
+            if n:
+                put(downloads, "downloads", lab, phase="下載 %d 個檔案（約 %s）" % (n, P.human_size(size)))
+                bad = P.cloud_download(s["path"], lambda d, t: put(downloads, "downloads", lab, phase="下載中 %d / %d 個檔案" % (d, t)))
+                if bad:
+                    return record(s, False, "有 %d 個檔案從雲端下載不到（例如 %s），沒有封存；可以稍後再試" % (len(bad), home_rel(bad[0])))
+            ready.put(s)
+        except Exception as e:
+            record(s, False, "下載時發生錯誤：%s: %s；沒有封存" % (type(e).__name__, str(e)[:200]))
+        finally:
+            put(downloads, "downloads", lab, _drop=True)
+
+    dl_done = threading.Event()
+
+    def downloader():
+        try:
+            with ThreadPoolExecutor(DOWNLOAD_WORKERS) as ex:
+                list(ex.map(download, cloud))
+        finally:
+            dl_done.set()
+
+    def worker(wid):
+        while True:
+            try:
+                s = ready.get(timeout=1)
+            except queue.Empty:
+                if dl_done.is_set() and ready.empty():
+                    return
+                continue
+            if stopped():
+                skip(s)
+                continue
+            lab = s["label"]
+            put(workers, "workers", wid, project=lab, phase="開始", since=time.time())
+            try:
+                ok, msg = _archive_project(plan, s, lambda t: put(workers, "workers", wid,
+                                                                    phase=t[len(lab) + 1:] if t.startswith(lab + "：") else t))
+            except Exception as e:
+                ok, msg = False, "%s: %s；原資料夾沒有刪除" % (type(e).__name__, str(e)[:200])
+            put(workers, "workers", wid, _drop=True)
+            record(s, ok, msg, skipped=not ok and msg.startswith("未執行"))
+
+    status["phase"] = "%d 個專案：%d 個直接封存、%d 個在雲端（先下載）" % (len(steps), len(steps) - len(cloud), len(cloud))
+    threads = [threading.Thread(target=downloader, daemon=True)] + \
+              [threading.Thread(target=worker, args=("w%d" % (i + 1),), daemon=True) for i in range(ARCHIVE_WORKERS)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    status.update(workers={}, downloads={})
 
 
 # ---------------------------------------------------------------- 對外介面
@@ -1547,6 +1780,7 @@ def start(plan_id, step_ids, method="touchid", assertion=None, port=0):
         if status["running"] or _plans.pop(plan_id, None) is None:
             return False, "預覽已被使用或已有動作在進行"
         status.update(running=True, phase="等待 Touch ID" if not key_name else "執行中", action=plan["action"],
+                      done=0, total=len(steps), current="", step_since=time.time(), cancel=False,
                       title=plan["title"], started=time.strftime("%Y-%m-%d %H:%M:%S"), finished="", ok=None,
                       message="", results=[], method="YubiKey「%s」" % key_name if key_name else "Touch ID")
     threading.Thread(target=_execute, args=(plan, steps, key_name), daemon=True).start()
@@ -1584,15 +1818,24 @@ def _execute(plan, steps, key_name=None):
                 for s in go:
                     results.append({"id": s["id"], "label": s["label"], "ok": ok, "output": out})
             status["results"] = results
+        arch = [s for s in steps if s["kind"] == "archive-project"]
+        if arch:
+            _archive_batch(plan, arch, results)
         dmg = [s for s in steps if s["kind"] == "secure-dmg"]
         if dmg:
             for s, okk, msg in _secure_dmg(plan, dmg):
                 results.append({"id": s["id"], "label": s["label"], "ok": okk, "output": msg})
             status["results"] = results
-        for s in steps:
-            if s["kind"] in ("brew", "secure-dmg"):
+        status.update(total=len(steps), done=len(results))
+        for i, s in enumerate(steps):
+            if s["kind"] in ("brew", "secure-dmg", "archive-project"):
                 continue
-            status["phase"] = s["label"]
+            if status.get("cancel") or plan.get("_op_failed"):
+                why = "未執行：你按了停止" if status.get("cancel") else "未執行：1Password 存密碼失敗，已停止後面的專案（請確認 1Password 的授權後再重新執行）"
+                results.append({"id": s["id"], "label": s["label"], "ok": False, "output": why, "skipped": True})
+                status.update(results=results, done=len(results))
+                continue
+            status.update(phase=s["label"], current=s["label"], step_since=time.time(), done=len(results))
             if s["kind"] == "redact":
                 if not _transcript_path_ok(s["path"]):
                     r = (False, "路徑不在允許範圍，略過")
@@ -1601,6 +1844,13 @@ def _execute(plan, steps, key_name=None):
                         done, skipped = redact_file(s["path"])
                         r = (not skipped, "遮罩 %d 處%s" % (done, "；%d 處因檔案在讀取後被改動而略過，請重新掃描後再執行一次" % skipped
                                                             if skipped else ""))
+                        if done:
+                            _journal(os.path.join(os.path.dirname(s["path"]), JOURNAL_NAME), "遮罩 AI 對話紀錄裡的金鑰：%s" % os.path.basename(s["path"]), [
+                                ("處理前", ["對話紀錄 `%s` 裡有貼過的金鑰：%s" % (s["path"], s.get("detail", ""))]),
+                                ("處理後", ["遮罩 %d 處（改成 sk-ant****a1b2 這種格式），其他內容沒有改" % done]),
+                                ("怎麼還原", ["原本的金鑰值已經不在這台電腦上，無法還原；需要的話請到服務後台重新產生",
+                                             "這些金鑰既然曾經貼進對話，建議到服務後台撤銷並更換"]),
+                                ("相關資訊", _journal_basics())])
                     except OSError as e:
                         r = (False, str(e))
             elif s["kind"] == "secure-1p":
@@ -1618,6 +1868,11 @@ def _execute(plan, steps, key_name=None):
                         finally:
                             os.close(fd)
                         r = (True, "權限已改成 600")
+                        _journal(os.path.join(os.path.dirname(s["path"]), JOURNAL_NAME), "私鑰權限改成 600：%s" % os.path.basename(s["path"]), [
+                            ("處理前", ["檔案：`%s`" % s["path"], s.get("detail", "").split("→")[0].strip()]),
+                            ("處理後", ["權限 600（只有你可讀寫），內容沒有改"]),
+                            ("怎麼還原", ["通常不需要還原；如果某個程式因此讀不到，可以 `chmod 644 '%s'`" % s["path"]]),
+                            ("相關資訊", _journal_basics())])
                     except OSError as e:
                         r = (False, str(e))
             elif s["kind"] == "cmd":
@@ -1645,7 +1900,7 @@ def _execute(plan, steps, key_name=None):
             else:
                 r = (False, "未知的步驟類型")
             results.append({"id": s["id"], "label": s["label"], "ok": r[0], "output": r[1]})
-            status["results"] = results
+            status.update(results=results, done=len(results))
         fails = sum(1 for r in results if not r["ok"])
         status.update(ok=not fails, message="完成，%d 個步驟%s%s" % (len(results), "，%d 個失敗" % fails if fails else "全部成功",
                                                                 ("。" + plan["_summary"]) if plan.get("_summary") else ""))
@@ -1660,7 +1915,8 @@ def _execute(plan, steps, key_name=None):
     except Exception as e:   # 背景執行緒不能讓例外消失
         status.update(ok=False, message="%s: %s" % (type(e).__name__, str(e)[:300]))
     finally:
-        status.update(running=False, phase="", finished=time.strftime("%Y-%m-%d %H:%M:%S"), results=results)
+        status.update(running=False, phase="", finished=time.strftime("%Y-%m-%d %H:%M:%S"), results=results, cancel=False,
+                      current="", step_since=0)
         recent.insert(0, {k: status.get(k) for k in ("title", "method", "started", "finished", "ok", "message")})
         recent[0]["results"] = list(results)
         del recent[5:]
