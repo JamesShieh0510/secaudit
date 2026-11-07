@@ -2,7 +2,7 @@
 import re
 
 # 規則有變動時加 1：AI 對話紀錄等快取會自動失效、重新掃描
-RULES_VERSION = 3
+RULES_VERSION = 4
 
 # (rule_id, 名稱, regex, severity)
 SECRET_RULES = [

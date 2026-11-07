@@ -300,7 +300,9 @@ def check_installed(ctx: ScanContext, cache: dict, online=True):
         x["eol_date"] = cy.get("eol") if isinstance(cy.get("eol"), str) else ""
         if is_eol(cy, today):
             x["target"] = str(newest_supported(cycles, today, x["product"] == "nodejs").get("latest") or "")
-            groups.setdefault((x["product"], "eol"), []).append(x)
+            if x["product"] == "nodejs" and node_idx:
+                x["missed"] = missed_node_security(x["version"], node_idx)     # 有公開漏洞的證據
+            groups.setdefault((x["product"], "eol-vuln" if x.get("missed") else "eol"), []).append(x)
             continue
         if x["product"] == "nodejs" and node_idx:
             miss = missed_node_security(x["version"], node_idx)
@@ -320,18 +322,25 @@ def check_installed(ctx: ScanContext, cache: dict, online=True):
         lines = []
         for x in xs[:15]:
             extra = ""
-            if status == "eol":
+            if status in ("eol", "eol-vuln"):
                 extra = "，%s 停止維護" % x["eol_date"] if x.get("eol_date") else ""
+                if x.get("missed"):
+                    extra += "，⚠️ 而且錯過 %d 次官方安全更新（有已公開的漏洞）" % len(x["missed"])
             elif status == "security":
                 extra = "，錯過 %d 次安全更新（最近 %s 的 v%s）" % (len(x["missed"]), x["missed"][0]["date"], x["missed"][0]["v"])
             lines.append("%s %s（%s%s）%s → 建議：%s" % (name, x["version"], x["where"], "，預設" if x.get("default") else "",
                                                      extra, _fix_hint(x, x.get("target"))))
         if len(xs) > 15:
             lines.append("…另有 %d 個" % (len(xs) - 15))
-        if status == "eol":
-            sev = "high" if has_default else "medium"
-            title = "%s：%d 個已安裝的版本已停止維護%s" % (name, len(xs), "（包含預設版本）" if has_default else "")
-            why = "停止維護的版本不再收到安全修補，之後公開的漏洞都不會修。即使不是預設版本，只要有專案或工具在用就有風險。"
+        if status in ("eol", "eol-vuln"):
+            # 只有「有公開漏洞的證據」才算高風險（例如錯過官方安全更新）；單純停止維護先算中風險
+            vuln = [x for x in xs if x.get("missed")]
+            sev = "high" if vuln else "medium"
+            title = "%s：%d 個已安裝的版本已停止維護%s%s" % (name, len(xs), "（包含預設版本）" if has_default else "",
+                                                       "，其中 %d 個有已公開的漏洞" % len(vuln) if vuln else "")
+            why = ("停止維護的版本不再收到安全修補，之後公開的漏洞都不會修。" +
+                   ("其中有版本錯過了官方標記的安全更新，代表已經有公開的漏洞。" if vuln else
+                    "目前沒有查到這些版本有已公開的漏洞，所以先列為中風險；只要有專案或工具在用，仍建議升級。"))
         elif status == "security":
             sev = "high"
             n = max(len(x["missed"]) for x in xs)
@@ -461,7 +470,7 @@ def check_project_pins(ctx: ScanContext, pin_files, cache, online=True):
             lines.append("…另有 %d 個" % (len(items) - 15))
         tgt = items[0][4]
         ctx.add(Finding(
-            rule="pin-%s-%s" % (prod, "docker" if docker else "project"), severity="high" if docker else "medium", category=CAT,
+            rule="pin-%s-%s" % (prod, "docker" if docker else "project"), severity="medium", category=CAT,
             title="%s：%d 處%s指定了已停止維護的版本" % (name, len(items), "容器映像" if docker else "專案設定"),
             detail=" ／ ".join(lines),
             why=("部署出去的容器會一直使用這個版本，伺服器上的服務等於跑在不再修補漏洞的環境。" if docker else

@@ -38,6 +38,15 @@ def _random_enough(v: str) -> bool:
     return bool(re.search(r"[A-Z]", body) and re.search(r"[a-z]", body) and re.search(r"\d", body))
 
 
+FAKE_RUNS = ("abcdefghij", "0123456789", "1234567890", "qwertyuiop", "xxxxxxxxxx", "aaaaaaaaaa", "deadbeefdeadbeef")
+
+
+def looks_fake(v: str) -> bool:
+    """手打的測試 / 範例值：一長串連續的字母或數字。真的金鑰是隨機的，不會出現這種序列。"""
+    low = v.lower()
+    return any(r in low for r in FAKE_RUNS)
+
+
 def find_secrets(text: str, generic: bool = False):
     """回傳 {rule_id: (名稱, severity, [行號], 第一個遮罩值)}。"""
     hits = {}
@@ -45,6 +54,8 @@ def find_secrets(text: str, generic: bool = False):
         for m in rx.finditer(text):
             if rid in ("openai-key", "anthropic-key") and not _random_enough(m.group(0)):
                 continue     # 例如網址裡的「nvidia-sk-hynix-…」：全小寫的單字串，不是金鑰
+            if looks_fake(m.group(0)):
+                continue     # 明顯是手打的測試值（abcdefgh、0123456789…），不是真的金鑰
             ev = "（私鑰內容不顯示）" if rid == "private-key" else mask(m.group(0))
             s = sev
             if rid == "db-url":
