@@ -296,11 +296,87 @@ def _brew_targets(formulae):
         return {}
 
 
+NVM_SH = 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh" >/dev/null 2>&1; nvm %s'
+EXT_DIRS = re.compile(r"/\.(?:vscode|cursor|windsurf|antigravity-ide)[^/]*/extensions/")
+
+
+def _node_pins(version):
+    """哪些專案的 .nvmrc / .node-version 指定了這個 Node 版本（或同一個主版本）。略過編輯器擴充功能自己的原始碼。"""
+    major = version.split(".")[0]
+    hits = []
+    for base in [HOME] + [os.path.join(HOME, d) for d in ("projects", "alphacurve", "leadcapital", "otso")]:
+        if not os.path.isdir(base):
+            continue
+        for dp, dns, fns in os.walk(base):
+            depth = dp[len(base):].count(os.sep)
+            dns[:] = [] if depth >= 4 else [d for d in dns if d not in ("node_modules", ".git", "Library", ".Trash") and
+                                             not (dp == HOME and d.startswith("."))]
+            for n in (".nvmrc", ".node-version"):
+                if n in fns:
+                    p = os.path.join(dp, n)
+                    if EXT_DIRS.search(p):
+                        continue
+                    try:
+                        v = open(p, encoding="utf-8").read().strip().lstrip("v")
+                    except OSError:
+                        continue
+                    if v == version or v.split(".")[0] == major:
+                        hits.append("%s（%s）" % (home_rel(dp), v))
+    return sorted(set(hits))
+
+
+def _nvm_steps(xs, cache, today):
+    """nvm 裝的 Node.js：安裝目前的 LTS、移除停止維護又沒人用的版本、（可選）把預設版本改成 LTS。"""
+    from .runtimes import eol_data, find_cycle, is_eol, newest_supported
+    cycles = eol_data("nodejs", cache, online=False)
+    if not cycles or not xs:
+        return []
+    lts = str(newest_supported(cycles, today, True).get("cycle") or "")
+    if not re.match(r"^\d+$", lts):
+        return []
+    eol = [x for x in xs if is_eol(find_cycle(cycles, x["version"]) or {}, today)]
+    if not eol:
+        return []
+    steps = []
+    have_lts = any(x["version"].split(".")[0] == lts for x in xs)
+    if not have_lts:
+        steps.append({"id": "nvm-install", "label": "nvm install %s" % lts,
+                      "detail": "安裝 Node.js %s（目前的 LTS，還有安全修補）；已經裝的版本都不會動" % lts,
+                      "kind": "cmd", "argv": ["bash", "-c", NVM_SH % ("install %s" % lts)]})
+    for x in eol:
+        v = x["version"]
+        if not re.match(r"^\d+\.\d+\.\d+$", v):
+            continue
+        if x.get("default"):
+            steps.append({"id": "nvm-default", "label": "nvm alias default %s" % lts,
+                          "detail": "目前預設的 Node.js %s 已停止維護；改成 %s 之後，新開的終端機都會用 %s。"
+                                    "⚠️ 會影響所有沒有 .nvmrc 的專案，預設不勾選，確認專案都能用 %s 再勾" % (v, lts, lts, lts),
+                          "kind": "cmd", "argv": ["bash", "-c", NVM_SH % ("alias default %s" % lts)], "default": False})
+            continue
+        running = [l for l in subprocess.run(["ps", "-axo", "command"], capture_output=True, text=True).stdout.splitlines()
+                   if "/.nvm/versions/node/v%s/" % v in l]
+        pins = _node_pins(v)
+        notes = ["移除停止維護的 Node.js %s（要用時可以再 nvm install %s 裝回來）" % (v, v)]
+        default = True
+        if running:
+            notes.append("⚠️ 有 %d 個程式正在用這個版本執行，預設不勾選" % len(running))
+            default = False
+        if pins:
+            notes.append("⚠️ 這些專案指定了 Node %s：%s。移除後它們要改用新版（或之後再裝回來），預設不勾選" % (v.split(".")[0], "、".join(pins[:5])))
+            default = False
+        steps.append({"id": "nvm-rm-" + v, "label": "nvm uninstall %s" % v, "detail": "；".join(notes),
+                      "kind": "cmd", "argv": ["bash", "-c", NVM_SH % ("uninstall %s" % v)], "default": default})
+    return steps
+
+
 def plan_upgrade():
     from .runtimes import _vkey, discover, eol_data, find_cycle
     cache = _read(os.path.join(DATA, "cache.json"), {}).get("osv", {})   # 掃描時執行環境資料存在 osv 底下
     brew, steps, seen = {}, [], set()
-    for x in discover(cache.get("runtime_versions", {})):
+    found = list(discover(cache.get("runtime_versions", {})))
+    steps += _nvm_steps([x for x in found if x["product"] == "nodejs" and x["source"] == "nvm"], cache,
+                        time.strftime("%Y-%m-%d"))
+    for x in found:
         cy = find_cycle(eol_data(x["product"], cache, online=False), x["version"])
         latest = str((cy or {}).get("latest") or "")
         if not latest or _vkey(latest) <= _vkey(x["version"]):
@@ -386,10 +462,15 @@ def plan_upgrade():
                          "kind": "brew", "formula": f, "target": tgt, "default": not cross})
     steps.sort(key=lambda s: (not s["id"].startswith("brew:"), s["id"]))
     notes = []
+    if not steps:
+        notes.append("目前沒有這個動作能自動處理的項目。它能處理：Homebrew / rustup / Bun / pnpm 的同版本線修補版，"
+                     "以及 nvm 裝的 Node.js（安裝 LTS、移除停止維護的版本）。其他來源的版本（例如 pyenv、conda、系統內建）"
+                     "請依報告裡每一項的建議手動處理。")
     if dry:
         notes.append("Homebrew 預演（brew upgrade --dry-run，含所有候選項目；相依套件也可能一起升級）：" + dry.strip()[:1500])
-    return {"title": "升級執行環境（同一版本線的修補版）", "report": "", "steps": steps,
-            "notes": notes + ["只升級小版號，不會移除任何版本線；Homebrew 升級後會自動清掉同一個 formula 的舊修補版。",
+    return {"title": "升級執行環境", "report": "", "steps": steps,
+            "notes": notes + ["Homebrew / rustup / Bun / pnpm 只升級小版號；Homebrew 升級後會自動清掉同一個 formula 的舊修補版。"
+                              "nvm 的 Node.js：會裝目前的 LTS，停止維護的版本在沒人使用時才預設移除（移除後可以再裝回來）。",
                       "執行時不會讓 Homebrew 自動更新套件索引；執行前會再確認一次目標版本，和預覽不同就略過那一項。",
                       "正在執行的程式（例如 PM2 的服務）不會被重啟，下次重啟時才會用到新版。",
                       "版本資訊來自最近一次掃描的 endoflife.date 快取；Homebrew 實際會升到它目前提供的最新版。"]}

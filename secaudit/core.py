@@ -48,6 +48,7 @@ class Finding:
     why: str = ""
     fix: str = ""
     scope: str = ""         # system（固定位置檢查）/ walk（遍歷目標資料夾）/ online（需連網）
+    projects: str = ""      # 套件漏洞：所有受影響的專案（換行分隔；path 只放前 5 個）
 
     def to_dict(self):
         return asdict(self)

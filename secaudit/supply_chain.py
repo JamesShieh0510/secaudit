@@ -218,6 +218,7 @@ def check_dependencies(ctx: ScanContext, lockfiles, cache: dict):
             rule="dep-malicious" if mal else "dep-vuln", severity="high" if mal else sev, category=CAT,
             title=("⚠️ 已知惡意套件 %s@%s" if mal else "%s@%s 有 %d 個已知漏洞" % ("%s", "%s", len(ids))) % (name, ver),
             path="；".join(projs[:5]) + (" 等 %d 個專案" % len(projs) if len(projs) > 5 else ""),
+            projects="\n".join(projs),
             detail=("（封存專案：在備份碟或超過一年沒更新，降為低風險；要再使用前先升級）" if idle else "") +
                    "%s：%s" % (label, "；".join(truncate(x.get("summary", ""), 80) for x in infos[:3])),
             evidence="%s 套件" % eco,
