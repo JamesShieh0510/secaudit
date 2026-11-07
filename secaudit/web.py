@@ -51,14 +51,24 @@ def next_settings(engine, cfg):
     ts = [t for t in load_targets(cfg) if t.enabled]
     cur = sorted(home_rel(t.path) for t in ts)
     last_full = next((r for r in engine.reports() if r["mode"] == "full"), None)
-    applied = None
+    applied, pending = None, []
     if last_full:
         applied = sorted(last_full.get("targets") or []) == cur
+        old = set(last_full.get("targets") or [])
+        pending += ["新增掃描範圍：%s" % p for p in cur if p not in old]
+        pending += ["移除掃描範圍：%s" % p for p in sorted(old - set(cur))]
+        on = lambda b: "開" if b else "關"
+        if last_full.get("online") is not None and bool(last_full["online"]) != bool(cfg.get("online")):
+            pending.append("連網查詢 CVE：%s → %s" % (on(last_full["online"]), on(cfg.get("online"))))
+        if last_full.get("llm") is not None and bool(last_full["llm"]) != bool(cfg.get("llm_enabled")):
+            pending.append("AI 摘要：%s → %s" % (on(last_full["llm"]), on(cfg.get("llm_enabled"))))
+        if last_full.get("model") and last_full["model"] != cfg.get("ollama_model"):
+            pending.append("AI 模型：%s → %s" % (last_full["model"], cfg.get("ollama_model")))
     return {"targets": [{"label": t.label, "path": home_rel(t.path), "exists": os.path.isdir(t.path)} for t in ts],
             "next_quick": engine.status.get("next_quick", ""), "next_full": engine.status.get("next_full", ""),
             "online": cfg.get("online"), "llm": cfg.get("llm_enabled"), "model": cfg.get("ollama_model"),
             "watch": cfg.get("watch_enabled", True),
-            "last_full": last_full["started"] if last_full else "", "applied": applied}
+            "last_full": last_full["started"] if last_full else "", "applied": applied, "pending": pending}
 
 
 def make_handler(engine: Engine, token: str, port: int):

@@ -5,6 +5,11 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Mac 安全監控</title>
 <style>
+details.fold>summary{cursor:pointer;list-style:none;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+details.fold>summary::-webkit-details-marker{display:none}
+details.fold>summary h2{display:inline;margin:0}
+details.fold>summary::before{content:"▸";color:var(--muted);transition:transform .15s}
+details.fold[open]>summary::before{transform:rotate(90deg)}
 :root{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--muted:#667085;--line:#e4e7ec;--accent:#2563eb;--high:#d92d20;--medium:#e8730c;--low:#c9a400;--info:#5b7fbd;--ok:#12a150;--code:#f2f4f7}
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#0f1216;--card:#171b21;--fg:#e6e9ef;--muted:#98a2b3;--line:#2a313b;--accent:#60a5fa;--high:#f97066;--medium:#fb923c;--low:#facc15;--info:#7ea6e0;--ok:#4ade80;--code:#222831}}
 :root[data-theme=dark]{--bg:#0f1216;--card:#171b21;--fg:#e6e9ef;--muted:#98a2b3;--line:#2a313b;--accent:#60a5fa;--high:#f97066;--medium:#fb923c;--low:#facc15;--info:#7ea6e0;--ok:#4ade80;--code:#222831}
@@ -30,6 +35,11 @@ label.cfg{display:flex;justify-content:space-between;align-items:center;gap:8px;
 .pgnav{display:flex;justify-content:center;align-items:center;gap:10px;margin:10px 0 2px;flex-wrap:wrap}
 .pgnav button{padding:4px 12px;font-size:13px}
 @media (max-width:600px){.hide-sm{display:none}}
+.tabs{display:flex;gap:4px;margin-top:16px;border-bottom:1px solid var(--line);overflow-x:auto;position:sticky;top:0;background:var(--bg);z-index:3}
+.tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:none;padding:10px 14px;font-size:14px;color:var(--muted);white-space:nowrap;cursor:pointer}
+.tabs button.on{color:var(--fg);border-bottom-color:var(--fg);font-weight:600}
+.tabs .badge:not(:empty){display:inline-block;margin-left:6px;min-width:18px;padding:0 5px;border-radius:9px;background:var(--medium);color:#fff;font-size:11px;line-height:18px;text-align:center}
+section.tab{display:none}section.tab.on{display:block}
 </style>
 </head>
 <body>
@@ -50,22 +60,22 @@ label.cfg{display:flex;justify-content:space-between;align-items:center;gap:8px;
     <div class="prog" id="prog" style="display:none"><span></span></div>
   </div>
 
-  <div class="card" id="nextCard">
-    <h2>下一次會套用的設定</h2>
-    <div id="nextBody" class="muted"></div>
-  </div>
+  <nav class="tabs" id="tabs">
+    <button data-tab="reports">📋 報告</button>
+    <button data-tab="feed">🧯 漏洞快訊</button>
+    <button data-tab="fix">🛠 處理<span class="badge" id="tbFix"></span></button>
+    <button data-tab="settings">⚙️ 設定<span class="badge" id="tbSet"></span></button>
+  </nav>
 
+  <section class="tab" data-tab="reports">
   <div class="card">
-    <h2>掃描範圍</h2>
-    <div class="muted">「家目錄」不含 ~/Library；雲端硬碟和外接/NAS 磁碟分開列出。雲端「僅限線上」的檔案只看檔名、不讀內容，不會觸發下載。</div>
-    <div id="targets" style="margin-top:8px"></div>
-    <div class="row" style="margin-top:12px">
-      <input type="text" id="newPath" placeholder="/Volumes/NAS/共用資料夾 或 ~/某個資料夾">
-      <button id="pick">選擇資料夾…</button>
-      <button id="add">加入</button>
-    </div>
+    <h2>報告</h2>
+    <table><thead><tr><th>時間</th><th class="hide-sm">模式／觸發</th><th class="hide-sm">範圍</th><th>風險（高/中/低）</th><th>變動</th><th></th></tr></thead><tbody id="reports"></tbody></table>
+    <div id="reportsNav"></div>
+    <div class="muted" style="margin-top:6px">沒有變動的排程掃描不另存報告；報告保留 30 天，完整掃描保留 90 天。</div>
   </div>
-
+  </section>
+  <section class="tab" data-tab="feed">
   <div class="card">
     <div class="top"><h2>🧯 漏洞快訊</h2>
       <div class="row">
@@ -80,14 +90,8 @@ label.cfg{display:flex;justify-content:space-between;align-items:center;gap:8px;
     <div class="muted" id="feedMeta"></div>
     <div id="feed" style="margin-top:8px"></div>
   </div>
-
-  <div class="card">
-    <h2>報告</h2>
-    <table><thead><tr><th>時間</th><th class="hide-sm">模式／觸發</th><th class="hide-sm">範圍</th><th>風險（高/中/低）</th><th>變動</th><th></th></tr></thead><tbody id="reports"></tbody></table>
-    <div id="reportsNav"></div>
-    <div class="muted" style="margin-top:6px">沒有變動的排程掃描不另存報告；報告保留 30 天，完整掃描保留 90 天。</div>
-  </div>
-
+  </section>
+  <section class="tab" data-tab="fix">
   <div class="card" id="actCard">
     <h2>🛠 修復動作</h2>
     <div class="muted">這些動作會修改你的電腦。流程：先預覽步驟、勾選要做的項目，再用 <b>Touch ID</b>（只接受指紋，不能改用密碼）或已註冊的 <b>YubiKey</b> 授權，通過才會執行。</div>
@@ -105,6 +109,23 @@ label.cfg{display:flex;justify-content:space-between;align-items:center;gap:8px;
     <div class="muted">在報告中按「標記為已確認無害」的問題會列在這裡，不計入風險數量與未處理提醒。指向檔案的標記綁定檔案內容，檔案一改變就會失效並重新警示。新增或取消標記都會發 Telegram。</div>
     <div id="ackList" style="margin-top:8px"></div>
   </div>
+  </section>
+  <section class="tab" data-tab="settings">
+  <details class="card fold" id="nextCard">
+    <summary><h2>下一次會套用的設定</h2> <span id="nextSum" class="muted"></span></summary>
+    <div id="nextBody" class="muted" style="margin-top:8px"></div>
+  </details>
+
+  <details class="card fold" id="targetsCard">
+    <summary><h2>掃描範圍</h2> <span id="targetsSum" class="muted"></span></summary>
+    <div class="muted" style="margin-top:8px">「家目錄」不含 ~/Library；雲端硬碟和外接/NAS 磁碟分開列出。雲端「僅限線上」的檔案只看檔名、不讀內容，不會觸發下載。</div>
+    <div id="targets" style="margin-top:8px"></div>
+    <div class="row" style="margin-top:12px">
+      <input type="text" id="newPath" placeholder="/Volumes/NAS/共用資料夾 或 ~/某個資料夾">
+      <button id="pick">選擇資料夾…</button>
+      <button id="add">加入</button>
+    </div>
+  </details>
 
   <div class="card">
     <h2>常駐監控設定</h2>
@@ -141,8 +162,21 @@ label.cfg{display:flex;justify-content:space-between;align-items:center;gap:8px;
     <div class="row" style="margin-top:8px"><button id="saveCfg">儲存設定</button><button id="testTg">傳送 Telegram 測試訊息</button><button id="remNow">立即發送未處理提醒</button><span id="cfgMsg" class="muted"></span></div>
     <div class="note" id="secretNote"></div>
   </div>
+  </section>
 </div>
 <script>
+// 分頁標籤：記住上次看的分頁（網址 #分頁 優先）
+const TABS = ["reports", "feed", "fix", "settings"];
+function showTab(t) {
+  if (!TABS.includes(t)) t = "reports";
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
+  document.querySelectorAll("section.tab").forEach(s => s.classList.toggle("on", s.dataset.tab === t));
+  try { localStorage.setItem("secaudit-tab", t); } catch (e) {}
+  if (location.hash.slice(1) !== t) history.replaceState(null, "", location.pathname + location.search + "#" + t);
+}
+document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
+window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
+(() => { let t = location.hash.slice(1); if (!TABS.includes(t)) { try { t = localStorage.getItem("secaudit-tab"); } catch (e) {} } showTab(t || "reports"); })();
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let state = null, targets = [], cfgLoaded = false;
@@ -270,7 +304,13 @@ function renderNext(n) {
     <div>⚡ 即時監看：${on(n.watch)}　🔁 下次快速掃描：<b>${esc(n.next_quick || "—")}</b>（不遍歷資料夾）　🗂 下次完整掃描：<b>${esc(n.next_full || "—")}</b></div>
     <div style="margin-top:6px">連網查詢 CVE ${on(n.online)} ・ AI 摘要 ${on(n.llm)}（${esc(n.model)}）・ 排程與即時監看有變動才發 Telegram</div>
     <div style="margin-top:8px">完整掃描範圍（${n.targets.length} 個）：${n.targets.map(t => `<code>${esc(t.path)}</code>${t.exists ? "" : ' <b style="color:var(--high)">未掛載</b>'}`).join("、") || "（沒有勾選）"}</div>
-    <div style="margin-top:6px">${applied}</div>`;
+    <div style="margin-top:6px">${applied}</div>
+    ${(n.pending || []).length ? `<div style="margin-top:8px"><b>尚未套用的變更：</b><ul style="margin:4px 0;padding-left:20px">${n.pending.map(x => `<li>${esc(x)}</li>`).join("")}</ul></div>` : ""}`;
+  const k = (n.pending || []).length || (n.applied === false ? 1 : 0);
+  $("#nextSum").innerHTML = n.applied === null ? "還沒有完整掃描報告" :
+    k ? `<b style="color:var(--medium)">⚠️ ${k} 項還沒套用</b>，${esc(n.next_full || "下次完整掃描")} 會套用` : "✅ 都已套用在最近一次完整掃描";
+  $("#tbSet").textContent = k || "";
+  $("#targetsSum").textContent = `${n.targets.length} 個資料夾會在完整掃描時遍歷`;
 }
 
 function renderFeed(h, st) {
@@ -524,6 +564,7 @@ function renderActStatus(s) {
   } else if (actWasRunning) {
     $("#actStatus").style.display = "none";
   }
+  $("#tbFix").textContent = s.running ? "執行中" : "";
   actWasRunning = s.running;
 }
 function renderRecent(list) {
@@ -542,7 +583,7 @@ refresh();
   history.replaceState(null, "", location.pathname);
   setTimeout(() => {
     previewAction(fix, q.get("report") || "", q.get("path") || "");
-    const c = document.getElementById("actCard"); if (c) c.scrollIntoView({behavior: "smooth"});
+    showTab("fix");
   }, 300);
 })();
 
@@ -559,7 +600,7 @@ async function downloadAllMd(report) {
 }
 $("#allMd").onclick = () => downloadAllMd("");
 (() => { const q = new URLSearchParams(location.search); if (q.get("allmd")) { history.replaceState(null, "", location.pathname);
-  setTimeout(() => { downloadAllMd(q.get("report") || ""); const c = document.getElementById("actCard"); if (c) c.scrollIntoView({behavior: "smooth"}); }, 300); } })();
+  setTimeout(() => { downloadAllMd(q.get("report") || ""); showTab("fix"); }, 300); } })();
 </script>
 </body>
 </html>

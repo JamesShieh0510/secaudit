@@ -170,14 +170,17 @@ def ancestry(procs, pid, limit=8):
         seen.add(p)
         e = procs[p]["exe"]
         m = re.search(r"([^/]+)\.app/", e)
-        name = m.group(1) if m else "claude" if "/claude/versions/" in e else os.path.basename(e)
+        name = m.group(1) if m else "claude" if "/claude/versions/" in e else \
+            "PM2" if procs[p]["args"].startswith("PM2 ") else os.path.basename(e)
         out.append((p, name, e))
         p = procs[p]["ppid"]
     return out
 
 
 def _from_user(chain):
-    return any(TERMINAL.search(e) or AI_TOOL.search(e) or os.path.basename(e) in ("sshd", "tmux") for _, _, e in chain)
+    # 終端機、AI 助理、ssh / tmux，或你用 pm2 啟動的常駐服務
+    return any(TERMINAL.search(e) or AI_TOOL.search(e) or n == "PM2" or os.path.basename(e) in ("sshd", "tmux")
+               for _, n, e in chain)
 
 
 def _chain_text(chain, procs):
@@ -237,8 +240,8 @@ class ResourceMonitor:
         known = self.state["known"]
         learning = not self.state.get("baseline")
         for pid, p in procs.items():
-            if p["age"] < RESIDENT_SEC or pid <= 1 or not p["exe"].startswith("/"):
-                continue        # 取不到路徑的多半是正在結束的程序
+            if (p["age"] < RESIDENT_SEC and not learning) or pid <= 1 or pid == os.getpid() or not p["exe"].startswith("/"):
+                continue        # 取不到路徑的多半是正在結束的程序；建立基準時把當下所有程序都記進去
             key = norm_key(p["exe"], p["args"])
             if key in known:
                 known[key]["last_seen"] = time.strftime("%Y-%m-%d")

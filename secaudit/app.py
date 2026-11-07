@@ -399,6 +399,7 @@ class Engine:
             out.append({"name": f[:-5], "started": d.get("started"), "mode": d.get("mode"), "counts": cnt,
                         "source": st.get("source", ""), "targets": [t["path"] for t in st.get("targets", [])] or
                         [t["path"] for t in d.get("targets", [])], "notify": st.get("notify"),
+                        "online": st.get("online"), "llm": st.get("llm"), "model": st.get("model"),
                         "changes": len(d.get("changes") or []), "attention": sum(1 for c in (d.get("changes") or []) if c.get("attention"))})
             cache[f] = (mt, out[-1])
         if page is None:
