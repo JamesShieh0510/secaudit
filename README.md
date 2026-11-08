@@ -141,6 +141,8 @@ TELEGRAM_BOT_TOKEN={{ op://<vault>/<item>/TELEGRAM_BOT_TOKEN }}
 | iCloud Drive / Google Drive / OneDrive / Dropbox | ⬜ | 自動偵測 `~/Library/Mobile Documents`、`~/Library/CloudStorage/*` |
 | 外接磁碟 / NAS | ⬜ | 自動列出 `/Volumes/*`，也可在 Web UI 用「選擇資料夾…」加入任何路徑 |
 
+每個目標最多掃 200 萬個檔案（`secaudit/core.py` 的 `max_files_per_target`）。遍歷時先掃文件、下載、keys、`.aws`、projects 等重要位置，第三方安裝與工具資料夾（`opt`、conda、Homebrew 等）最後掃；撞到上限時報告會出現「完整掃描沒有掃完」，列出沒掃到的資料夾。
+
 ## 哪些資料會離開你的電腦
 
 | 送到哪裡 | 送出什麼 |

@@ -1,6 +1,7 @@
 """掃描流程：固定位置檢查（system）+ 遍歷目標資料夾（walk）+ 連網查詢（online）。"""
 import json
 import os
+import re
 import socket
 import stat
 import time
@@ -44,9 +45,45 @@ def default_targets():
     return ts
 
 
+# 遍歷順序：重要的位置先掃，第三方安裝 / 工具資料夾最後掃。就算撞到檔案數上限，漏掉的也只會是不重要的地方。
+WALK_FIRST = {
+    "Documents", "Downloads", "Desktop", "keys", ".aws", ".kube", ".gnupg", ".azure", ".config", ".docker",
+    "projects", "Projects", "code", "Code", "src", "dev", "work", "git", "Git", "repos", "workspace",
+}
+WALK_LAST = {
+    "opt", "anaconda3", "miniconda3", "miniforge3", ".conda", ".homebrew", "homebrew", ".oh-my-zsh", ".zsh",
+    ".vscode-insiders", ".vscode", ".cursor-tutor", ".antigravity", ".antigravity-ide", ".move", ".sui",
+    ".swiftpm", ".lmstudio", "llm-models", ".paddlex", "go", "sdk", "Applications", "Music", "Movies", "Pictures",
+}
+WALK_LAST_RE = re.compile(r"^(apache-|istio-|httpd-|nuclei-templates|google-cloud-sdk|flutter|android-sdk)", re.I)
+
+
+def _walk_rank(name: str) -> int:
+    if name in WALK_FIRST:
+        return 0
+    if name in WALK_LAST or WALK_LAST_RE.match(name):
+        return 2
+    return 1
+
+
+def _walk_order(names):
+    return sorted(names, key=lambda d: (_walk_rank(d), d.lower()))
+
+
+def _unreached(top: str, current: str, order) -> list:
+    """撞到上限時：目標底下第一層的資料夾中，還沒掃完（目前這個）與完全沒掃到（排在後面）的。"""
+    rel = os.path.relpath(current, top)
+    cur = rel.split(os.sep)[0] if rel != "." else ""
+    if cur not in order:
+        return list(order)
+    i = order.index(cur)
+    return ["%s（只掃了一部分）" % cur] + order[i + 1:]
+
+
 def walk_target(ctx: ScanContext, t: Target, lockfiles: list, ransom=None, pins=None):
     seen = 0
     is_home = os.path.realpath(t.path) == os.path.realpath(HOME)
+    top_order = None
     for dp, dns, fns in os.walk(t.path, onerror=lambda e: ctx.stats.__setitem__("errors", ctx.stats["errors"] + 1)):
         if ctx.cancel.is_set():
             return
@@ -60,7 +97,9 @@ def walk_target(ctx: ScanContext, t: Target, lockfiles: list, ransom=None, pins=
             if (d == "worktrees" and base == ".claude") or (d == "mod" and base == "pkg") or full == SELF_DATA:
                 continue
             keep.append(d)
-        dns[:] = keep
+        dns[:] = _walk_order(keep)
+        if top_order is None:
+            top_order = list(dns)
         ctx.stats["dirs_seen"] += 1
         if ctx.stats["dirs_seen"] % 200 == 0:
             ctx.report("掃描 " + t.label, dp)
@@ -69,11 +108,26 @@ def walk_target(ctx: ScanContext, t: Target, lockfiles: list, ransom=None, pins=
             ctx.stats["files_seen"] += 1
             if seen > ctx.max_files_per_target:
                 ctx.report("掃描 " + t.label, "已達檔案數上限，停止此目標")
+                _report_truncated(ctx, t, _unreached(t.path, dp, top_order or []))
                 return
             p = os.path.join(dp, fn)
             if ransom is not None:
                 ransom.feed(dp, fn)
             check_file(ctx, p, lockfiles, pins)
+
+def _report_truncated(ctx: ScanContext, t: Target, unreached: list):
+    from .core import Finding, home_rel
+    ctx.stats["truncated_targets"] = ctx.stats.get("truncated_targets", 0) + 1
+    shown = unreached[:40]
+    more = len(unreached) - len(shown)
+    ctx.add(Finding(
+        rule="scan-truncated", severity="medium", category="掃描範圍",
+        title="完整掃描沒有掃完：%s 達到檔案數上限" % t.label, path=home_rel(t.path),
+        detail="這個目標超過 %d 個檔案，掃描提前停止。沒掃到的資料夾（%d 個）：%s%s" % (
+            ctx.max_files_per_target, len(unreached), "、".join(shown), "…等 %d 個" % more if more else ""),
+        why="沒掃到的資料夾裡如果有寫死的機密、有漏洞的套件或可疑檔案，報告完全不會出現，看起來會比實際安全。",
+        fix="把確定不用掃的大型資料夾（第三方安裝目錄、備份）從掃描範圍排除，或在 secaudit/core.py 提高 max_files_per_target。"))
+
 
 def check_file(ctx: ScanContext, p: str, lockfiles: list, pins=None):
     """單一檔案的所有內容檢查（完整掃描逐檔呼叫；重新檢查舊報告時也只對問題檔案呼叫這裡）。"""
@@ -264,6 +318,9 @@ def run_recheck(old, cache=None, progress=None, cancel=None, online=True):
     walk_old = [f for f in old.get("findings", []) + old.get("acknowledged", []) if f.get("scope") == "walk"]
     for f in walk_old:
         rule = f.get("rule", "")
+        if rule == "scan-truncated":   # 掃描涵蓋範圍只有完整掃描能重新確認
+            carried.append(f)
+            continue
         if rule in CARRY_RULES:
             sample = (f.get("detail") or "").rsplit("例如：", 1)[-1].strip().lower()
             ext = sample.rsplit(".", 1)[-1] if "." in sample else ""

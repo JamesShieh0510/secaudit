@@ -72,7 +72,7 @@ class ScanContext:
     })
     progress: Optional[Callable[[str, str], None]] = None
     cancel: threading.Event = field(default_factory=threading.Event)
-    max_files_per_target: int = 500000
+    max_files_per_target: int = 2000000   # 安全上限；撞到會在報告列出沒掃到的資料夾（scan-truncated）
     # 清單快照：{scope: {區段: {項目鍵: 描述}}}，用來比對兩次掃描之間的變動
     inventory: Dict[str, Dict[str, Dict[str, str]]] = field(default_factory=dict)
     scope: str = "system"

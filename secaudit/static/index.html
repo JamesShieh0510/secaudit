@@ -318,7 +318,7 @@ function showTab(t) {
 // 文字用文字色（不用數列色）、嚴重度用保留的狀態色並一定搭配文字標籤。標籤一律 textContent。
 const SVGNS = "http://www.w3.org/2000/svg";
 const SEVS = [["high", "高風險"], ["medium", "中風險"], ["low", "低風險"]];
-const CATS = ["入侵跡象", "AI 與 Agent", "機密與憑證", "瀏覽器", "開機自動執行", "供應鏈與版本", "系統資源與常駐程式"];
+const CATS = ["入侵跡象", "AI 與 Agent", "機密與憑證", "瀏覽器", "開機自動執行", "供應鏈與版本", "系統資源與常駐程式", "掃描範圍"];
 const GROUP_NAME = {full: "完整掃描（含重新檢查）", quick: "快速掃描（排程、手動）", watch: "即時監看觸發的掃描"};
 const catColor = c => { const i = CATS.indexOf(c); return i >= 0 ? `var(--c${i + 1})` : "var(--c8)"; };
 let statsState = {days: 30, group: "full"};
