@@ -1717,6 +1717,58 @@ _op_lock = threading.Lock()
 _mount_lock = threading.Lock()     # hdiutil attach 一次一個
 
 
+def _keep_awake():
+    """caffeinate -d -i：不讓螢幕與系統閒置睡眠（螢幕睡眠後 macOS 會鎖定，1Password 也會自動上鎖）。最多 1 小時。"""
+    try:
+        return subprocess.Popen(["caffeinate", "-d", "-i", "-t", "3600"], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        return None
+
+
+def _stop_awake(p):
+    if p is not None:
+        try:
+            p.terminate()
+            p.wait(timeout=5)
+        except Exception:
+            pass
+
+
+PREKEY_AUTH_WAIT = 15 * 60      # 1Password 需要重新授權時，最多等你多久（期間每隔一段時間重跳授權視窗）
+PREKEY_RETRY_GAP = 30
+
+
+def _prekey_wait_auth(plan, s, vid, err, n, total):
+    """建立密碼失敗（通常是 1Password 鎖定、授權過期或授權視窗逾時）：先發 Telegram 叫你回來，
+    再反覆重試（每次重試都會重跳授權視窗），最多等 PREKEY_AUTH_WAIT 秒；成功就繼續，不用整批重來。"""
+    _notify("🔐 secaudit 需要你授權 1Password：預先建立 DMG 密碼做到第 %d / %d 個時，1Password 要求重新授權（%s）。"
+            "如果 Mac 螢幕已鎖定，請先解鎖螢幕，再解鎖 1Password，看到授權視窗按允許；最多等 %d 分鐘，之後才會停止後面的專案。"
+            % (n, total, err[:120], PREKEY_AUTH_WAIT // 60))
+    deadline = time.time() + PREKEY_AUTH_WAIT
+    tries = 0
+    while time.time() < deadline and not status.get("cancel"):
+        left = int((deadline - time.time()) // 60) + 1
+        status["phase"] = ("⏸ 等你授權 1Password（第 %d / %d 個，已通知 Telegram；請解鎖 1Password 並按允許，最多再等約 %d 分鐘）"
+                           % (n, total, left))
+        end = time.time() + PREKEY_RETRY_GAP
+        while time.time() < end and not status.get("cancel"):
+            time.sleep(max(0.05, min(1, end - time.time())))
+        if status.get("cancel"):
+            break
+        tries += 1
+        pre, err2 = _archive_prekey(plan, s, vid)
+        if pre:
+            _notify("✅ secaudit：已取得 1Password 授權，繼續預先建立密碼（第 %d / %d 個）。" % (n, total))
+            return pre, ""
+        err = err2 or err
+        if err.startswith("1Password 讀回"):
+            break
+    _notify("❌ secaudit：等了 %d 分鐘仍無法使用 1Password（%s），已停止後面的專案。回到電腦後，在執行紀錄按「🔁 再執行一次」即可接著做。"
+            % (PREKEY_AUTH_WAIT // 60, err[:120]))
+    return None, err
+
+
 def _archive_batch(plan, steps, results):
     """閒置專案批次封存：不需要下載的直接進封存佇列，雲端專案先在背景下載，下載完再排進佇列，
     由 ARCHIVE_WORKERS 個 worker 同時封存。按停止或 1Password 失敗時：不再開始新的專案，正在做的會做完。"""
@@ -1768,18 +1820,25 @@ def _archive_batch(plan, steps, results):
             record(s, False, "未執行：有 %d 個檔案不屬於你（例如 %s），macOS 建立 DMG 時會卡在等系統管理員授權；"
                              "請先 sudo chown -R 把資料夾改回你的帳號再封存" % (fo, "、".join(sample)), True)
             steps.remove(s)
+    awake = _keep_awake()   # 建密碼期間不讓螢幕睡眠 / 鎖定（鎖定螢幕會讓 1Password 跟著上鎖，授權視窗也跳不出來）
+    if steps:
+        _notify("🔐 secaudit：開始為 %d 個閒置專案預先在 1Password 建立 DMG 密碼。過程中 1Password 可能會跳出授權視窗，"
+                "請留在電腦前按允許；全部建好後會再通知你，之後就可以離開。" % len(steps))
     for i, s in enumerate(steps):
         if status.get("cancel"):
             break
         status["phase"] = ("預先在 1Password 建立密碼 %d / %d（請留在電腦前，看到 1Password 的授權視窗請按允許；"
                            "全部建好後就可以離開）" % (i + 1, len(steps)))
         pre, err = _archive_prekey(plan, s, vid)
+        if not pre and not err.startswith("1Password 讀回"):
+            pre, err = _prekey_wait_auth(plan, s, vid, err, i + 1, len(steps))
         if not pre:
             plan["_op_failed"] = True
             record(s, False, "無法把密碼存進 1Password（%s）；原資料夾沒有動" % err)
             break
         s["_pre"] = pre
         keyed.append(s)
+    _stop_awake(awake)
     for s in steps:
         if s not in keyed and not any(r["id"] == s["id"] for r in results):
             skip(s)
