@@ -52,6 +52,22 @@ section.tab{display:none}section.tab.on{display:block}
 .vc{position:relative}.vh{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.vtog{padding:3px 10px;font-size:12px}
 .lg{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin:8px 0 2px}.lg span{display:inline-flex;align-items:center;gap:6px}
 .lk{display:inline-block;width:14px;height:2px;border-radius:1px}.bk{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px}
+.ptiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-top:10px}
+.ptile{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;min-width:0}
+.ptile .k{font-size:12px;color:var(--muted)}.ptile .v{font-size:24px;font-weight:700;margin:2px 0;font-variant-numeric:tabular-nums}
+.ptile .s{font-size:12px;color:var(--muted)}
+.lvl{display:inline-block;font-size:11px;font-weight:600;padding:1px 8px;border-radius:9px;white-space:nowrap;border:1px solid currentColor}
+.lvl.high{color:var(--s-high)}.lvl.medium{color:var(--s-med)}.lvl.low{color:var(--muted)}.lvl.ok{color:var(--ok)}
+.diag{display:flex;gap:10px;align-items:flex-start;padding:10px 2px;border-bottom:1px solid var(--line)}.diag:last-child{border:0}
+.diag .t{font-weight:600}.diag .a{font-size:13px;color:var(--muted);margin-top:2px;line-height:1.5}
+.pgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr));gap:0 16px}
+#perfApps,#perfProcs{overflow-x:auto}.ptab td:first-child{word-break:break-word}
+.ptab{width:100%;font-size:13px}.ptab td,.ptab th{padding:6px 5px;vertical-align:top}.ptab .n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ptab details>summary{cursor:pointer;list-style:none}.ptab details>summary::-webkit-details-marker{display:none}
+.ptab .sub{font-size:12px;color:var(--muted);word-break:break-all;margin-top:4px;line-height:1.5}
+.flag{display:inline-block;font-size:11px;padding:0 6px;border-radius:8px;margin:2px 4px 0 0;border:1px solid currentColor}
+.flag.high{color:var(--s-high)}.flag.medium{color:var(--s-med)}.flag.low{color:var(--muted)}
+.psegs{display:flex;gap:4px;margin:8px 0}.psegs button{padding:4px 12px;font-size:13px}.psegs button.on{background:var(--fg);color:var(--bg);border-color:var(--fg)}
 .vp{position:relative;margin-top:6px}.vp svg{display:block;max-width:100%;overflow:visible}
 .vg{stroke:var(--v-grid);stroke-width:1}.vb{stroke:var(--v-base);stroke-width:1}.vx{stroke:var(--muted);stroke-width:1}
 .vax{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}.vrow{fill:var(--fg)}.vlab{fill:var(--fg);font-size:11px;font-weight:600}
@@ -145,6 +161,7 @@ body.noscroll{overflow:hidden}
   <nav class="tabs" id="tabs">
     <button data-tab="reports">📋 報告</button>
     <button data-tab="stats">📈 統計</button>
+    <button data-tab="perf">⚡ 效能</button>
     <button data-tab="feed">🧯 漏洞快訊</button>
     <button data-tab="fix">🛠 處理<span class="badge" id="tbFix"></span></button>
     <button data-tab="settings">⚙️ 設定<span class="badge" id="tbSet"></span></button>
@@ -169,6 +186,15 @@ body.noscroll{overflow:hidden}
       <button type="button" data-group="watch">即時監看</button>
     </div>
     <div id="statsBody"></div>
+  </section>
+  <section class="tab" data-tab="perf">
+    <div class="vfilter">
+      <span class="muted" id="perfWhen">即時分析（每 3 秒更新，只在開著這個頁籤時取樣）</span>
+      <span style="flex:1"></span>
+      <button type="button" id="perfPause">⏸ 暫停</button>
+      <button type="button" id="perfCopy">📋 複製給 AI 分析</button>
+    </div>
+    <div id="perfBody"><div class="muted" style="padding:20px 0">取樣中…（第一次約 2 秒）</div></div>
   </section>
   <section class="tab" data-tab="feed">
   <div class="card">
@@ -303,7 +329,7 @@ body.noscroll{overflow:hidden}
 </div>
 <script>
 // 分頁標籤：記住上次看的分頁（網址 #分頁 優先）
-const TABS = ["reports", "stats", "feed", "fix", "settings", "sop"];
+const TABS = ["reports", "stats", "perf", "feed", "fix", "settings", "sop"];
 function showTab(t) {
   if (!TABS.includes(t)) t = "reports";
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
@@ -311,6 +337,7 @@ function showTab(t) {
   try { localStorage.setItem("secaudit-tab", t); } catch (e) {}
   if (t === "sop") loadSop();
   if (t === "stats") loadStats();
+  perfTimer(t === "perf");
   if (location.hash.slice(1).split("/")[0] !== t) history.replaceState(null, "", location.pathname + location.search + "#" + t);
 }
 // ================================================================ 📈 統計（手刻 SVG 圖表，不載入外部程式）
@@ -380,7 +407,7 @@ function lineChart(plot, xs, series, opt = {}) {
     sv("text", {x: L - 6, y: y + 4, "text-anchor": "end", class: "vax"}, svg).textContent = fmtN(v) + (opt.unit || ""); }
   const nt = Math.max(2, Math.min(6, xs.length, Math.floor((W - L - R) / (opt.hourly ? 110 : 56))));
   for (let i = 0; i < nt; i++) { const t = x0 + (x1 - x0) * (nt === 1 ? 0.5 : i / (nt - 1));
-    sv("text", {x: X(t), y: H - 6, "text-anchor": "middle", class: "vax"}, svg).textContent = opt.hourly ?
+    sv("text", {x: X(t), y: H - 6, "text-anchor": "middle", class: "vax"}, svg).textContent = opt.xfmt ? opt.xfmt(t) : opt.hourly ?
       new Date(t).toLocaleString([], {month: "numeric", day: "numeric", hour: "2-digit"}) : new Date(t).toLocaleDateString([], {month: "numeric", day: "numeric"}); }
   series.forEach(s => {
     if (opt.area && series.length === 1) sv("path", {d: `M${X(tx[0])},${Y(0)} ` + tx.map((t, i) => `L${X(t)},${Y(s.values[i])}`).join(" ") + ` L${X(tx[tx.length - 1])},${Y(0)} Z`, fill: s.color, opacity: 0.1}, svg);
@@ -462,6 +489,124 @@ function statTiles(host, items) {
     c.appendChild(d); g.appendChild(c); });
   host.appendChild(g);
 }
+
+// ================================================================ ⚡ 效能（即時；所有程式名稱與指令都是不可信資料，一律 textContent）
+let perfState = {timer: null, paused: false, busy: false, list: "cpu", last: null, charts: null};
+function perfTimer(on) {
+  clearInterval(perfState.timer); perfState.timer = null;
+  if (!on) return;
+  loadPerf(); perfState.timer = setInterval(() => { if (!perfState.paused && !document.hidden) loadPerf(); }, 3000);
+}
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+const LVL = {high: "嚴重", medium: "注意", low: "參考", ok: "正常"};
+const fmtAge = s => s >= 86400 ? Math.floor(s / 86400) + " 天" : s >= 3600 ? Math.floor(s / 3600) + " 小時" : Math.max(1, Math.floor(s / 60)) + " 分";
+const fmtMB = mb => mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : mb + " MB";
+const SIGN = {apple: "Apple", devid: "已知開發者", appstore: "App Store", adhoc: "自行簽章", unsigned: "沒有簽章", missing: "執行檔已刪除", unknown: "未知", other: "其他"};
+function perfTile(host, label, value, unit, sub, lvl) {
+  const c = el("div", "ptile"); const k = el("div", "k", label);
+  if (lvl) { k.appendChild(document.createTextNode(" ")); k.appendChild(el("span", "lvl " + lvl, LVL[lvl])); }
+  c.appendChild(k); const v = el("div", "v", value); if (unit) { const u = el("small", "", unit); u.style.cssText = "font-size:13px;font-weight:500;color:var(--muted);margin-left:2px"; v.appendChild(u); }
+  c.appendChild(v); c.appendChild(el("div", "s", sub || "")); host.appendChild(c);
+}
+async function loadPerf() {
+  if (perfState.busy) return; perfState.busy = true;
+  let d; try { d = await api("/api/perf"); } catch (e) { perfState.busy = false; return; }
+  perfState.busy = false; if (!d || !d.system) return;
+  perfState.last = d; renderPerf(d);
+}
+function renderPerf(d) {
+  const host = $("#perfBody"), s = d.system, cpu = s.cpu || {}, mem = s.mem || {}, io = s.disk || {}, th = s.thermal || {};
+  $("#perfWhen").textContent = `即時分析・${d.time} 更新・${d.nproc} 個程式（每 3 秒更新，只在開著這個頁籤時取樣）`;
+  if (!perfState.charts) {
+    host.replaceChildren();
+    const tiles = el("div", "ptiles"); tiles.id = "perfTiles"; host.appendChild(tiles);
+    const dg = el("div", "card"); dg.appendChild(el("b", "", "為什麼卡、該怎麼做")); const dl = el("div"); dl.id = "perfDiag"; dg.appendChild(dl); host.appendChild(dg);
+    const grid = el("div", "pgrid"); host.appendChild(grid);
+    perfState.charts = {};
+    [["busy", "CPU 使用率", "整台電腦，100% = 所有核心都在忙", "var(--c1)", "%"], ["disk", "磁碟讀寫", "所有磁碟合計（MB/s）", "var(--c3)", ""]].forEach(([key, title, sub, color, unit]) => {
+      const box = el("div"); grid.appendChild(box);
+      chartCard(box, title, sub, plot => { perfState.charts[key] = {plot, color, unit, title}; drawPerfChart(key); }, null);
+    });
+    const apps = el("div", "card"); apps.appendChild(el("b", "", "依 App 合併（含它的子程序）")); apps.appendChild(el("div", "muted", "Chrome、Electron App 會開很多子程序，合併後才看得出是哪個 App 在吃資源"));
+    const at = el("div"); at.id = "perfApps"; apps.appendChild(at); host.appendChild(apps);
+    const pc = el("div", "card"); pc.appendChild(el("b", "", "程式明細")); 
+    const seg = el("div", "psegs"); [["cpu", "最吃 CPU"], ["mem", "最吃記憶體"]].forEach(([k, t]) => { const b = el("button", k === perfState.list ? "on" : "", t); b.type = "button";
+      b.onclick = () => { perfState.list = k; seg.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b)); renderProcs(perfState.last); }; seg.appendChild(b); });
+    pc.appendChild(seg); pc.appendChild(el("div", "muted", "點一列看執行檔、指令、由誰啟動與建議。疑點沿用常駐程式監控的判斷；有疑點不一定是惡意程式，先確認再處理，不要直接結束不認得的系統程式。"));
+    const pt = el("div"); pt.id = "perfProcs"; pc.appendChild(pt); host.appendChild(pc);
+  }
+  const tiles = $("#perfTiles"); tiles.replaceChildren();
+  const busy = cpu.busy ?? 0, n = s.ncpu || 1, load = (s.load || [0])[0];
+  perfTile(tiles, "CPU 使用率", Math.round(busy), "%", `使用者 ${Math.round(cpu.user || 0)}%・系統 ${Math.round(cpu.sys || 0)}%`, busy >= 85 ? "high" : busy >= 60 ? "medium" : "ok");
+  perfTile(tiles, "系統負載（load）", load.toFixed(1), ` / ${n} 核`, `5 分 ${(s.load || [])[1]?.toFixed(1)}・15 分 ${(s.load || [])[2]?.toFixed(1)}`, load > n * 1.5 ? "high" : load > n ? "medium" : "ok");
+  const pr = s.pressure || 1;
+  perfTile(tiles, "記憶體", mem.used_gb ?? "—", ` / ${Math.round((s.mem_mb || 0) / 1024)} GB`, `壓縮 ${mem.compressed_gb ?? "—"} GB・壓力${{1: "正常", 2: "警告", 4: "危險"}[pr] || "—"}`, pr >= 4 ? "high" : pr >= 2 ? "medium" : "ok");
+  const sw = (s.swap_mb || 0) / 1024;
+  perfTile(tiles, "Swap", sw.toFixed(1), " GB", "記憶體不夠時搬到磁碟的量", sw >= 8 ? "medium" : "ok");
+  perfTile(tiles, "磁碟讀寫", io.mb_s ?? "—", " MB/s", `${io.tps ?? "—"} 次/秒`, (io.mb_s || 0) >= 300 ? "medium" : "ok");
+  const ts = th.state;
+  perfTile(tiles, "溫度（熱狀態）", ts === null || ts === undefined ? "—" : ({0: "正常", 1: "偏高", 2: "降頻中", 3: "危急"}[ts] || th.name), "",
+    (th.battery_temp ? `電池 ${th.battery_temp} °C・` : "") + (ts >= 2 ? "CPU 正在降頻" : ts === 1 ? "再升高就會降頻" : "沒有降頻"),
+    ts >= 2 ? "high" : ts === 1 ? "medium" : ts === 0 ? "ok" : null);
+  const dl = $("#perfDiag"); dl.replaceChildren();
+  d.diagnosis.forEach(x => { const r = el("div", "diag"); r.appendChild(el("span", "lvl " + x.level, LVL[x.level] || x.level));
+    const b = el("div"); b.appendChild(el("div", "t", x.title)); b.appendChild(el("div", "a", x.advice)); r.appendChild(b); dl.appendChild(r); });
+  Object.keys(perfState.charts).forEach(drawPerfChart);
+  const at = $("#perfApps"); at.replaceChildren(); const t = el("table", "ptab"); const h = t.insertRow();
+  ["App / 程式", "CPU", "記憶體", "程序數"].forEach((x, i) => h.appendChild(el("th", i ? "n" : "", x)));
+  const openA = new Set([...document.querySelectorAll("#perfApps details[open]")].map(x => x.dataset.app));
+  d.groups.forEach(g => { const r = t.insertRow(); const c0 = r.insertCell();
+    if (g.known) { const dt = el("details"); dt.dataset.app = g.name; if (openA.has(g.name)) dt.open = true;
+      const sm = el("summary"); sm.appendChild(el("b", "", g.name)); sm.appendChild(el("div", "sub", g.known.what + " ▸")); dt.appendChild(sm);
+      dt.appendChild(el("div", "sub", "為什麼會忙：" + g.known.why)); dt.appendChild(el("div", "sub", "建議：" + g.known.tip)); c0.appendChild(dt); }
+    else c0.appendChild(el("b", "", g.name));
+    const c1 = r.insertCell(); c1.className = "n"; c1.textContent = Math.round(g.cpu) + "%";
+    const c2 = r.insertCell(); c2.className = "n"; c2.textContent = fmtMB(g.rss_mb);
+    const c3 = r.insertCell(); c3.className = "n"; c3.textContent = g.count; });
+  at.appendChild(t);
+  renderProcs(d);
+}
+function drawPerfChart(key) {
+  const c = perfState.charts[key], d = perfState.last; if (!c || !d) return;
+  if (c.plot.matches(":hover")) return;          // 正在看提示框時不重畫
+  c.plot.replaceChildren();
+  const h = d.history.filter(p => p[key] !== null && p[key] !== undefined);
+  lineChart(c.plot, h.map(p => p.t * 1000), [{label: c.title, color: c.color, values: h.map(p => p[key])}],
+    {h: 170, unit: c.unit, area: true, empty: "累積幾個取樣點後就會出現", label: c.title,
+     xfmt: t => new Date(t).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}),
+     tipTitle: i => new Date(h[i].t * 1000).toLocaleTimeString()});
+}
+function renderProcs(d) {
+  if (!d) return;
+  const host = $("#perfProcs"); const open = new Set([...host.querySelectorAll("details[open]")].map(x => x.dataset.pid));
+  host.replaceChildren(); const t = el("table", "ptab"); const h = t.insertRow();
+  ["程式", "CPU", "記憶體", "執行", "簽章"].forEach((x, i) => h.appendChild(el("th", i && i < 4 ? "n" : "", x)));
+  (perfState.list === "cpu" ? d.top_cpu : d.top_mem).forEach(p => {
+    const r = t.insertRow(); const c0 = r.insertCell(); const dt = el("details"); dt.dataset.pid = p.pid; if (open.has(String(p.pid))) dt.open = true;
+    const sm = el("summary"); sm.appendChild(el("b", "", p.name)); if (p.proc !== p.name) sm.appendChild(el("span", "muted", " " + p.proc));
+    sm.appendChild(el("span", "muted", ` pid ${p.pid}${p.self ? "（secaudit）" : ""}`));
+    if (p.flags.length) { const f = el("div"); p.flags.forEach(([lv, tx]) => f.appendChild(el("span", "flag " + lv, tx))); sm.appendChild(f); }
+    else if (p.known) sm.appendChild(el("div", "sub", p.known.what));
+    dt.appendChild(sm);
+    [["執行檔", p.exe], ["指令", p.args], ["由誰啟動（由近到遠）", p.parent], ["簽章", (SIGN[p.signer] || p.signer) + (p.signer_who && p.signer !== "apple" ? "：" + p.signer_who : "")],
+     ["執行身分", p.uid === 0 ? "root（系統）" : "uid " + p.uid]].forEach(([k, v]) => dt.appendChild(el("div", "sub", k + "：" + v)));
+    if (p.known) { dt.appendChild(el("div", "sub", "為什麼會忙：" + p.known.why)); dt.appendChild(el("div", "sub", "建議：" + p.known.tip)); }
+    else if (!p.flags.length) dt.appendChild(el("div", "sub", "建議：確認是不是你在用的程式；不認得就搜尋程式名稱或按上方「📋 複製給 AI 分析」。要結束可以用「活動監視器」。"));
+    else dt.appendChild(el("div", "sub", "建議：先不要直接結束。確認執行檔位置與由誰啟動是否合理；不認得就按上方「📋 複製給 AI 分析」，或到「📋 報告」看常駐程式的紀錄。"));
+    c0.appendChild(dt);
+    const c1 = r.insertCell(); c1.className = "n"; c1.textContent = Math.round(p.cpu) + "%";
+    const c2 = r.insertCell(); c2.className = "n"; c2.textContent = fmtMB(p.rss_mb);
+    const c3 = r.insertCell(); c3.className = "n"; c3.textContent = fmtAge(p.age);
+    r.insertCell().textContent = SIGN[p.signer] || p.signer;
+  });
+  host.appendChild(t);
+}
+document.getElementById("perfPause").onclick = () => { perfState.paused = !perfState.paused; $("#perfPause").textContent = perfState.paused ? "▶ 繼續" : "⏸ 暫停"; if (!perfState.paused) loadPerf(); };
+document.getElementById("perfCopy").onclick = async () => { const b = document.getElementById("perfCopy");
+  try { const r = await api("/api/perf?md=1"); await navigator.clipboard.writeText(r.md); b.textContent = "✅ 已複製"; }
+  catch (e) { b.textContent = "❌ 複製失敗"; }
+  setTimeout(() => b.textContent = "📋 複製給 AI 分析", 2000); };
+
 async function loadStats() {
   const host = $("#statsBody"); host.style.opacity = 0.5;      // 重新載入時保留舊的畫面（不閃爍）
   let d;

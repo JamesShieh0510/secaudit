@@ -167,6 +167,13 @@ def make_handler(engine: Engine, token: str, port: int):
                 ev = [e for e in d.get("events", []) if e.get("ts", 0) >= cut]
                 return self._send(200, {"events": ev[::-1], "baseline": d.get("baseline", ""),
                                         "status": engine.status.get("resources") or {}})
+            if u.path == "/api/perf":
+                # 「⚡ 效能」頁籤：即時取樣（有人開著頁籤才會呼叫；2.5 秒快取）
+                from . import perf
+                d = perf.live(engine)
+                if "md=1" in (u.query or ""):
+                    return self._send(200, {"md": perf.as_markdown(d)})
+                return self._send(200, d)
             if u.path in VENDOR:
                 with open(os.path.join(STATIC, u.path[len("/static/"):]), "rb") as fh:
                     data = fh.read()

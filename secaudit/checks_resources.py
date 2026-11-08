@@ -95,8 +95,34 @@ def snapshot():
     return procs
 
 
+THERMAL_NAME = {0: "正常", 1: "偏高", 2: "嚴重（已降頻）", 3: "危急（大幅降頻）"}
+
+
+def thermal_state():
+    """macOS 官方的熱狀態（NSProcessInfo.thermalState，系統決定要不要降頻的依據；不需要 sudo）：
+    0 正常、1 偏高（開始升溫，部分系統會稍微限制）、2 嚴重（已降頻）、3 危急。取不到回傳 None。"""
+    try:
+        out = subprocess.run(["osascript", "-l", "JavaScript", "-e",
+                              'ObjC.import("Foundation"); $.NSProcessInfo.processInfo.thermalState'],
+                             capture_output=True, text=True, timeout=5, env=safe_env()).stdout.strip()
+        return int(out) if out.isdigit() else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def battery_temp():
+    """電池溫度 °C（筆電才有；桌機回傳 None）。"""
+    try:
+        out = subprocess.run(["ioreg", "-rn", "AppleSmartBattery"], capture_output=True, text=True, timeout=5,
+                             env=safe_env()).stdout
+        m = re.search(r'"Temperature" = (\d+)', out)
+        return round(int(m.group(1)) / 100, 1) if m else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
 def system_stats():
-    s = {}
+    s = {"thermal": thermal_state(), "battery_temp": battery_temp()}
     try:
         out = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level", "vm.swapusage", "hw.memsize", "hw.ncpu"],
                              capture_output=True, text=True, timeout=5, env=safe_env()).stdout.splitlines()
@@ -420,6 +446,23 @@ class ResourceMonitor:
                 self._event("idle-cpu", "system", "medium", "閒置時整台電腦 CPU 偏高",
                             "\n".join(["CPU：使用者閒置期間，最近 %d 分鐘整台電腦平均 %.0f%%（%d 核）" % (WINDOW, avg, ncpu),
                                        ctx_rows, "最吃 CPU 的程式：%s" % _top(procs, "cpu")]))
+        # 溫度：嚴重 / 危急 = 已經在降頻；偏高持續 5 分鐘 = 快要降頻，提早處理最吃 CPU 的程式
+        th = self.__dict__.setdefault("thermal", [])
+        if s.get("thermal") is not None:
+            th.append(s["thermal"])
+            del th[:-WINDOW]
+        if th and th[-1] >= 2:
+            self._event("thermal", "system", "high" if th[-1] >= 3 else "medium", "溫度%s，CPU 正在降頻" % THERMAL_NAME[th[-1]],
+                        "\n".join(["熱狀態：%s（macOS 正在降低 CPU 速度來降溫，電腦會明顯變慢）" % THERMAL_NAME[th[-1]],
+                                   "電池溫度：%.1f °C" % s["battery_temp"] if s.get("battery_temp") else "電池溫度：—",
+                                   ctx_rows, "最吃 CPU 的程式：%s" % _top(procs, "cpu"),
+                                   "建議：結束或暫停最吃 CPU 的程式、讓電腦通風（不要放在床上或腿上）、拔掉不必要的外接螢幕與裝置"]))
+        elif len(th) >= 5 and min(th[-5:]) >= 1:
+            self._event("thermal", "system-warm", "low", "溫度偏高已持續 5 分鐘，再升高就會降頻",
+                        "\n".join(["熱狀態：偏高（持續 5 分鐘）",
+                                   "電池溫度：%.1f °C" % s["battery_temp"] if s.get("battery_temp") else "電池溫度：—",
+                                   ctx_rows, "最吃 CPU 的程式：%s" % _top(procs, "cpu"),
+                                   "建議：先處理最吃 CPU 的程式，避免進入降頻"]))
         mem = s.get("mem_mb") or 1
         if len(self.pressure) >= 5 and min(self.pressure) >= 2 or self.pressure[-1:] == [4]:
             lvl = "危險" if self.pressure[-1] == 4 else "警告"
@@ -456,7 +499,8 @@ class ResourceMonitor:
         st = self.engine.status.setdefault("resources", {})
         st.update(last=time.strftime("%H:%M:%S"), known=len(self.state["known"]), events=len(self.state["events"]),
                   cpu="%.0f%%" % (self.total[-1][0] if self.total else 0), swap_gb=round(s.get("swap_mb", 0) / 1024, 1),
-                  pressure={1: "正常", 2: "警告", 4: "危險"}.get(s.get("pressure"), "?"))
+                  pressure={1: "正常", 2: "警告", 4: "危險"}.get(s.get("pressure"), "?"),
+                  thermal=THERMAL_NAME.get(s.get("thermal"), "—"), battery_temp=s.get("battery_temp"))
         try:
             from . import stats as _stats
             _stats.record_resource_sample(self.total[-1][0] if self.total else 0, s.get("swap_mb", 0) / 1024, s.get("pressure", 1))

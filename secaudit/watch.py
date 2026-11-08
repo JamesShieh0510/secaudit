@@ -7,6 +7,7 @@
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import time
 
@@ -26,18 +27,35 @@ def _st(p):
         return None
 
 
-def sig_dir(path, depth):
-    """資料夾指紋：depth 層以內所有項目的 (相對路徑, stat)。"""
+def _st_entry(p):
+    """檔案看 (大小, 修改時間, inode, 權限)；資料夾只看 (inode, 權限)。
+    資料夾的修改時間只代表「裡面有東西變了」，裡面的項目本來就各自比對；算進去會讓一直在寫的資料夾不停觸發。"""
+    st = _st(p)
+    if st and stat.S_ISDIR(st[3]):
+        return ("d", st[2], st[3])
+    return st
+
+
+def sig_dir(path, depth, hidden_only=False):
+    """資料夾指紋：depth 層以內所有項目的 (相對路徑, stat)。
+    hidden_only：第一層只看隱藏項目（例如 ~/Library/.xyz），跟快速掃描「可疑位置的執行檔」的範圍一致。"""
+    from .checks_threats import SKIP_NAMES
     out = []
     base_depth = path.rstrip(os.sep).count(os.sep)
     try:
         for dp, dns, fns in os.walk(path):
+            level = dp.count(os.sep) - base_depth
             dns[:] = [d for d in dns if d not in SKIP and not d.startswith("temp_git_")]
-            if dp.count(os.sep) - base_depth >= depth:
+            if hidden_only and level == 0:
+                dns[:] = [d for d in dns if d.startswith(".") and d not in SKIP_NAMES]
+                fns = [f for f in fns if f.startswith(".") and f not in SKIP_NAMES]
+            if level >= depth:
                 dns[:] = []
+                if level > depth:
+                    continue
             for n in dns + fns:
                 full = os.path.join(dp, n)
-                out.append((os.path.relpath(full, path), _st(full)))
+                out.append((os.path.relpath(full, path), _st_entry(full)))
     except OSError:
         return None
     return hashlib.sha1(repr(sorted(out)).encode()).hexdigest() if out or os.path.isdir(path) else None
@@ -83,9 +101,9 @@ def build_watch_list():
         p = os.path.expanduser(p)
         w.append((label, lambda p=p: _st(p)))
 
-    def d(label, p, depth=1):
+    def d(label, p, depth=1, hidden_only=False):
         p = os.path.expanduser(p)
-        w.append((label, lambda p=p, depth=depth: sig_dir(p, depth)))
+        w.append((label, lambda p=p, depth=depth: sig_dir(p, depth, hidden_only)))
 
     w.append(("~/.claude.json 的 MCP 設定", ClaudeJsonSig(os.path.join(HOME, ".claude.json"))))
     for p in ("~/.claude/settings.json", "~/.claude/settings.local.json", "~/.claude/CLAUDE.md",
@@ -100,7 +118,7 @@ def build_watch_list():
         f(p, p)
     d("~/.ssh", "~/.ssh", 1)
     d("/Users/Shared", "/Users/Shared", 2)
-    d("~/Library 隱藏資料夾", "~/Library", 1)
+    d("~/Library 隱藏資料夾", "~/Library", 2, hidden_only=True)
     for p, label in LAUNCH_DIRS:
         d(label, p, 1)
     for p, label in SKILL_ROOTS:
