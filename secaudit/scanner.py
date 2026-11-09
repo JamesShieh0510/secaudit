@@ -297,6 +297,7 @@ def _old_paths(f):
 
 # 重新檢查時：這些規則的問題只能靠完整掃描重新判定（例如要統計整個資料夾樹），沿用舊結果
 CARRY_RULES = ("ransom-ext", "ransom-note")
+CARRY_NOTE = "（沿用舊報告：這類問題要統計整個資料夾，需完整掃描才能重新確認）"
 
 
 def run_recheck(old, cache=None, progress=None, cancel=None, online=True):
@@ -330,7 +331,7 @@ def run_recheck(old, cache=None, progress=None, cancel=None, online=True):
             if sample in BENIGN_NAMES or ext in BENIGN_EXT or is_fixture_path(os.path.expanduser(f.get("path", "")) + "/"):
                 excluded.append(f)
             else:
-                carried.append(dict(f, detail="（沿用舊報告：這類問題要統計整個資料夾，需完整掃描才能重新確認）" + (f.get("detail") or "")))
+                carried.append(dict(f, detail=CARRY_NOTE + (f.get("detail") or "").replace(CARRY_NOTE, "")))   # 重新檢查再重新檢查不要一直疊
             continue
         for p in _old_paths(f):
             if pruned_by_rules(p):

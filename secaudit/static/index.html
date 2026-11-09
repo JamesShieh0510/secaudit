@@ -110,6 +110,8 @@ section.tab{display:none}section.tab.on{display:block}
 .hrow .rerun{margin-left:auto;padding:3px 10px;font-size:12px}
 .actlist button.queued{opacity:.65;cursor:not-allowed;border-style:dashed}
 .qtag{margin-left:8px;font-size:11px;font-weight:600;color:var(--accent);border:1px solid var(--accent);border-radius:8px;padding:0 6px}
+.actlist button.done{opacity:.65}.actlist button.done.on{opacity:1}
+.qtag.dtag{color:var(--ok,#2e9e5b);border-color:var(--ok,#2e9e5b)}
 .qrow{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;padding:6px 2px;border-bottom:1px solid var(--line)}.qrow button{margin-left:auto;padding:3px 10px;font-size:12px}
 .actempty{padding:40px 10px;text-align:center}
 .acthead{padding:14px 0 8px}.acthead .t{font-size:16px;font-weight:700}
@@ -119,8 +121,6 @@ section.tab{display:none}section.tab.on{display:block}
 .sgrp{border:1px solid var(--line);border-radius:10px;margin:10px 0;overflow:hidden}
 .sgh{display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--code)}
 .sgh .sgt{flex:1;display:flex;align-items:baseline;gap:8px;border:0;background:none;padding:2px 0;text-align:left;cursor:pointer}
-.actlist button.done{opacity:.65}.actlist button.done.on{opacity:1}
-.qtag.dtag{color:var(--ok,#2e9e5b);border-color:var(--ok,#2e9e5b)}
 .sgh .arrow{margin-left:auto;color:var(--muted);transition:transform .15s}.sgrp.fold .arrow{transform:rotate(-90deg)}
 .sgrp.fold .sgb{display:none}.sgh .gack{padding:3px 10px;font-size:12px;white-space:nowrap}.sgb{padding:0 10px}.sgb .step:last-child{border-bottom:0}
 .step{display:flex;gap:10px;align-items:flex-start;padding:10px 4px;border-bottom:1px solid var(--line);cursor:pointer}
@@ -1191,6 +1191,18 @@ async function loadActions() {
   clearTimeout(actTimer); actTimer = setTimeout(loadActions, r.status.running ? 1500 : 10000);
 }
 let actActive = "", actCatalog = {}, actSeq = 0;
+// 預覽過、確定沒有項目要處理的動作 → {id: "HH:MM"}。只存在這個頁面裡；再點一次會重新檢查，有新項目就恢復正常。
+const actEmpty = {};
+function renderActList() {
+  $("#actList").innerHTML = Object.values(actCatalog).map(a => { const q = actQueue.find(x => x.action === a.id), done = !q && actEmpty[a.id];
+    return `<button data-act="${esc(a.id)}" class="${a.id === actActive ? "on" : ""}${q ? " queued" : ""}${done ? " done" : ""}" ${q ? "disabled" : ""}
+        ${done ? 'title="上次檢查沒有需要處理的項目，再按一次會重新檢查"' : ""}>
+      <span>${esc(a.icon)} ${esc(a.title)}${q ? `<span class="qtag">${q.state === "authorizing" ? "🔒 等待授權" : "🕒 已排隊"}</span>`
+        : done ? '<span class="qtag dtag">✅ 已完成</span>' : ""}</span>
+      ${q ? `<span class="h">${esc(q.n)} 項・${esc(q.queued_at.slice(11, 16))} 排隊，前一個完成後自動開始</span>`
+        : done ? `<span class="h">${esc(done)} 檢查：沒有需要處理的項目</span>` : a.hint ? `<span class="h">${esc(a.hint)}</span>` : ""}</button>`; }).join("");
+  document.querySelectorAll("#actList button[data-act]").forEach(b => b.onclick = () => previewAction(b.dataset.act));
+}
 // 右邊的「預覽 / 執行紀錄」頁籤：選動作時切到預覽，開始執行時切到執行紀錄
 function paneTab(p) {
   document.querySelectorAll(".ptabs button").forEach(b => b.classList.toggle("on", b.dataset.p === p));
@@ -1210,7 +1222,7 @@ function stepsGrouped(steps) {
     <div class="sgh"><input type="checkbox" class="grpBox" title="勾選 / 取消這一類的全部項目">
       <button type="button" class="sgt"><b>${esc(g)}</b> <span class="muted gcnt"></span><span class="arrow">▾</span></button>
       ${by[g].some(s => s.ackable) ? `<button type="button" class="gack" data-ids="${esc(by[g].filter(s => s.ackable).map(s => s.id).join(","))}"
-        title="這一類通常不該搬走或刪除：整類標記為已確認無害，之後不再列為風險（檔案內容一改變標記就失效）">✅ 整類標記為已確認無害</button>` : ""}</div>
+        title="這一類通常不該搬走或刪除：標記為已確認無害，之後不再列為風險（檔案內容一改變標記就失效）。先勾選就只標記勾選的項目，都不勾就整類標記">✅ 整類標記為已確認無害</button>` : ""}</div>
     <div class="sgb">${by[g].map(stepHtml).join("")}</div></div>`).join("");
 }
 // 修復預覽：一次只顯示一個動作；標題、勾選數與執行按鈕固定在頂端，項目再多也不用捲到最下面
@@ -1224,6 +1236,9 @@ async function previewAction(id, report, focus) {
   if (seq !== actSeq) return;          // 已經切換到別的動作，這份預覽作廢
   if (p.error) { $("#actPlan").innerHTML = `<div class="acthead"><div class="t">${esc(a.icon)} ${esc(a.title)}</div><div style="color:var(--high)">❌ ${esc(p.error)}</div></div>`; return; }
   actPlan = p;
+  const wasEmpty = !!actEmpty[id];
+  if (p.steps.length) delete actEmpty[id]; else actEmpty[id] = new Date().toTimeString().slice(0, 5);
+  if (wasEmpty !== !!actEmpty[id] || !p.steps.length) renderActList();
   const rec = p.steps.filter(s => s.default !== false).length;
   const many = p.steps.length > 8;
   $("#actPlan").innerHTML = `<div class="acthead"><div class="t">${esc(a.icon)} ${esc(p.title)}</div>
@@ -1252,7 +1267,13 @@ async function previewAction(id, report, focus) {
   const syncGroups = () => document.querySelectorAll("#actSteps .sgrp").forEach(g => {
     const bs = [...g.querySelectorAll(".actStep")], n = bs.filter(x => x.checked).length, gb = g.querySelector(".grpBox");
     gb.checked = n === bs.length && n > 0; gb.indeterminate = n > 0 && n < bs.length;
-    g.querySelector(".gcnt").textContent = `已選 ${n} / ${bs.length}`; });
+    g.querySelector(".gcnt").textContent = `已選 ${n} / ${bs.length}`;
+    const ab = g.querySelector(".gack"); if (ab && !ab.dataset.arm) ab.textContent = ackLabel(ackIds(g, ab)); });
+  // 標記無害：這一類有勾選的項目 → 只標記勾選的；都沒勾 → 整類
+  const ackIds = (g, ab) => { const all = ab.dataset.ids.split(","), ok = new Set(all);
+    const sel = [...g.querySelectorAll(".actStep:checked")].map(x => x.value).filter(v => ok.has(v));
+    return {ids: sel.length ? sel : all, part: sel.length > 0}; };
+  const ackLabel = a => a.part ? `✅ 把勾選的 ${a.ids.length} 項標記為已確認無害` : "✅ 整類標記為已確認無害";
   const count0 = count;
   count = () => { count0(); syncGroups(); };
   document.querySelectorAll("#actSteps .sgrp").forEach(g => {
@@ -1261,27 +1282,16 @@ async function previewAction(id, report, focus) {
     const ab = g.querySelector(".gack");
     if (ab) ab.onclick = async () => {
       // 不用 confirm()：改成再按一次確認
-      if (!ab.dataset.arm) { ab.dataset.arm = "1"; ab.textContent = `確定標記這 ${ab.dataset.ids.split(",").length} 項？再按一次`;
-        clearTimeout(ab._t); ab._t = setTimeout(() => { delete ab.dataset.arm; ab.textContent = "✅ 整類標記為已確認無害"; }, 6000); return; }
+      if (!ab.dataset.arm) { ab._ack = ackIds(g, ab); ab.dataset.arm = "1";
+        ab.textContent = `確定標記${ab._ack.part ? "勾選的" : "整類"} ${ab._ack.ids.length} 項？再按一次`;
+        clearTimeout(ab._t); ab._t = setTimeout(() => { delete ab.dataset.arm; ab.textContent = ackLabel(ackIds(g, ab)); }, 6000); return; }
       clearTimeout(ab._t); ab.disabled = true; ab.textContent = "標記中…";
-      const r = await api("/api/actions/ack-steps", {plan_id: actPlan.plan_id, steps: ab.dataset.ids.split(",")});
+      const r = await api("/api/actions/ack-steps", {plan_id: actPlan.plan_id, steps: ab._ack.ids});
       ab.textContent = r.ok ? `✅ 已標記 ${r.done} 項，重新整理預覽…` : "❌ " + ((r.errors || [])[0] || "失敗");
       if (r.ok) setTimeout(() => previewAction(actActive), 800);
     };
   });
   boxes.forEach(x => x.onchange = count);
-// 預覽過、確定沒有項目要處理的動作 → {id: "HH:MM"}。只存在這個頁面裡；再點一次會重新檢查，有新項目就恢復正常。
-const actEmpty = {};
-function renderActList() {
-  $("#actList").innerHTML = Object.values(actCatalog).map(a => { const q = actQueue.find(x => x.action === a.id), done = !q && actEmpty[a.id];
-    return `<button data-act="${esc(a.id)}" class="${a.id === actActive ? "on" : ""}${q ? " queued" : ""}${done ? " done" : ""}" ${q ? "disabled" : ""}
-        ${done ? 'title="上次檢查沒有需要處理的項目，再按一次會重新檢查"' : ""}>
-      <span>${esc(a.icon)} ${esc(a.title)}${q ? `<span class="qtag">${q.state === "authorizing" ? "🔒 等待授權" : "🕒 已排隊"}</span>`
-        : done ? '<span class="qtag dtag">✅ 已完成</span>' : ""}</span>
-      ${q ? `<span class="h">${esc(q.n)} 項・${esc(q.queued_at.slice(11, 16))} 排隊，前一個完成後自動開始</span>`
-        : done ? `<span class="h">${esc(done)} 檢查：沒有需要處理的項目</span>` : a.hint ? `<span class="h">${esc(a.hint)}</span>` : ""}</button>`; }).join("");
-  document.querySelectorAll("#actList button[data-act]").forEach(b => b.onclick = () => previewAction(b.dataset.act));
-}
   if ($("#actFilter")) $("#actFilter").oninput = e => { const t = e.target.value.toLowerCase();
     boxes.forEach(x => { const row = x.closest(".step"); row.style.display = !t || row.textContent.toLowerCase().includes(t) ? "" : "none"; });
     // 篩選時展開有符合項目的分類、隱藏沒有符合的分類
@@ -1315,9 +1325,6 @@ async function runAction(method) {
     catch (e) { $("#actStatus").innerHTML = `<span style="color:var(--high)">❌ ${esc(e.message || e)}</span>`; return; }
   }
   const r = await api("/api/actions/run", {plan_id:actPlan.plan_id, steps:ids, method, assertion});
-  const wasEmpty = !!actEmpty[id];
-  if (p.steps.length) delete actEmpty[id]; else actEmpty[id] = new Date().toTimeString().slice(0, 5);
-  if (wasEmpty !== !!actEmpty[id] || !p.steps.length) renderActList();
   if (r.queued) {
     actPlan = null; actActive = ""; document.querySelectorAll("#actList button.on").forEach(b => b.classList.remove("on"));
     $("#actPlan").innerHTML = `<div class="muted actempty">🕒 已排入佇列${method === "touchid" ? "（請在 Touch ID 視窗授權，通過後才會真的排進去）" : ""}。<br>

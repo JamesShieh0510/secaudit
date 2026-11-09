@@ -1288,11 +1288,27 @@ def secure_settings_update(vault, out_dir, method="touchid", assertion=None, por
     return True, ""
 
 
+# 原始碼、文件：工具資料夾裡的這些通常是套件 / 範例（README、sql.py），不是 App 的憑證檔；設定檔（.json/.yaml/.conf）照算
+_NOT_CRED_EXT = {".md", ".rst", ".txt", ".html", ".go", ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rs", ".java",
+                 ".kt", ".rb", ".php", ".cs", ".swift", ".c", ".cc", ".cpp", ".h", ".sh", ".vue", ".svelte", ".dart", ".scala"}
+
+
+def _app_cred(f):
+    """App / 工具自己的憑證檔（~/.aws/credentials、~/.anydesk/service.conf…）：不能搬走（程式會壞），但權限應該是 600。"""
+    if f.get("rule") not in SECURE_RULES or not f.get("path"):
+        return False
+    p = os.path.expanduser(f["path"])
+    # 跟「存進 1Password」預覽的「🧩 App / 工具自己的憑證檔」同一類；套件快取、擴充功能裡的範例不算
+    return _secret_group(p, f, "") == SECRET_GROUPS[3][0] and os.path.splitext(p)[1].lower() not in _NOT_CRED_EXT
+
+
 def _key_perm_todo(fs):
-    """報告裡權限過寬的私鑰，只留「現在」仍然過寬的（已經改過的報告不會馬上更新，不要一直重複列出）。"""
+    """報告裡權限過寬的私鑰與 App 憑證檔，只留「現在」仍然過寬的（已經改過的報告不會馬上更新，不要一直重複列出）。
+    回傳 ([(路徑, 權限, 種類)], 已經是 600 的數量)；種類是 "key" 或 "app"。App 憑證檔權限本來就對的不算進「已改好」。"""
     out, done, seen = [], 0, set()
     for f in fs:
-        if f.get("rule") != "key-perm" or not f.get("path"):
+        kind = "key" if f.get("rule") == "key-perm" else "app" if _app_cred(f) else ""
+        if not kind or not f.get("path"):
             continue
         p = os.path.expanduser(f["path"])
         if p in seen or not _secure_ok(p):
@@ -1303,8 +1319,8 @@ def _key_perm_todo(fs):
         except OSError:
             continue
         if mode & 0o077:
-            out.append((p, mode))
-        else:
+            out.append((p, mode, kind))
+        elif kind == "key":
             done += 1
     return out, done
 
@@ -1313,19 +1329,22 @@ def plan_key_perms():
     name, fs = _latest_findings()
     todo, done = _key_perm_todo(fs)
     steps = []
-    for p, mode in todo:
+    for p, mode, kind in todo:
         st = _file_state(p)
         if not st:
             continue
-        steps.append({"id": "k%d" % len(steps), "label": home_rel(p), "detail": "權限 %o → 600（只有你可讀寫）" % mode,
+        steps.append({"id": "k%d" % len(steps), "label": home_rel(p),
+                      "detail": "%s權限 %o → 600（只有你可讀寫）" % ("App 憑證檔・" if kind == "app" else "私鑰・", mode),
                       "kind": "chmod", "path": p, "state": st})
     notes = ["只改權限，不改內容。執行前會確認檔案還是預覽時那一份，不是的話略過。",
+             "App / 工具自己的憑證檔（例如 ~/.aws/credentials、~/.anydesk/service.conf）不能搬進 1Password 後刪掉，"
+             "那樣程式會找不到；至少要讓其他使用者讀不到。改完如果 App 又把權限改回去，請更新或重新安裝那個 App。",
              "檔案若在雲端硬碟，雲端上的分享設定不受影響，請另外檢查。"]
     if done:
         notes.insert(0, "✅ 報告裡另有 %d 個私鑰現在已經是 600（之前改過了），不再列出。報告要等下一次完整掃描，"
                         "或在報告的「🛠 處理與下載」按「🔁 重新檢查」才會更新。" % done)
-    return {"title": "把私鑰檔案的權限改成只有自己可讀（chmod 600）", "report": name, "steps": steps, "notes": notes,
-            "reason": "執行 secaudit 修復：把私鑰權限改成只有自己可讀（共 %d 個檔案）" % len(steps)}
+    return {"title": "把私鑰與 App 憑證檔的權限改成只有自己可讀（chmod 600）", "report": name, "steps": steps, "notes": notes,
+            "reason": "執行 secaudit 修復：把私鑰與 App 憑證檔權限改成只有自己可讀（共 %d 個檔案）" % len(steps)}
 
 
 # ---------------------------------------------------------------- 動作 7：閒置專案 → 整個資料夾封存成加密 DMG
@@ -2211,7 +2230,7 @@ ACTIONS = {
     "clean-go-toolchains": ("🧹", "清除舊的 Go toolchain 快取", plan_go_cache),
     "secure-files-dmg": ("📦", "含機密的檔案 → 加密 DMG", plan_secure_dmg),
     "secure-files-1p": ("🔐", "含機密的檔案 → 1Password", plan_secure_1p),
-    "fix-key-perms": ("🔏", "私鑰權限改成只有自己可讀", plan_key_perms),
+    "fix-key-perms": ("🔏", "私鑰與 App 憑證檔權限改成只有自己可讀", plan_key_perms),
     "archive-idle-projects": ("💤", "閒置專案 → 整個封存成加密 DMG", plan_archive_projects),
     "env-tpl": ("🧷", "寫死的機密 → 1Password + .env.tpl 引用", plan_env_tpl),
 }
@@ -2228,6 +2247,15 @@ def actions_for(rule, path="", detail=""):
     if rule in ("file-secrets", "plaintext-env") and (
             os.path.splitext(path or "")[1].lower() in _CODE_EXT or "已經提交到 git" in (detail or "")):
         return []
+    if rule in SECURE_RULES and path:
+        from .projects import tool_dir
+        p = os.path.expanduser(path)
+        try:                # App 憑證檔權限過寬：多給一個改權限（搬走 / 封存仍保留，但預覽裡預設不勾）
+            loose = tool_dir(p) and stat.S_IMODE(os.lstat(p).st_mode) & 0o077
+        except OSError:
+            loose = False
+        if loose:
+            return ["fix-key-perms"] + RULE_ACTIONS.get(rule, [])
     if rule in RULE_ACTIONS:
         return RULE_ACTIONS[rule]
     if rule.startswith("transcript-"):
@@ -2247,7 +2275,7 @@ def catalog():
     hints = {"redact-transcripts": "最近一次完整掃描（或重新檢查）有 %d 項對話紀錄金鑰" % n_tr if n_tr else "最近一次完整掃描（或重新檢查）沒有發現",
              "secure-files-dmg": "最近一次完整掃描（或重新檢查）有 %d 個含機密的檔案" % n_sf if n_sf else "最近一次完整掃描（或重新檢查）沒有發現",
              "secure-files-1p": "最近一次完整掃描（或重新檢查）有 %d 個含機密的檔案" % n_sf if n_sf else "最近一次完整掃描（或重新檢查）沒有發現"}
-    hints["fix-key-perms"] = ("還有 %d 個私鑰權限過寬" % len(kp_todo)) if kp_todo else \
+    hints["fix-key-perms"] = ("還有 %d 個私鑰 / App 憑證檔權限過寬" % len(kp_todo)) if kp_todo else \
         ("✅ 全部已改成 600（報告重新檢查後就會更新）" if kp_done else "最近一次完整掃描（或重新檢查）沒有發現")
     name = _latest_walk_report()
     pj = (_read(os.path.join(REPORTS, name + ".json"), {}).get("projects") or {}) if name else {}

@@ -110,7 +110,10 @@ BENIGN_NAMES = {"move.locked"}
 BENIGN_EXT = {"gz", "bz2", "xz", "zst", "zstd", "lz4", "deflate", "br", "zip", "7z", "tar", "tgz", "z",
               "go", "ts", "js", "py", "rs", "rb", "java", "kt", "swift", "dart", "tmpl", "tpl", "j2", "erb", "liquid",
               "want", "golden", "expected", "out", "snap", "orig", "bak", "old", "tmp", "swp", "map", "lock",
-              "gpg", "asc", "sig", "sha256", "md5", "part", "crdownload", "download", "icloud", "meta", "license"}
+              "gpg", "asc", "sig", "sha256", "md5", "part", "crdownload", "download", "icloud", "meta", "license",
+              # 程式庫 / 執行檔 / 建置產物：.NET、Java 這類命名常有點（Newtonsoft.Json.dll、Foo.Key.pdb），不是被加了副檔名
+              "dll", "exe", "pdb", "so", "dylib", "a", "o", "lib", "jar", "class", "wasm", "node", "nupkg",
+              "xml", "config", "resources", "deps", "runtimeconfig", "cs", "vb", "fs", "c", "h", "cpp", "m", "mm"}
 RANSOM_EXT = {"locked", "encrypted", "crypted", "crypt", "lockbit", "ryk", "wncry", "wcry", "cerber", "locky", "zepto",
               "djvu", "makop", "phobos", "eking", "devos", "dharma", "onion", "rhysida", "akira", "8base", "medusa",
               "kraken", "hive", "conti", "babuk", "lockfile", "encrypt", "enc1", "cryptolocker", "darkness", "nochance"}

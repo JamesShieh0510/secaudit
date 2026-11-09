@@ -632,9 +632,9 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
         for label, k in (("路徑", "path"), ("細節", "detail"), ("證據", "evidence"), ("為什麼危險", "why"), ("建議", "fix")):
             if f.get(k):
                 val = '<span class="ev">%s</span>' % e(f[k]) if k in ("path", "evidence") else e(f[k])
-                out.append('<dt>%s</dt><dd%s>%s</dd>' % (label, ' class="ml"' if "\n" in str(f[k]) else "", val))
                 if k == "path":
                     val += copy_btn(f[k])
+                out.append('<dt>%s</dt><dd%s>%s</dd>' % (label, ' class="ml"' if "\n" in str(f[k]) else "", val))
         fixes = "".join(
             '<a class="btn" target="_blank" href="/?fix=%s&amp;report=%s&amp;path=%s" title="到 Web UI 預覽修復步驟，授權後才會執行">%s</a>' % (
                 e(a), e(name), e(urllib.parse.quote(f.get("path") or "")), e(FIX_LABEL.get(a, a)))
