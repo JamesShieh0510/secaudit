@@ -2246,6 +2246,27 @@ def _browsers_open(steps):
     return sorted({BROWSER_APPS[s["browser"]] for s in steps if s.get("kind") == "cookie-clear" and _browser_running(s["browser"])})
 
 
+def _browser_quit(browser, wait=45):
+    """正常關閉瀏覽器（等同 ⌘Q，會存好分頁狀態）：先用 AppleScript，被拒（沒有自動化權限）再送 SIGTERM。回傳是否已關閉。"""
+    app = BROWSER_APPS[browser]
+    if not _browser_running(browser):
+        return True
+    r = subprocess.run(["osascript", "-e", 'tell application "%s" to quit' % app], capture_output=True, text=True, timeout=30)
+    if r.returncode:
+        subprocess.run(["pkill", "-TERM", "-x", app], capture_output=True)
+    end = time.time() + wait
+    while time.time() < end:
+        if not _browser_running(browser):
+            time.sleep(1)       # 讓它把 cookie 資料庫寫完、放開檔案
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _browser_reopen(browser):
+    subprocess.run(["open", "-a", BROWSER_APPS[browser], "--args", "--restore-last-session"], capture_output=True)
+
+
 def _stale_sessions():
     from .checks_browser import session_items, profile_last_used
     now, out, plast = time.time(), [], {}
@@ -2278,9 +2299,15 @@ def plan_browser_sessions():
              "「整個 profile 超過一年沒用」那類，更乾淨的做法是在 Chrome 右上角頭像 →「管理 Chrome 個人資料」→ 該 profile 的「⋮」→「刪除」，"
              "連同它的擴充功能一起清掉。profile 多久沒用是用 Chrome 的活動時間與歷史紀錄估計的。"]
     busy = _browsers_open(steps)
-    if busy:
-        warn = "⚠️ %s 目前開著：現在只能用「🌐 開啟登出頁」。要按「執行」清 cookie，請先完全關閉（⌘Q），再重新點一次這個動作。" % "、".join(busy)
-    return {"warn": warn if busy else "","title": "處理久未使用的瀏覽器登入（開啟登出頁 / 清除 session cookie）", "report": "", "steps": steps, "notes": notes,
+    for br in sorted({s["browser"] for s in steps if _browser_running(s["browser"])}):
+        steps.insert(0, {"id": "cyc-" + br, "group": "⚙️ 執行方式", "kind": "browser-cycle", "browser": br,
+                         "label": "執行時自動關閉 %s，清完 cookie 再重新打開並還原分頁" % BROWSER_APPS[br],
+                         "detail": "%s 開著時 cookie 刪不掉（它會把記憶體裡的 cookie 寫回去）；"
+                                   "勾選後：Touch ID 授權 → 正常關閉 %s → 清 cookie → 用「還原上次的分頁」重新打開（這個頁面也會回來）；"
+                                   "有沒存的表單請先存好；不勾就要自己先 ⌘Q" % (BROWSER_APPS[br], BROWSER_APPS[br])})
+    warn = ("⚠️ %s 目前開著：要清 cookie，請保留最上面「執行時自動關閉…再重新打開」的勾選（建議），或自己先 ⌘Q 再重新點這個動作。"
+            "「🌐 開啟登出頁」不受影響。" % "、".join(busy)) if busy else ""
+    return {"warn": warn,"title": "處理久未使用的瀏覽器登入（開啟登出頁 / 清除 session cookie）", "report": "", "steps": steps, "notes": notes,
             "reason": "執行 secaudit 修復：清除 %d 個久未使用的瀏覽器登入 cookie" % len(steps)}
 
 
@@ -2664,10 +2691,11 @@ def start(plan_id, step_ids, method="touchid", assertion=None, port=0):
         steps = [s for s in plan["steps"] if s["id"] in want]
         if not steps:
             return False, "沒有選擇任何步驟"
-    busy_br = _browsers_open(steps)
+    cyc = {s["browser"] for s in steps if s.get("kind") == "browser-cycle"}
+    busy_br = _browsers_open([s for s in steps if s.get("browser") not in cyc])
     if busy_br:
         return False, "%s 還開著：cookie 要在瀏覽器完全關閉（⌘Q）後才能刪，關閉後再按一次執行。" \
-                      "（「🌐 開啟登出頁」不受影響，可以先用它登出）" % "、".join(busy_br)
+                      "（或勾選「執行時自動關閉…再重新打開」；「🌐 開啟登出頁」不受影響）" % "、".join(busy_br)
     key_name = None
     if method == "yubikey":
         from . import webauthn
@@ -2712,7 +2740,7 @@ def start(plan_id, step_ids, method="touchid", assertion=None, port=0):
 
 
 def _execute(plan, steps, key_name=None, preauth=False):
-    results = []
+    results, reopen = [], []
     try:
         labels = "、".join(s["label"] for s in steps[:4]) + ("…等 %d 項" % len(steps) if len(steps) > 4 else "")
         reason = plan.get("reason") or "執行 secaudit 修復「%s」：%s" % (plan["title"], labels)
@@ -2753,8 +2781,17 @@ def _execute(plan, steps, key_name=None, preauth=False):
                 results.append({"id": s["id"], "label": s["label"], "ok": okk, "output": msg})
             status["results"] = results
         status.update(total=len(steps), done=len(results))
+        for s in [s for s in steps if s["kind"] == "browser-cycle"]:
+            status.update(phase="關閉 %s" % BROWSER_APPS[s["browser"]], current=s["label"])
+            if _browser_quit(s["browser"]):
+                reopen.append(s["browser"])
+                results.append({"id": s["id"], "label": s["label"], "ok": True, "output": "已正常關閉，清完會自動重新打開"})
+            else:
+                results.append({"id": s["id"], "label": s["label"], "ok": False,
+                                "output": "%s 沒有在 45 秒內關閉（可能有視窗在問要不要離開），清 cookie 的項目會略過" % BROWSER_APPS[s["browser"]]})
+            status.update(results=results, done=len(results))
         for i, s in enumerate(steps):
-            if s["kind"] in ("brew", "secure-dmg", "archive-project"):
+            if s["kind"] in ("brew", "secure-dmg", "archive-project", "browser-cycle"):
                 continue
             if status.get("cancel") or plan.get("_op_failed"):
                 why = "未執行：你按了停止" if status.get("cancel") else "未執行：1Password 存密碼失敗，已停止後面的專案（請確認 1Password 的授權後再重新執行）"
@@ -2862,6 +2899,11 @@ def _execute(plan, steps, key_name=None, preauth=False):
     except Exception as e:   # 背景執行緒不能讓例外消失
         status.update(ok=False, message="%s: %s" % (type(e).__name__, str(e)[:300]))
     finally:
+        for br in reopen:           # 自動關掉的瀏覽器一定要重新打開（就算中間出錯），並還原分頁
+            try:
+                _browser_reopen(br)
+            except Exception:
+                pass
         status.update(running=False, phase="", finished=time.strftime("%Y-%m-%d %H:%M:%S"), results=results, cancel=False,
                       current="", step_since=0)
         recent.insert(0, {k: status.get(k) for k in ("title", "method", "started", "finished", "ok", "message")})
