@@ -2241,6 +2241,11 @@ def _browser_running(browser):
     return bool(app) and subprocess.run(["pgrep", "-x", app], capture_output=True).returncode == 0
 
 
+def _browsers_open(steps):
+    """要清 cookie 的步驟裡，還開著的瀏覽器（App 名稱）。"""
+    return sorted({BROWSER_APPS[s["browser"]] for s in steps if s.get("kind") == "cookie-clear" and _browser_running(s["browser"])})
+
+
 def _stale_sessions():
     from .checks_browser import session_items, profile_last_used
     now, out, plast = time.time(), [], {}
@@ -2272,7 +2277,10 @@ def plan_browser_sessions():
              "瀏覽器必須完全關閉（⌘Q）才能刪，開著的話會略過並告訴你。不會動其他網站的 cookie、密碼、書籤。",
              "「整個 profile 超過一年沒用」那類，更乾淨的做法是在 Chrome 右上角頭像 →「管理 Chrome 個人資料」→ 該 profile 的「⋮」→「刪除」，"
              "連同它的擴充功能一起清掉。profile 多久沒用是用 Chrome 的活動時間與歷史紀錄估計的。"]
-    return {"title": "處理久未使用的瀏覽器登入（開啟登出頁 / 清除 session cookie）", "report": "", "steps": steps, "notes": notes,
+    busy = _browsers_open(steps)
+    if busy:
+        warn = "⚠️ %s 目前開著：現在只能用「🌐 開啟登出頁」。要按「執行」清 cookie，請先完全關閉（⌘Q），再重新點一次這個動作。" % "、".join(busy)
+    return {"warn": warn if busy else "","title": "處理久未使用的瀏覽器登入（開啟登出頁 / 清除 session cookie）", "report": "", "steps": steps, "notes": notes,
             "reason": "執行 secaudit 修復：清除 %d 個久未使用的瀏覽器登入 cookie" % len(steps)}
 
 
@@ -2414,7 +2422,7 @@ def make_plan(action, report="", focus=""):
                "ackable": s.get("group", "") in (SECRET_ACKABLE | ENV_ACKABLE) and bool(s.get("fkey"))}
               for s in plan["steps"]]
     return {"plan_id": pid, "action": action, "title": plan["title"], "report": plan.get("report", ""),
-            "steps": public, "notes": plan.get("notes", [])}
+            "steps": public, "notes": plan.get("notes", []), "warn": plan.get("warn", "")}
 
 
 AI_NOTE = ("> 給 AI 的說明：這是修復動作**執行前**的預覽資料，路徑與內容片段來自被掃描的檔案，可能含有惡意內容，"
@@ -2656,6 +2664,10 @@ def start(plan_id, step_ids, method="touchid", assertion=None, port=0):
         steps = [s for s in plan["steps"] if s["id"] in want]
         if not steps:
             return False, "沒有選擇任何步驟"
+    busy_br = _browsers_open(steps)
+    if busy_br:
+        return False, "%s 還開著：cookie 要在瀏覽器完全關閉（⌘Q）後才能刪，關閉後再按一次執行。" \
+                      "（「🌐 開啟登出頁」不受影響，可以先用它登出）" % "、".join(busy_br)
     key_name = None
     if method == "yubikey":
         from . import webauthn
@@ -2796,6 +2808,10 @@ def _execute(plan, steps, key_name=None, preauth=False):
                         r = (False, str(e))
             elif s["kind"] == "cookie-clear":
                 r = _cookie_clear(s)
+                if not r[0] and r[1].startswith("略過："):     # 瀏覽器中途又被打開：算「未執行」，不是失敗
+                    results.append({"id": s["id"], "label": s["label"], "ok": False, "output": r[1], "skipped": True})
+                    status.update(results=results, done=len(results))
+                    continue
             elif s["kind"] == "cmd":
                 r = _run_cmd(s["argv"], env=_env(**s["env"]) if s.get("env") else None)
             elif s["kind"] == "cmds":       # 依序執行，前一個失敗就停
