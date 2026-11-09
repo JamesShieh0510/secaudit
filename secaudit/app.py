@@ -318,6 +318,8 @@ class Engine:
                 self.status["phase"] = "已取消"
                 return None
             excluded_carry = result.pop("_excluded_carry", [])
+            from .prune import prune as _prune
+            pruned = _prune(DATA)          # 已經不存在的專案 / 檔案：清掉比對基準、已確認無害標記、修復紀錄
             result["settings"] = self.settings_snapshot(cfg, "recheck", "manual", False, online)
             from . import acks
             from .diff import finding_key
@@ -332,7 +334,7 @@ class Engine:
                     f["first_seen"] = ent["first_seen"]
                     f["age_days"] = age_days(ent["first_seen"])
             result["recheck"] = dict(rc_compare(old, result, excluded_carry), of=name, of_started=old.get("started", ""),
-                                     of_mode=old.get("mode", ""))
+                                     of_mode=old.get("mode", ""), pruned=pruned)
             from .core import home_rel
             sop = build_sop(cfg, [{"path": t.path, "display": home_rel(t.path), "label": t.label, "enabled": t.enabled}
                                   for t in load_targets(cfg)])
@@ -340,8 +342,9 @@ class Engine:
             self._prune_reports(cfg)
             c = result["recheck"]["counts"]
             self.status.update(last_report=new_name, last_check=time.strftime("%H:%M:%S"),
-                               phase="完成：已改善 %d、規則排除 %d、等級改變 %d、仍存在 %d、新出現 %d" % (
-                                   c["resolved"], c["excluded"], c["reclassified"], c["still"], c["new"]))
+                               phase="完成：已改善 %d、規則排除 %d、等級改變 %d、仍存在 %d、新出現 %d%s" % (
+                                   c["resolved"], c["excluded"], c["reclassified"], c["still"], c["new"],
+                                   "；清掉 %d 個已刪除專案的資料" % len(pruned["projects"]) if pruned["projects"] else ""))
             return new_name
         except Exception as e:
             self.status["last_error"] = "%s: %s" % (type(e).__name__, str(e)[:200])

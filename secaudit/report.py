@@ -6,12 +6,21 @@ import math
 import os
 import re
 
-from .core import SEVERITIES, SEV_LABEL, home_rel
+from .core import HOME, SEVERITIES, SEV_LABEL, home_rel
 from .diff import TYPE_LABEL, finding_key
 from . import sop as _sop
 
 SEV_ORDER = {s: i for i, s in enumerate(SEVERITIES)}
 CAT_ORDER = ["掃描範圍", "入侵跡象", "AI 與 Agent", "機密與憑證", "瀏覽器", "開機自動執行", "供應鏈與版本"]
+
+
+def copy_btn(path):
+    """路徑旁的複製按鈕：複製完整的絕對路徑（~ 展開成家目錄）。多行或空的路徑不加。"""
+    if not path or "\n" in path:
+        return ""
+    full = HOME + path[1:] if path == "~" or path.startswith("~/") else path
+    return '<button type="button" class="cpy" data-copy="%s" title="複製完整路徑：%s">📋</button>' % (
+        html.escape(full, quote=True), html.escape(full, quote=True))
 
 
 SOURCE_LABEL = {"manual": "手動", "scheduler": "排程", "watch": "即時監看"}
@@ -63,6 +72,11 @@ def _recheck_md(rc):
     out = ["## 重新檢查結果（對照報告 %s）" % rc.get("of", ""), "",
            "- 已改善 %d ・ 規則更新後排除 %d ・ 風險等級改變 %d ・ 仍存在 %d ・ 新出現 %d" % (
                c["resolved"], c["excluded"], c["reclassified"], c["still"], c["new"]), ""]
+    pr = rc.get("pruned") or {}
+    if pr.get("projects"):
+        out += ["🗑 已刪除的專案（%d 個）：資料夾已經不存在，已清掉它們的比對基準 %d 筆、已確認無害標記 %d 筆、修復紀錄 %d 筆。" % (
+            len(pr["projects"]), pr.get("state", 0), pr.get("acks", 0), pr.get("touched", 0)), ""] + \
+            ["- %s" % _md(x) for x in pr["projects"]] + [""]
     for k, label, why in RC_LABEL:
         if not rc.get(k):
             continue
@@ -87,6 +101,12 @@ def _recheck_html(rc, e):
          '勒索軟體這類要統計整個資料夾的問題沿用舊結果，需完整掃描才能重新確認。</div>' % (
              e(rc.get("of")), e(rc.get("of")), e(rc.get("of_started")),
              c["resolved"], c["excluded"], c["reclassified"], c["still"], c["new"])]
+    pr = rc.get("pruned") or {}
+    if pr.get("projects"):
+        p.append('<details class="cat" style="margin-top:8px"><summary><b>🗑 已刪除的專案</b>（%d）<span class="muted">　資料夾已經不存在，'
+                 '已清掉比對基準 %d 筆、已確認無害標記 %d 筆、修復紀錄 %d 筆；它們的問題算在「已改善」</span></summary><ul>%s</ul></details>' % (
+                     len(pr["projects"]), pr.get("state", 0), pr.get("acks", 0), pr.get("touched", 0),
+                     "".join("<li><code>%s</code></li>" % e(x) for x in pr["projects"])))
     for k, label, why in RC_LABEL:
         if not rc.get(k):
             continue
@@ -198,13 +218,13 @@ def _byproj_html(result, name, e):
             x["sev"], SEV_LABEL.get(x["sev"], ""), e(x["pkg"]), e(x["ver"]), e(", ".join(x["ids"][:3]) or x["title"][:60]),
             e(x["fix"] or "—")) for x in sorted(items, key=lambda x: ({"high": 0, "medium": 1, "low": 2}.get(x["sev"], 3), x["pkg"])))
         cards.append(
-            '<details class="cat pj"%s><summary><b>%s</b>　%s</summary>'
+            '<details class="cat pj"%s><summary><b>%s</b>%s　%s</summary>'
             '<div class="pjbar"><button type="button" class="tool pjcopy">📋 複製給 AI Agent</button>'
             '<button type="button" class="tool pjdl" data-fn="secaudit-fix-%s.md">⬇ 下載 MD</button>'
             '<span class="muted pjmsg"></span></div>'
             '<table><thead><tr><th>風險</th><th>套件</th><th>漏洞</th><th>修正版本</th></tr></thead><tbody>%s</tbody></table>'
             '<textarea class="pjtxt" hidden>%s</textarea></details>' % (
-                " open" if i == 0 else "", e(home_rel(root)),
+                " open" if i == 0 else "", e(home_rel(root)), copy_btn(root),
                 " ".join('<span style="color:var(--%s)">%s %d</span>' % (s, SEV_LABEL[s], c[s]) for s in ("high", "medium", "low") if c[s]),
                 e(re.sub(r"[^\w.-]+", "-", os.path.basename(root)) or "project"), rows, e(prompt)))
     head = ('<h2>📦 依專案整理的供應鏈問題（%d 個專案）</h2><div class="muted" style="margin-bottom:8px">同一個專案的套件漏洞與指定版本合併在一起；'
@@ -246,9 +266,9 @@ def _idle_html(result, name, e):
     btn = ('<a class="btn fixbatch" target="_blank" href="/?fix=archive-idle-projects&amp;report=%s" '
            'title="預覽要封存的專案，勾選後以 Touch ID 授權執行">📦 批次封存成加密 DMG（%d 個專案）</a>' % (e(name), len(idle))) if name else ""
     rows = "".join(
-        '<tr><td><code>%s</code></td><td>%s 天<br><span class="muted">%s<br>%s</span></td>'
+        '<tr><td><code>%s</code>%s</td><td>%s 天<br><span class="muted">%s<br>%s</span></td>'
         '<td>%s</td><td class="muted">%s</td><td class="muted">%s</td></tr>' % (
-            e(a["display"]), a["idle_days"], e(a["last"]), e(a["last_what"]),
+            e(a["display"]), copy_btn(a["root"]), a["idle_days"], e(a["last"]), e(a["last_what"]),
             " ".join('<span style="color:var(--%s)">%s %d</span>' % (s, SEV_LABEL[s], a["counts"].get(s, 0))
                      for s in ("high", "medium", "low") if a["counts"].get(s)) +
             '<br><span class="muted">%s</span>' % e("、".join(a["titles"][:2])),
@@ -398,6 +418,8 @@ a.btn,.filter .tool,button.tool{display:inline-block;padding:6px 12px;border:1px
 section.rtab{display:none}section.rtab.on{display:block}section.rtab>h2:first-child{margin-top:18px}
 .filter{top:42px}
 section.rtab .sop{margin-top:12px;border:0;padding:0;background:none}section.rtab .sop>summary{cursor:default}
+.cpy{margin-left:4px;padding:0 4px;border:1px solid transparent;border-radius:6px;background:none;cursor:pointer;font-size:12px;line-height:1.4;opacity:.55;vertical-align:baseline}
+.cpy:hover{opacity:1;border-color:var(--line)}.cpy.ok{opacity:1}
 .pj summary{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}.pjbar{display:flex;gap:6px;align-items:center;margin:8px 0}
 .mmd{margin:14px 0;padding:12px;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow-x:auto}.mmd svg{max-width:100%;height:auto}
 .sop{margin-top:40px;border-left-color:var(--info)}.sop h3{font-size:15px;margin:20px 0 8px}.sop ol,.sop ul{padding-left:22px;margin:6px 0}.sop li{margin:4px 0}.sop table{margin:6px 0}
@@ -417,6 +439,11 @@ function rtab(t){if(!RT.includes(t))t='overview';
  try{sessionStorage.setItem('secaudit-rtab',t);}catch(e){}if(t==='sop')mmd();}
 document.querySelectorAll('.rtabs button').forEach(b=>b.onclick=()=>{rtab(b.dataset.t);window.scrollTo(0,0);});
 (()=>{let t='';try{t=sessionStorage.getItem('secaudit-rtab')||'';}catch(e){}rtab(t||'overview');})();
+// 路徑旁的 📋：複製完整路徑（在 <summary> 裡時不要順便展開/收合）
+document.addEventListener('click',async ev=>{const b=ev.target.closest('.cpy');if(!b)return;ev.preventDefault();ev.stopPropagation();
+ const t=b.dataset.copy;try{await navigator.clipboard.writeText(t);}catch(e){
+  const a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();document.execCommand('copy');a.remove();}
+ b.textContent='✅';b.classList.add('ok');setTimeout(()=>{b.textContent='📋';b.classList.remove('ok');},1500);},true);
 // 依專案：複製 / 下載給該專案 AI Agent 的修復指示
 document.querySelectorAll('.pj').forEach(c=>{const t=c.querySelector('.pjtxt').value,m=c.querySelector('.pjmsg');
  c.querySelector('.pjcopy').onclick=async()=>{try{await navigator.clipboard.writeText(t);}catch(e){
@@ -606,6 +633,8 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
             if f.get(k):
                 val = '<span class="ev">%s</span>' % e(f[k]) if k in ("path", "evidence") else e(f[k])
                 out.append('<dt>%s</dt><dd%s>%s</dd>' % (label, ' class="ml"' if "\n" in str(f[k]) else "", val))
+                if k == "path":
+                    val += copy_btn(f[k])
         fixes = "".join(
             '<a class="btn" target="_blank" href="/?fix=%s&amp;report=%s&amp;path=%s" title="到 Web UI 預覽修復步驟，授權後才會執行">%s</a>' % (
                 e(a), e(name), e(urllib.parse.quote(f.get("path") or "")), e(FIX_LABEL.get(a, a)))

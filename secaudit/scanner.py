@@ -322,6 +322,9 @@ def run_recheck(old, cache=None, progress=None, cancel=None, online=True):
             carried.append(f)
             continue
         if rule in CARRY_RULES:
+            from .prune import finding_gone
+            if finding_gone(f):         # 資料夾整個不見了：不用沿用，算已改善
+                continue
             sample = (f.get("detail") or "").rsplit("例如：", 1)[-1].strip().lower()
             ext = sample.rsplit(".", 1)[-1] if "." in sample else ""
             if sample in BENIGN_NAMES or ext in BENIGN_EXT or is_fixture_path(os.path.expanduser(f.get("path", "")) + "/"):
