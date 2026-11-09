@@ -125,6 +125,10 @@ APP_CRED_HINTS = {
     ".anydesk/": "這是 AnyDesk 自己產生的裝置金鑰，AnyDesk 沒有提供改存別處的方式，保留即可。",
     ".lmstudio/": "這是 LM Studio Hub 的登入憑證，App 自己管理，保留即可。",
 }
+# 不再使用時怎麼讓服務端撤銷金鑰（沒列到的用一般說法：從 App 裡登出 / 解除綁定）
+APP_CRED_REVOKE = {
+    ".aws/": "到 AWS 主控台 IAM → 使用者 → 安全憑證，把這把 Access Key（AKIA 開頭）先停用、確認沒有東西壞掉後刪除，再從 credentials 移除那個 profile。",
+}
 _NOT_CRED_EXT = {".md", ".rst", ".txt", ".html", ".go", ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rs", ".java",
                  ".kt", ".rb", ".php", ".cs", ".swift", ".c", ".cc", ".cpp", ".h", ".sh", ".vue", ".svelte", ".dart", ".scala"}
 
@@ -138,6 +142,12 @@ def _app_cred_hint(path):
         return None
     rel = os.path.relpath(os.path.realpath(path), os.path.realpath(HOME)) + ("/" if os.path.isdir(path) else "")
     return next((h for k, h in APP_CRED_HINTS.items() if rel.startswith(k)), "")
+
+
+def _app_revoke(path):
+    rel = os.path.relpath(os.path.realpath(path), os.path.realpath(HOME)) + ("/" if os.path.isdir(path) else "")
+    return next((h for k, h in APP_CRED_REVOKE.items() if rel.startswith(k)),
+                "從 App 裡登出 / 解除綁定再移除，讓服務端撤銷這把金鑰。")
 
 
 def report_file_secrets(ctx: ScanContext, path: str, text: str):
@@ -198,10 +208,11 @@ def report_file_secrets(ctx: ScanContext, path: str, text: str):
                "① %s"
                "② %s"
                "③ 確認是你在用的 App 後，在報告標記為已確認無害（檔案內容改變時標記會自動失效）。"
-               "④ 不再使用這個 App：從 App 裡登出 / 解除綁定再移除，讓服務端撤銷這把金鑰。" % (
+               "④ 不再使用：%s" % (
                    "權限過寬，先改成只有你可讀：chmod 600 '%s'（或用修復動作「🔏 私鑰與 App 憑證檔權限」）。" % path if loose
                    else "權限已經是只有你可讀，這部分不用處理。",
-                   app or "如果這個 App 支援用 1Password、系統鑰匙圈或短期憑證登入，改用那種方式，就不需要把長期金鑰放在檔案裡。"))
+                   app or "如果這個 App 支援用 1Password、系統鑰匙圈或短期憑證登入，改用那種方式，就不需要把長期金鑰放在檔案裡。",
+                   _app_revoke(path)))
     ctx.inv("散落的機密檔案", rel, "%s | %s" % (",".join(sorted(hits)), file_fingerprint(path)))
     ctx.add(Finding(
         rule="file-secrets", severity=sev, category=CAT,

@@ -142,7 +142,7 @@ def _report_detail(name):
     projects = []
     try:
         from .report import _supply_projects, _sev_rank
-        for root, items in sorted(_supply_projects(d).items(), key=lambda kv: _sev_rank(kv[1])[1])[:12]:
+        for root, items in sorted(_supply_projects(d, ai=False).items(), key=lambda kv: _sev_rank(kv[1])[1])[:12]:
             c, _ = _sev_rank(items)
             projects.append({"project": home_rel(root), **c})
     except Exception:
