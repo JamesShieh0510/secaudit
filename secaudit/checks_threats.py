@@ -113,7 +113,9 @@ BENIGN_EXT = {"gz", "bz2", "xz", "zst", "zstd", "lz4", "deflate", "br", "zip", "
               "gpg", "asc", "sig", "sha256", "md5", "part", "crdownload", "download", "icloud", "meta", "license",
               # 程式庫 / 執行檔 / 建置產物：.NET、Java 這類命名常有點（Newtonsoft.Json.dll、Foo.Key.pdb），不是被加了副檔名
               "dll", "exe", "pdb", "so", "dylib", "a", "o", "lib", "jar", "class", "wasm", "node", "nupkg",
-              "xml", "config", "resources", "deps", "runtimeconfig", "cs", "vb", "fs", "c", "h", "cpp", "m", "mm"}
+              "xml", "config", "resources", "deps", "runtimeconfig", "cs", "vb", "fs", "c", "h", "cpp", "m", "mm",
+              # App 自己的加密 / 壓縮格式：Interactive Brokers TWS 的設定與日誌（~/Jts、~/ntws，檔頭 IBGZENC）
+              "ibgzenc"}
 RANSOM_EXT = {"locked", "encrypted", "crypted", "crypt", "lockbit", "ryk", "wncry", "wcry", "cerber", "locky", "zepto",
               "djvu", "makop", "phobos", "eking", "devos", "dharma", "onion", "rhysida", "akira", "8base", "medusa",
               "kraken", "hive", "conti", "babuk", "lockfile", "encrypt", "enc1", "cryptolocker", "darkness", "nochance"}
