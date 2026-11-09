@@ -118,6 +118,28 @@ CODE_EXTS = {".go", ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rs", 
              ".svelte", ".dart", ".scala", ".ex", ".exs", ".gradle", ".tf", ".hcl", ".json", ".xml", ".plist"}
 
 
+# 已知 App 憑證檔的具體建議（家目錄相對路徑的開頭 → 建議）
+APP_CRED_HINTS = {
+    ".aws/": "AWS 長期 Access Key 建議改用 1Password 的 AWS shell plugin（op plugin init aws，執行 aws 時用 Touch ID 取用），"
+             "或 AWS SSO（aws configure sso，短期憑證）；確認能用之後再刪掉 credentials 裡的金鑰。",
+    ".anydesk/": "這是 AnyDesk 自己產生的裝置金鑰，AnyDesk 沒有提供改存別處的方式，保留即可。",
+    ".lmstudio/": "這是 LM Studio Hub 的登入憑證，App 自己管理，保留即可。",
+}
+_NOT_CRED_EXT = {".md", ".rst", ".txt", ".html", ".go", ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rs", ".java",
+                 ".kt", ".rb", ".php", ".cs", ".swift", ".c", ".cc", ".cpp", ".h", ".sh", ".vue", ".svelte", ".dart", ".scala"}
+
+
+def _app_cred_hint(path):
+    """家目錄隱藏資料夾裡（~/.aws、~/.anydesk…）的設定 / 憑證檔 → 回傳具體建議（沒有就回傳 ""）；不是 App 憑證檔回傳 None。
+    套件快取、擴充功能裡的檔案和原始碼 / 文件不算（那些是範例）。"""
+    from .projects import tool_dir
+    if not tool_dir(path) or os.path.splitext(path)[1].lower() in _NOT_CRED_EXT or \
+            re.search(r"/(?:node_modules|vendor|site-packages|\.cargo/registry|extensions)/", path):
+        return None
+    rel = os.path.relpath(os.path.realpath(path), os.path.realpath(HOME)) + ("/" if os.path.isdir(path) else "")
+    return next((h for k, h in APP_CRED_HINTS.items() if rel.startswith(k)), "")
+
+
 def report_file_secrets(ctx: ScanContext, path: str, text: str):
     """遍歷到的一般檔案：同一個檔案裡的所有機密彙整成一筆，附上處理方式。"""
     hits = find_secrets(text)
@@ -164,6 +186,22 @@ def report_file_secrets(ctx: ScanContext, path: str, text: str):
                    "這是程式碼／設定檔，刪掉專案就無法執行" if code else "已提交到 git，刪掉也清不掉歷史")) + \
               ("③ 從 git 歷史移除（選擇性）：git filter-repo --invert-paths --path '%s'（會改寫歷史，先和團隊確認）。" %
                os.path.relpath(path, os.path.dirname(path)) if git == "tracked" else "")
+    app = _app_cred_hint(path) if not fixture and git != "tracked" else None
+    if app is not None:
+        # App / 工具自己的憑證檔：程式每次執行都直接讀它，搬走 / 封存會讓 App 壞掉；要處理的是權限，或改用 App 提供的安全登入方式
+        st = lstat_safe(path)
+        loose = bool(st and group_or_world_readable(st))
+        if not loose and sev == "high":
+            sev = "medium"
+        notes.insert(0, "App / 工具自己的憑證檔（權限 %s%s）" % (mode_str(st) if st else "?", "，其他使用者可讀" if loose else "，只有你可讀"))
+        fix = ("這是 App 自己會讀的憑證檔，不要搬進 1Password 後刪除、也不要封存：刪掉 App 就找不到、無法運作。"
+               "① %s"
+               "② %s"
+               "③ 確認是你在用的 App 後，在報告標記為已確認無害（檔案內容改變時標記會自動失效）。"
+               "④ 不再使用這個 App：從 App 裡登出 / 解除綁定再移除，讓服務端撤銷這把金鑰。" % (
+                   "權限過寬，先改成只有你可讀：chmod 600 '%s'（或用修復動作「🔏 私鑰與 App 憑證檔權限」）。" % path if loose
+                   else "權限已經是只有你可讀，這部分不用處理。",
+                   app or "如果這個 App 支援用 1Password、系統鑰匙圈或短期憑證登入，改用那種方式，就不需要把長期金鑰放在檔案裡。"))
     ctx.inv("散落的機密檔案", rel, "%s | %s" % (",".join(sorted(hits)), file_fingerprint(path)))
     ctx.add(Finding(
         rule="file-secrets", severity=sev, category=CAT,
