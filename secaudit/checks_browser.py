@@ -86,49 +86,66 @@ def _chromium_profiles():
                 yield browser, "%s「%s」" % (browser, names.get(d, d)), p
 
 
-def _collect_sessions():
-    """回傳 {服務名稱: [(profile 名稱, 建立, 到期, 最後使用)]}，每個 profile 取最舊的登入 cookie。"""
-    out = {}
-    sources = []
+def _cookie_sources():
+    """(種類, 瀏覽器, profile 名稱, profile 資料夾, cookie 資料庫路徑)"""
     for browser, label, p in _chromium_profiles():
         for c in (os.path.join(p, "Network", "Cookies"), os.path.join(p, "Cookies")):
             if os.path.isfile(c):
-                sources.append(("chromium", label, c))
+                yield "chromium", browser, label, p, c
                 break
     ff = os.path.join(APP_SUPPORT, "Firefox", "Profiles")
     if os.path.isdir(ff):
         for d in sorted(os.listdir(ff)):
             c = os.path.join(ff, d, "cookies.sqlite")
             if os.path.isfile(c):
-                sources.append(("firefox", "Firefox「%s」" % d.split(".", 1)[-1], c))
-    for kind, label, path in sources:
-        try:
-            con = _ro_connect(path)
-            if kind == "chromium":
-                rows = con.execute("SELECT host_key, name, creation_utc, expires_utc, last_access_utc FROM cookies").fetchall()
-                rows = [(h, n, _chrome_ts(c), _chrome_ts(e), _chrome_ts(a)) for h, n, c, e, a in rows]
-            else:
-                rows = con.execute("SELECT host, name, creationTime, expiry, lastAccessed FROM moz_cookies").fetchall()
-                rows = [(h, n, c / 1e6, e / 1000 if e > 1e11 else e, a / 1e6) for h, n, c, e, a in rows]
-            con.close()
-        except sqlite3.Error:
-            continue
-        per = {}
-        for host, name, created, expires, accessed in rows:
-            svc = _service_for(host)
-            if not svc:
-                continue
-            auth_names = svc[2]
-            if auth_names is not None and name not in auth_names:
-                continue
-            cur = per.get(svc[0])
-            if cur is None or created < cur[0]:
-                per[svc[0]] = [created, expires, accessed]
-            else:
-                cur[2] = max(cur[2], accessed)
-        for s, (c, e, a) in per.items():
-            out.setdefault(s, []).append((label, c, e, a))
+                yield "firefox", "Firefox", "Firefox「%s」" % d.split(".", 1)[-1], os.path.join(ff, d), c
+
+
+def session_items():
+    """每個 (profile, 敏感服務) 一筆：{kind, browser, label, profile, cookies, svc, url, domains, created, expires, accessed}。
+    profile 取該服務最舊的登入 cookie 當「登入多久」，最後使用取最新的。"""
+    by = {s[0]: s for s in SENSITIVE}
+    for kind, browser, label, pdir, path in _cookie_sources():
+        for svc, (c, e, a) in _profile_sessions(kind, path).items():
+            yield {"kind": kind, "browser": browser, "label": label, "profile": pdir, "cookies": path, "svc": svc,
+                   "url": by[svc][3], "domains": by[svc][1], "created": c, "expires": e, "accessed": a}
+
+
+def _collect_sessions():
+    """回傳 {服務名稱: [(profile 名稱, 建立, 到期, 最後使用)]}，每個 profile 取最舊的登入 cookie。"""
+    out = {}
+    for it in session_items():
+        out.setdefault(it["svc"], []).append((it["label"], it["created"], it["expires"], it["accessed"]))
     return out
+
+
+def _profile_sessions(kind, path):
+    """一個 cookie 資料庫裡各敏感服務的 [最舊建立, 到期, 最新使用]。"""
+    per = {}
+    try:
+        con = _ro_connect(path)
+        if kind == "chromium":
+            rows = con.execute("SELECT host_key, name, creation_utc, expires_utc, last_access_utc FROM cookies").fetchall()
+            rows = [(h, n, _chrome_ts(c), _chrome_ts(e), _chrome_ts(a)) for h, n, c, e, a in rows]
+        else:
+            rows = con.execute("SELECT host, name, creationTime, expiry, lastAccessed FROM moz_cookies").fetchall()
+            rows = [(h, n, c / 1e6, e / 1000 if e > 1e11 else e, a / 1e6) for h, n, c, e, a in rows]
+        con.close()
+    except sqlite3.Error:
+        return per
+    for host, name, created, expires, accessed in rows:
+        svc = _service_for(host)
+        if not svc:
+            continue
+        auth_names = svc[2]
+        if auth_names is not None and name not in auth_names:
+            continue
+        cur = per.get(svc[0])
+        if cur is None or created < cur[0]:
+            per[svc[0]] = [created, expires, accessed]
+        else:
+            cur[2] = max(cur[2], accessed)
+    return per
 
 
 def check_sessions(ctx: ScanContext):
@@ -466,3 +483,18 @@ def check_browsers(ctx: ScanContext):
     check_sessions(ctx)
     check_extensions(ctx)
     check_debug_and_theft(ctx)
+
+
+def profile_last_used(pdir):
+    """profile 上次被開啟的時間：Local State 的 active_time 與歷史紀錄檔修改時間取較新的（估計值）。"""
+    t = 0
+    try:
+        with open(os.path.join(os.path.dirname(pdir), "Local State"), encoding="utf-8") as fh:
+            t = (json.load(fh).get("profile", {}).get("info_cache", {}).get(os.path.basename(pdir)) or {}).get("active_time") or 0
+    except (OSError, ValueError):
+        pass
+    try:
+        t = max(t, os.path.getmtime(os.path.join(pdir, "History")))
+    except OSError:
+        pass
+    return t

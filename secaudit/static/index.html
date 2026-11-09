@@ -111,7 +111,7 @@ section.tab{display:none}section.tab.on{display:block}
 .actlist button.queued{opacity:.65;cursor:not-allowed;border-style:dashed}
 .qtag{margin-left:8px;font-size:11px;font-weight:600;color:var(--accent);border:1px solid var(--accent);border-radius:8px;padding:0 6px}
 .actlist button.done{opacity:.65}.actlist button.done.on{opacity:1}
-.qtag.dtag{color:var(--ok,#2e9e5b);border-color:var(--ok,#2e9e5b)}
+.step .sopen{margin-top:4px;font-size:12px;padding:2px 8px}.qtag.dtag{color:var(--ok,#2e9e5b);border-color:var(--ok,#2e9e5b)}
 .qrow{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;padding:6px 2px;border-bottom:1px solid var(--line)}.qrow button{margin-left:auto;padding:3px 10px;font-size:12px}
 .actempty{padding:40px 10px;text-align:center}
 .acthead{padding:14px 0 8px}.acthead .t{font-size:16px;font-weight:700}
@@ -1211,7 +1211,7 @@ function paneTab(p) {
 }
 document.querySelectorAll(".ptabs button").forEach(b => b.onclick = () => paneTab(b.dataset.p));
 const stepHtml = s => `<label class="step${s.default === false ? " nodef" : ""}"><input type="checkbox" class="actStep" value="${esc(s.id)}" data-def="${s.default === false ? 0 : 1}" ${s.default === false ? "" : "checked"}>
-  <span style="min-width:0"><div class="l">${esc(s.label)}</div><div class="d">${String(s.detail || "").split("；").filter(Boolean).map(x => `<div>${esc(x)}</div>`).join("")}</div></span></label>`;
+  <span style="min-width:0"><div class="l">${esc(s.label)}</div><div class="d">${String(s.detail || "").split("；").filter(Boolean).map(x => `<div>${esc(x)}</div>`).join("")}</div>${s.open ? `<button type="button" class="tool sopen" data-id="${esc(s.id)}">🌐 開啟登出頁</button><span class="muted sopenmsg"></span>` : ""}</span></label>`;
 // 有分類（例如閒置專案依位置分）就分組顯示：每組一個總勾選框，項目多時預設收合
 function stepsGrouped(steps) {
   if (!steps.some(s => s.group)) return steps.map(stepHtml).join("");
@@ -1250,6 +1250,7 @@ async function previewAction(id, report, focus) {
         ${many ? '<input type="text" id="actFilter" placeholder="篩選項目…">' : ""}
         ${p.steps.length > 1 ? '<button type="button" id="selRec">建議項目</button><button type="button" id="selAll">全選</button><button type="button" id="selNone">全不選</button>' : ""}
         <span class="muted" id="selCount"></span><span class="sp"></span>
+        ${p.steps.some(s => s.open) ? '<button type="button" id="actOpenSel" title="在各自的 profile 打開勾選項目的登出頁（同一個網址在同一個 profile 只開一次）">🌐 開啟勾選項目的登出頁</button>' : ""}
         <button id="actMd" title="把預覽與目前的勾選彙整成 Markdown，執行前先評估（也可以交給 AI 檢查）">⬇ 評估 MD</button>
         <button class="primary" id="actRun">🔒 Touch ID 執行</button>${canKey() ? '<button class="primary" id="actRunY">🔑 YubiKey 執行</button>' : ""}
         <button id="actCancel" title="關閉預覽">✕</button></div>
@@ -1313,6 +1314,25 @@ async function previewAction(id, report, focus) {
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   };
   if ($("#actRunY")) $("#actRunY").onclick = () => runAction("yubikey");
+  // 🌐 在對應的瀏覽器 profile 打開登出頁（伺服器端依預覽決定網址與 profile；只開網頁，不需要授權）
+  const openStep = async id => { try { return await api("/api/actions/open-step", {plan_id: actPlan.plan_id, step: id}); }
+                                 catch (e) { return {ok: false, message: String(e)}; } };
+  document.querySelectorAll("#actSteps .sopen").forEach(b => b.onclick = async e => {
+    e.preventDefault(); e.stopPropagation();
+    const m = b.nextElementSibling; m.textContent = " 開啟中…";
+    const r = await openStep(b.dataset.id); m.textContent = " " + (r.ok ? "✅ " : "❌ ") + (r.message || "");
+  });
+  if ($("#actOpenSel")) $("#actOpenSel").onclick = async () => {
+    const ids = [...document.querySelectorAll(".actStep:checked")].map(x => x.value);
+    const byId = Object.fromEntries(actPlan.steps.map(s => [s.id, s])), seen = new Set(), go = [];
+    ids.forEach(id => { const s = byId[id]; if (!s || !s.open) return;
+      const k = s.label.split("・")[0] + "|" + (String(s.detail).match(/登出頁：(\S+)/) || [])[1];
+      if (!seen.has(k)) { seen.add(k); go.push(id); } });
+    const st = $("#actStatus"); st.style.display = ""; st.textContent = `開啟 ${go.length} 個登出頁…`;
+    let ok = 0;
+    for (const id of go) { if ((await openStep(id)).ok) ok++; await new Promise(r => setTimeout(r, 400)); }
+    st.textContent = `🌐 已開啟 ${ok} / ${go.length} 個登出頁（同一個 profile 的同一個網址只開一次）`;
+  };
   lockRunButtons();
 }
 async function runAction(method) {

@@ -370,6 +370,11 @@ def make_handler(engine: Engine, token: str, port: int):
                 n, errs = actions.ack_steps(str(body.get("plan_id", "")), [str(x) for x in body.get("steps", [])][:500],
                                             str(body.get("note", ""))[:200])
                 return self._send(200, {"ok": n > 0, "done": n, "errors": errs[:10]})
+            if path == "/api/actions/open-step":
+                # 在對應的瀏覽器 profile 打開登出頁：只開網頁、不修改任何東西，網址由伺服器端的預覽決定
+                from . import actions
+                ok, msg = actions.open_step(str(body.get("plan_id", "")), str(body.get("step", ""))[:16])
+                return self._send(200, {"ok": ok, "message": msg})
             if path == "/api/actions/unqueue":
                 from . import actions
                 return self._send(200, {"ok": actions.unqueue(str(body.get("qid", "")))})

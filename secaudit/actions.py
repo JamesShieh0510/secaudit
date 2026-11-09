@@ -2224,6 +2224,96 @@ def _ensure_gitignore_env(root):
 
 
 # ---------------------------------------------------------------- 對外介面
+# ---------------------------------------------------------------- 動作 9：久未使用的瀏覽器登入（session cookie）
+# 每個 (profile, 敏感服務) 一個步驟，依「profile 多久沒用」分成三大類，方便整類批次處理：
+#   - 🌐 開啟登出頁：在「那個 profile」打開該服務的裝置 / session 管理頁（Chrome 開著時用），伺服器端登出最徹底
+#   - 執行（Touch ID）：瀏覽器完全關閉後，從那個 profile 的 cookie 資料庫刪掉該服務網域的 cookie（本機登出）
+# 只刪敏感服務網域的 cookie，不動其他網站、密碼、書籤；網址與 profile 都由伺服器端決定，不接受前端傳入。
+SESSION_IDLE = 90
+SESSION_TIERS = ("🗑 整個 profile 超過一年沒用（建議直接刪除 profile）", "💤 profile 90 天～一年沒用",
+                 "🍪 常用 profile 裡、超過 90 天沒用的登入")
+BROWSER_APPS = {"Chrome": "Google Chrome", "Brave": "Brave Browser", "Edge": "Microsoft Edge", "Chromium": "Chromium",
+                "Vivaldi": "Vivaldi"}
+
+
+def _browser_running(browser):
+    app = BROWSER_APPS.get(browser)
+    return bool(app) and subprocess.run(["pgrep", "-x", app], capture_output=True).returncode == 0
+
+
+def _stale_sessions():
+    from .checks_browser import session_items, profile_last_used
+    now, out, plast = time.time(), [], {}
+    for it in session_items():
+        if it["kind"] != "chromium" or it["browser"] not in BROWSER_APPS:
+            continue
+        pidle = plast.setdefault(it["profile"], profile_last_used(it["profile"]))
+        pdays = (now - pidle) / 86400 if pidle else 9999
+        sdays = (now - (it["accessed"] or it["created"])) / 86400
+        tier = 0 if pdays > 365 else 1 if pdays > SESSION_IDLE else 2 if sdays > SESSION_IDLE else -1
+        if tier >= 0:
+            out.append(dict(it, tier=tier, pdays=int(pdays), sdays=int(sdays), age=int((now - it["created"]) / 86400)))
+    out.sort(key=lambda x: (x["tier"], -x["pdays"], x["label"], -x["sdays"]))
+    return out
+
+
+def plan_browser_sessions():
+    steps = []
+    for it in _stale_sessions():
+        steps.append({"id": "b%d" % len(steps), "group": SESSION_TIERS[it["tier"]],
+                      "label": "%s・%s" % (it["label"], it["svc"]),
+                      "detail": "profile %s；這個登入：已登入 %d 天、上次使用 %d 天前；登出頁：%s" % (
+                          "%d 天沒開" % it["pdays"] if it["pdays"] < 9999 else "沒有使用紀錄", it["age"], it["sdays"], it["url"]),
+                      "kind": "cookie-clear", "browser": it["browser"], "profile": it["profile"], "cookies": it["cookies"],
+                      "domains": list(it["domains"]), "url": it["url"], "svc": it["svc"]})
+    notes = ["每一項都有「🌐 開啟登出頁」：在那個 profile 打開該服務的裝置 / session 管理頁，按「登出所有其他裝置」或「登出」。"
+             "伺服器端登出最徹底（就算 cookie 已經被偷，也會立刻失效）。勾選後也可以按上方「🌐 開啟勾選項目的登出頁」整批打開。",
+             "按「執行」會在 Touch ID 後，從那個 profile 刪掉這些服務網域的 cookie（本機登出，以後被偷也沒有東西可拿）。"
+             "瀏覽器必須完全關閉（⌘Q）才能刪，開著的話會略過並告訴你。不會動其他網站的 cookie、密碼、書籤。",
+             "「整個 profile 超過一年沒用」那類，更乾淨的做法是在 Chrome 右上角頭像 →「管理 Chrome 個人資料」→ 該 profile 的「⋮」→「刪除」，"
+             "連同它的擴充功能一起清掉。profile 多久沒用是用 Chrome 的活動時間與歷史紀錄估計的。"]
+    return {"title": "處理久未使用的瀏覽器登入（開啟登出頁 / 清除 session cookie）", "report": "", "steps": steps, "notes": notes,
+            "reason": "執行 secaudit 修復：清除 %d 個久未使用的瀏覽器登入 cookie" % len(steps)}
+
+
+def _cookie_clear(s):
+    from .checks_browser import APP_SUPPORT
+    import sqlite3
+    if _browser_running(s["browser"]):
+        return False, "略過：%s 還開著，請先完全關閉（⌘Q）再執行" % BROWSER_APPS[s["browser"]]
+    db = os.path.realpath(s["cookies"])
+    if not db.startswith(os.path.realpath(APP_SUPPORT) + os.sep) or os.path.basename(db) != "Cookies":
+        return False, "略過：cookie 資料庫路徑不在允許範圍"
+    where = " OR ".join(["host_key = ? OR host_key = ? OR host_key LIKE ?"] * len(s["domains"]))
+    args = [a for d in s["domains"] for a in (d, "." + d, "%." + d)]
+    try:
+        con = sqlite3.connect(db, timeout=5)
+        try:
+            n = con.execute("DELETE FROM cookies WHERE " + where, args).rowcount
+            con.commit()
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        return False, "cookie 資料庫無法寫入：%s" % e
+    return True, "已刪除 %s 的 %d 個 cookie（%s）" % (s["svc"], n, "、".join(s["domains"]))
+
+
+def open_step(plan_id, step_id):
+    """在步驟所屬的 profile 打開該服務的登出 / session 管理頁。網址與 profile 都來自伺服器端的預覽，不接受前端傳入。"""
+    with _lock:
+        plan = _plans.get(plan_id)
+    if not plan:
+        return False, "預覽已過期，請重新預覽"
+    s = next((x for x in plan["steps"] if x["id"] == step_id and x.get("kind") == "cookie-clear"), None)
+    if not s:
+        return False, "找不到這個項目"
+    if not s["url"].startswith("https://"):
+        return False, "網址不正確"
+    r = subprocess.run(["open", "-na", BROWSER_APPS[s["browser"]], "--args",
+                        "--profile-directory=" + os.path.basename(s["profile"]), s["url"]], capture_output=True, text=True)
+    return r.returncode == 0, (r.stderr.strip()[:200] or "已在 %s 開啟" % s["label"].split("・")[0])
+
+
 ACTIONS = {
     "redact-transcripts": ("🔑", "遮罩 AI 對話紀錄裡的金鑰", plan_redact),
     "upgrade-runtimes": ("⬆️", "升級執行環境（同一版本線）", plan_upgrade),
@@ -2233,13 +2323,15 @@ ACTIONS = {
     "fix-key-perms": ("🔏", "私鑰與 App 憑證檔權限改成只有自己可讀", plan_key_perms),
     "archive-idle-projects": ("💤", "閒置專案 → 整個封存成加密 DMG", plan_archive_projects),
     "env-tpl": ("🧷", "寫死的機密 → 1Password + .env.tpl 引用", plan_env_tpl),
+    "browser-sessions": ("🍪", "久未使用的瀏覽器登入：開啟登出頁 / 清除 cookie", plan_browser_sessions),
 }
 
 # 報告裡每個問題可以用的修復動作（按鈕會帶到 Web UI 預覽，授權後才執行）
 RULE_ACTIONS = {"file-secrets": ["secure-files-1p", "secure-files-dmg"],
                 "plaintext-env": ["secure-files-1p", "secure-files-dmg"],
                 "key-unencrypted": ["secure-files-1p", "secure-files-dmg"],
-                "key-perm": ["fix-key-perms"]}
+                "key-perm": ["fix-key-perms"],
+                "browser-session": ["browser-sessions"]}
 
 
 def actions_for(rule, path="", detail=""):
@@ -2282,6 +2374,12 @@ def catalog():
     n_idle = sum(1 for a in pj.get("items") or [] if a.get("idle"))
     hints["archive-idle-projects"] = ("最近一次完整掃描有 %d 個閒置專案" % n_idle) if n_idle else \
         ("最近一次完整掃描沒有閒置專案" if pj else "下一次完整掃描後會判斷哪些專案已經閒置")
+    try:
+        st = _stale_sessions()
+        hints["browser-sessions"] = ("有 %d 個久未使用的登入（%d 個 profile 超過一年沒用）" % (
+            len(st), len({x["profile"] for x in st if x["tier"] == 0}))) if st else "沒有超過 90 天沒用的登入"
+    except Exception:
+        pass
     return [{"id": k, "icon": v[0], "title": v[1], "hint": hints.get(k, "")} for k, v in ACTIONS.items()]
 
 
@@ -2312,7 +2410,7 @@ def make_plan(action, report="", focus=""):
             del _plans[k]
         _plans[pid] = dict(plan, action=action, created=now)
     public = [{"id": s["id"], "label": s["label"], "detail": s["detail"], "default": s.get("default", True),
-               "group": s.get("group", ""),
+               "group": s.get("group", ""), "open": s.get("kind") == "cookie-clear",
                "ackable": s.get("group", "") in (SECRET_ACKABLE | ENV_ACKABLE) and bool(s.get("fkey"))}
               for s in plan["steps"]]
     return {"plan_id": pid, "action": action, "title": plan["title"], "report": plan.get("report", ""),
@@ -2696,6 +2794,8 @@ def _execute(plan, steps, key_name=None, preauth=False):
                             ("相關資訊", _journal_basics())])
                     except OSError as e:
                         r = (False, str(e))
+            elif s["kind"] == "cookie-clear":
+                r = _cookie_clear(s)
             elif s["kind"] == "cmd":
                 r = _run_cmd(s["argv"], env=_env(**s["env"]) if s.get("env") else None)
             elif s["kind"] == "cmds":       # 依序執行，前一個失敗就停
