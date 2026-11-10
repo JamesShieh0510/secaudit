@@ -1211,7 +1211,7 @@ function paneTab(p) {
 }
 document.querySelectorAll(".ptabs button").forEach(b => b.onclick = () => paneTab(b.dataset.p));
 const stepHtml = s => `<label class="step${s.default === false ? " nodef" : ""}"><input type="checkbox" class="actStep" value="${esc(s.id)}" data-def="${s.default === false ? 0 : 1}" ${s.default === false ? "" : "checked"}>
-  <span style="min-width:0"><div class="l">${esc(s.label)}</div><div class="d">${String(s.detail || "").split("；").filter(Boolean).map(x => `<div>${esc(x)}</div>`).join("")}</div>${s.open ? `<button type="button" class="tool sopen" data-id="${esc(s.id)}">🌐 開啟登出頁</button><span class="muted sopenmsg"></span>` : ""}</span></label>`;
+  <span style="min-width:0"><div class="l">${esc(s.label)}</div><div class="d">${String(s.detail || "").split("；").filter(Boolean).map(x => `<div>${esc(x)}</div>`).join("")}</div>${s.open ? `<button type="button" class="tool sopen" data-id="${esc(s.id)}">${esc(s.open === true ? "🌐 開啟登出頁" : s.open)}</button><span class="muted sopenmsg"></span>` : ""}</span></label>`;
 // 有分類（例如閒置專案依位置分）就分組顯示：每組一個總勾選框，項目多時預設收合
 function stepsGrouped(steps) {
   if (!steps.some(s => s.group)) return steps.map(stepHtml).join("");
@@ -1251,7 +1251,7 @@ async function previewAction(id, report, focus) {
         ${many ? '<input type="text" id="actFilter" placeholder="篩選項目…">' : ""}
         ${p.steps.length > 1 ? '<button type="button" id="selRec">建議項目</button><button type="button" id="selAll">全選</button><button type="button" id="selNone">全不選</button>' : ""}
         <span class="muted" id="selCount"></span><span class="sp"></span>
-        ${p.steps.some(s => s.open) ? '<button type="button" id="actOpenSel" title="在各自的 profile 打開勾選項目的登出頁（同一個網址在同一個 profile 只開一次）">🌐 開啟勾選項目的登出頁</button>' : ""}
+        ${p.steps.some(s => s.open) ? '<button type="button" id="actOpenSel" title="在各自的 profile 打開勾選項目的頁面（同一個網址在同一個 profile 只開一次）">' + esc(p.open_label || "🌐 開啟勾選項目的登出頁") + '</button>' : ""}
         <button id="actMd" title="把預覽與目前的勾選彙整成 Markdown，執行前先評估（也可以交給 AI 檢查）">⬇ 評估 MD</button>
         <button class="primary" id="actRun">🔒 Touch ID 執行</button>${canKey() ? '<button class="primary" id="actRunY">🔑 YubiKey 執行</button>' : ""}
         <button id="actCancel" title="關閉預覽">✕</button></div>
@@ -1327,12 +1327,12 @@ async function previewAction(id, report, focus) {
     const ids = [...document.querySelectorAll(".actStep:checked")].map(x => x.value);
     const byId = Object.fromEntries(actPlan.steps.map(s => [s.id, s])), seen = new Set(), go = [];
     ids.forEach(id => { const s = byId[id]; if (!s || !s.open) return;
-      const k = s.label.split("・")[0] + "|" + (String(s.detail).match(/登出頁：(\S+)/) || [])[1];
+      const k = s.label.split("・")[0] + "|" + (String(s.detail).match(/(?:登出頁|設定頁)：(\S+)/) || [])[1];
       if (!seen.has(k)) { seen.add(k); go.push(id); } });
-    const st = $("#actStatus"); st.style.display = ""; st.textContent = `開啟 ${go.length} 個登出頁…`;
+    const st = $("#actStatus"); st.style.display = ""; st.textContent = `開啟 ${go.length} 個頁面…`;
     let ok = 0;
     for (const id of go) { if ((await openStep(id)).ok) ok++; await new Promise(r => setTimeout(r, 400)); }
-    st.textContent = `🌐 已開啟 ${ok} / ${go.length} 個登出頁（同一個 profile 的同一個網址只開一次）`;
+    st.textContent = `已開啟 ${ok} / ${go.length} 個頁面（同一個 profile 的同一個網址只開一次）`;
   };
   lockRunButtons();
 }

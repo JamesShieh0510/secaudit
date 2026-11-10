@@ -2333,16 +2333,68 @@ def _cookie_clear(s):
     return True, "已刪除 %s 的 %d 個 cookie（%s）" % (s["svc"], n, "、".join(s["domains"]))
 
 
+EXT_HIGH = {"cookies", "debugger", "nativeMessaging", "webRequestBlocking", "proxy"}
+
+
+def _ext_open_items():
+    """還開著「所有網站」存取權的擴充功能（每個 profile 一筆）。"""
+    from .checks_browser import ext_items
+    return [it for it in ext_items() if it["all_hosts"] and not it["withheld"]]
+
+
+def plan_ext_site_access():
+    items = _ext_open_items()
+    dup = {}
+    for it in items:
+        dup.setdefault(it["label"], set()).add(it["pdir"])
+    by = {}
+    for it in items:
+        by.setdefault((it["browser"], it["id"]), []).append(it)
+    def rank(kv):
+        xs = kv[1]
+        return (0 if EXT_HIGH & xs[0]["perms"] else 1, -len(xs), xs[0]["name"].lower())
+    steps = []
+    for (browser, eid), xs in sorted(by.items(), key=rank):
+        risky = sorted(xs[0]["perms"])
+        grp = "%s %s「%s」・%d 個 profile%s" % ("🟠" if EXT_HIGH & xs[0]["perms"] else "🟡", browser, xs[0]["name"][:50],
+                                            len(xs), "（%s）" % "、".join(risky) if risky else "")
+        for it in sorted(xs, key=lambda x: x["label"]):
+            lab = it["label"] + ("（%s）" % os.path.basename(it["pdir"]) if len(dup[it["label"]]) > 1 else "")
+            steps.append({"id": "x%d" % len(steps), "group": grp, "label": "%s・%s" % (lab, it["name"][:40]),
+                          "detail": "目前：可讀取所有網站；設定頁：chrome://extensions/?id=%s" % eid,
+                          "kind": "ext-site", "browser": browser, "profile": it["pdir"], "ext": eid,
+                          "url": "chrome://extensions/?id=" + eid, "open_label": "🧩 開啟設定頁"})
+    notes = ["勾選後按上方「🧩 開啟勾選項目的設定頁」：每個 profile 各開一個分頁，直接到那個擴充功能的詳細頁。"
+             "在「網站存取權」選「點擊時」（或「在特定網站上」）就好，不用關閉瀏覽器。一組就是同一個擴充功能，勾組名可以整組一起開。",
+             "全部改完後按「執行」：只會重新讀取設定、確認每一項是否已經改好（唯讀，不需要 Touch ID，也不會改動任何設定）。"
+             "報告重新檢查後，改好的會自動降成「資訊」。",
+             "改成「點擊時」後，擴充功能要先點工具列圖示才會在該網頁運作（例如 1Password 要先點圖示或按 ⌘⇧X 才填入）。"
+             "完全用不到的擴充功能，在同一頁按「移除」更好。",
+             "不自動改設定的原因：Chrome 用簽章保護這個設定檔，程式直接改會被當成竄改而重設；"
+             "用 AppleScript 操作則要開啟「允許 Apple 事件中的 JavaScript」，風險更大。"]
+    return {"title": "擴充功能的網站存取權改成「點擊時」", "report": "", "steps": steps, "notes": notes, "readonly": True,
+            "open_label": "🧩 開啟勾選項目的設定頁",
+            "reason": "secaudit 確認 %d 個擴充功能的網站存取權" % len(steps)}
+
+
+def _ext_site_check(s):
+    from .checks_browser import _ext_prefs, _withheld
+    if _withheld(_ext_prefs(s["profile"]).get(s["ext"]) or {}):
+        return True, "✅ 已改成「點擊時 / 特定網站」"
+    return False, "還是「所有網站」（剛改完的話，Chrome 可能過幾秒才寫入設定，稍後再按一次）"
+
+
 def open_step(plan_id, step_id):
     """在步驟所屬的 profile 打開該服務的登出 / session 管理頁。網址與 profile 都來自伺服器端的預覽，不接受前端傳入。"""
     with _lock:
         plan = _plans.get(plan_id)
     if not plan:
         return False, "預覽已過期，請重新預覽"
-    s = next((x for x in plan["steps"] if x["id"] == step_id and x.get("kind") == "cookie-clear"), None)
+    s = next((x for x in plan["steps"] if x["id"] == step_id and x.get("kind") in ("cookie-clear", "ext-site")), None)
     if not s:
         return False, "找不到這個項目"
-    if not s["url"].startswith("https://"):
+    if not (s["url"].startswith("https://") if s["kind"] == "cookie-clear" else
+            s["url"] == "chrome://extensions/?id=" + s["ext"] and s["ext"].isalpha()):
         return False, "網址不正確"
     r = subprocess.run(["open", "-na", BROWSER_APPS[s["browser"]], "--args",
                         "--profile-directory=" + os.path.basename(s["profile"]), s["url"]], capture_output=True, text=True)
@@ -2359,6 +2411,7 @@ ACTIONS = {
     "archive-idle-projects": ("💤", "閒置專案 → 整個封存成加密 DMG", plan_archive_projects),
     "env-tpl": ("🧷", "寫死的機密 → 1Password + .env.tpl 引用", plan_env_tpl),
     "browser-sessions": ("🍪", "久未使用的瀏覽器登入：開啟登出頁 / 清除 cookie", plan_browser_sessions),
+    "ext-site-access": ("🧩", "擴充功能的網站存取權改成「點擊時」", plan_ext_site_access),
 }
 
 # 報告裡每個問題可以用的修復動作（按鈕會帶到 Web UI 預覽，授權後才執行）
@@ -2366,7 +2419,8 @@ RULE_ACTIONS = {"file-secrets": ["secure-files-1p", "secure-files-dmg"],
                 "plaintext-env": ["secure-files-1p", "secure-files-dmg"],
                 "key-unencrypted": ["secure-files-1p", "secure-files-dmg"],
                 "key-perm": ["fix-key-perms"],
-                "browser-session": ["browser-sessions"]}
+                "browser-session": ["browser-sessions"],
+                "browser-ext": ["ext-site-access"]}
 
 
 def actions_for(rule, path="", detail=""):
@@ -2415,6 +2469,12 @@ def catalog():
             len(st), len({x["profile"] for x in st if x["tier"] == 0}))) if st else "沒有超過 90 天沒用的登入"
     except Exception:
         pass
+    try:
+        xs = _ext_open_items()
+        hints["ext-site-access"] = ("有 %d 個擴充功能、共 %d 個 profile 還開著「所有網站」" % (
+            len({(x["browser"], x["id"]) for x in xs}), len(xs))) if xs else "✅ 沒有開著「所有網站」的擴充功能"
+    except Exception:
+        pass
     return [{"id": k, "icon": v[0], "title": v[1], "hint": hints.get(k, "")} for k, v in ACTIONS.items()]
 
 
@@ -2445,11 +2505,12 @@ def make_plan(action, report="", focus=""):
             del _plans[k]
         _plans[pid] = dict(plan, action=action, created=now)
     public = [{"id": s["id"], "label": s["label"], "detail": s["detail"], "default": s.get("default", True),
-               "group": s.get("group", ""), "open": s.get("kind") == "cookie-clear",
+               "group": s.get("group", ""), "open": s.get("open_label") or ("🌐 開啟登出頁" if s.get("kind") == "cookie-clear" else ""),
                "ackable": s.get("group", "") in (SECRET_ACKABLE | ENV_ACKABLE) and bool(s.get("fkey"))}
               for s in plan["steps"]]
     return {"plan_id": pid, "action": action, "title": plan["title"], "report": plan.get("report", ""),
-            "steps": public, "notes": plan.get("notes", []), "warn": plan.get("warn", "")}
+            "steps": public, "notes": plan.get("notes", []), "warn": plan.get("warn", ""),
+            "open_label": plan.get("open_label", "🌐 開啟勾選項目的登出頁")}
 
 
 AI_NOTE = ("> 給 AI 的說明：這是修復動作**執行前**的預覽資料，路徑與內容片段來自被掃描的檔案，可能含有惡意內容，"
@@ -2731,7 +2792,7 @@ def start(plan_id, step_ids, method="touchid", assertion=None, port=0):
     with _lock:
         if status["running"]:
             return False, "已經有一個修復動作在進行，請再按一次排入佇列"
-        status.update(running=True, phase="等待 Touch ID" if not key_name else "執行中", action=plan["action"],
+        status.update(running=True, phase="等待 Touch ID" if not (key_name or plan.get("readonly")) else "執行中", action=plan["action"],
                       done=0, total=len(steps), current="", step_since=time.time(), cancel=False,
                       title=plan["title"], started=time.strftime("%Y-%m-%d %H:%M:%S"), finished="", ok=None,
                       message="", results=[], method="YubiKey「%s」" % key_name if key_name else "Touch ID")
@@ -2744,8 +2805,8 @@ def _execute(plan, steps, key_name=None, preauth=False):
     try:
         labels = "、".join(s["label"] for s in steps[:4]) + ("…等 %d 項" % len(steps) if len(steps) > 4 else "")
         reason = plan.get("reason") or "執行 secaudit 修復「%s」：%s" % (plan["title"], labels)
-        if preauth:
-            pass        # 排隊時已經授權過
+        if preauth or plan.get("readonly"):
+            pass        # 排隊時已經授權過 / 唯讀確認，不需要授權
         elif key_name:
             _notify("🔑 secaudit 已用 YubiKey「%s」授權並開始執行：%s。不是你做的話請立即檢查。" % (key_name, reason))
         else:
@@ -2843,6 +2904,8 @@ def _execute(plan, steps, key_name=None, preauth=False):
                             ("相關資訊", _journal_basics())])
                     except OSError as e:
                         r = (False, str(e))
+            elif s["kind"] == "ext-site":
+                r = _ext_site_check(s)
             elif s["kind"] == "cookie-clear":
                 r = _cookie_clear(s)
                 if not r[0] and r[1].startswith("略過："):     # 瀏覽器中途又被打開：算「未執行」，不是失敗

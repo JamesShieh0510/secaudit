@@ -205,13 +205,37 @@ def _ext_name(ext_dir, manifest):
     return n
 
 
-def check_extensions(ctx: ScanContext):
-    ctx.report(CAT, "瀏覽器擴充功能")
-    exts = {}
+def _ext_prefs(pdir):
+    """profile 的擴充功能設定（Preferences + Secure Preferences 合併）：{id: settings}。"""
+    out = {}
+    for fn in ("Preferences", "Secure Preferences"):
+        try:
+            with open(os.path.join(pdir, fn), encoding="utf-8") as fh:
+                s = ((json.load(fh).get("extensions") or {}).get("settings")) or {}
+        except (OSError, ValueError, AttributeError):
+            continue
+        for eid, v in s.items():
+            if isinstance(v, dict):
+                out.setdefault(eid, {}).update(v)
+    return out
+
+
+def _withheld(st):
+    """「網站存取權」設成「點擊時」或「特定網站」：withholding_permissions=True 且沒有在執行期另外授權所有網站。"""
+    if not st.get("withholding_permissions"):
+        return False
+    rt = st.get("runtime_granted_permissions") or {}
+    return not any(ALL_HOSTS.match(str(h)) for k in ("explicit_host", "scriptable_host") for h in rt.get(k) or [])
+
+
+def ext_items():
+    """每個 profile 裡的每個擴充功能：{browser, label, pdir, id, name, ver, perms(風險權限), all_hosts(manifest 要所有網站),
+    withheld(已改成點擊時 / 特定網站), store}。"""
     for browser, label, p in _chromium_profiles():
         base = os.path.join(p, "Extensions")
         if not os.path.isdir(base):
             continue
+        prefs = _ext_prefs(p)
         for eid in os.listdir(base):
             vdir = os.path.join(base, eid)
             if not os.path.isdir(vdir):
@@ -230,11 +254,26 @@ def check_extensions(ctx: ScanContext):
             hosts = [str(x) for x in (mf.get("host_permissions") or [])] + [x for x in perms if "://" in x or x == "<all_urls>"]
             for cs in mf.get("content_scripts") or []:
                 hosts += [str(x) for x in cs.get("matches") or []]
-            e = exts.setdefault((browser, eid), {"name": _ext_name(d, mf), "ver": mf.get("version", ""), "profiles": [],
-                                                 "perms": set(), "all_hosts": False, "store": "update_url" in mf})
-            e["profiles"].append(label)
-            e["perms"].update(x for x in perms if x in RISKY_PERMS)
-            e["all_hosts"] = e["all_hosts"] or any(ALL_HOSTS.match(h) for h in hosts)
+            yield {"browser": browser, "label": label, "pdir": p, "id": eid, "name": _ext_name(d, mf),
+                   "ver": mf.get("version", ""), "perms": {x for x in perms if x in RISKY_PERMS},
+                   "all_hosts": any(ALL_HOSTS.match(h) for h in hosts), "withheld": _withheld(prefs.get(eid) or {}),
+                   "store": "update_url" in mf}
+
+
+def check_extensions(ctx: ScanContext):
+    ctx.report(CAT, "瀏覽器擴充功能")
+    exts = {}
+    for it in ext_items():
+        e = exts.setdefault((it["browser"], it["id"]), {"name": it["name"], "ver": it["ver"], "profiles": [],
+                                                       "perms": set(), "all_hosts": False, "withheld": [],
+                                                       "store": it["store"]})
+        e["profiles"].append(it["label"])
+        e["perms"].update(it["perms"])
+        if it["all_hosts"]:
+            if it["withheld"]:
+                e["withheld"].append(it["label"])
+            else:
+                e["all_hosts"] = True
     for (browser, eid), e in sorted(exts.items(), key=lambda x: x[1]["name"].lower()):
         ctx.inv("瀏覽器擴充功能", "%s ▸ %s（%s）" % (browser, e["name"], eid),
                 "v%s | %s | %d 個 profile" % (e["ver"], ",".join(sorted(e["perms"])) + (",所有網站" if e["all_hosts"] else ""), len(e["profiles"])))
@@ -245,14 +284,18 @@ def check_extensions(ctx: ScanContext):
             sev = "low"
         else:
             sev = "info"
+        # 每個 profile 都已改成「點擊時 / 特定網站」：沒有點就碰不到網頁內容，剩下的 API 權限風險很低
+        if e["withheld"] and not e["all_hosts"] and "debugger" not in e["perms"]:
+            sev = "info"
         if not e["store"]:
             sev = "medium" if sev != "info" else "low"
         ctx.add(Finding(
             rule="browser-ext", severity=sev, category=CAT,
             title="%s 擴充功能「%s」%s" % (browser, truncate(e["name"], 60), "（非商店安裝）" if not e["store"] else ""),
-            detail="權限：%s%s ／ 安裝在 %d 個 profile：%s" % (
+            detail="權限：%s%s ／ 安裝在 %d 個 profile：%s%s" % (
                 "、".join(risky) or "一般", "、可讀取所有網站" if e["all_hosts"] else "", len(e["profiles"]),
-                "、".join(e["profiles"][:5]) + ("…" if len(e["profiles"]) > 5 else "")),
+                "、".join(e["profiles"][:5]) + ("…" if len(e["profiles"]) > 5 else ""),
+                "（網站存取權已設為「點擊時」：%s）" % "、".join(e["withheld"][:5]) if e["withheld"] else ""),
             evidence="id=%s v%s" % (eid, e["ver"]),
             why="能讀所有網站又有 cookies / debugger / nativeMessaging 權限的擴充功能，可以直接把登入 session 傳出去。"
                 "擴充功能被轉賣或開發者帳號被盜後推送惡意更新，是近年常見的攻擊手法。",
