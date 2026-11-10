@@ -2231,7 +2231,7 @@ def _ensure_gitignore_env(root):
 # 只刪敏感服務網域的 cookie，不動其他網站、密碼、書籤；網址與 profile 都由伺服器端決定，不接受前端傳入。
 SESSION_IDLE = 90
 SESSION_TIERS = ("🗑 整個 profile 超過一年沒用（建議直接刪除 profile）", "💤 profile 90 天～一年沒用",
-                 "🍪 常用 profile 裡、超過 90 天沒用的登入")
+                 "🍪 常用 profile 裡、超過 90 天沒用的登入", "🔍 %s：還在使用的登入（建議先到服務端檢查裝置；cookie 預設不清）")
 BROWSER_APPS = {"Chrome": "Google Chrome", "Brave": "Brave Browser", "Edge": "Microsoft Edge", "Chromium": "Chromium",
                 "Vivaldi": "Vivaldi"}
 
@@ -2267,7 +2267,8 @@ def _browser_reopen(browser):
     subprocess.run(["open", "-a", BROWSER_APPS[browser], "--args", "--restore-last-session"], capture_output=True)
 
 
-def _stale_sessions():
+def _stale_sessions(svc=""):
+    """久未使用的登入；svc 有給時，連這個服務還在使用的登入也列進來（tier 3）。"""
     from .checks_browser import session_items, profile_last_used
     now, out, plast = time.time(), [], {}
     for it in session_items():
@@ -2276,17 +2277,20 @@ def _stale_sessions():
         pidle = plast.setdefault(it["profile"], profile_last_used(it["profile"]))
         pdays = (now - pidle) / 86400 if pidle else 9999
         sdays = (now - (it["accessed"] or it["created"])) / 86400
-        tier = 0 if pdays > 365 else 1 if pdays > SESSION_IDLE else 2 if sdays > SESSION_IDLE else -1
+        tier = 0 if pdays > 365 else 1 if pdays > SESSION_IDLE else 2 if sdays > SESSION_IDLE else \
+            3 if svc and it["svc"] == svc else -1
         if tier >= 0:
             out.append(dict(it, tier=tier, pdays=int(pdays), sdays=int(sdays), age=int((now - it["created"]) / 86400)))
-    out.sort(key=lambda x: (x["tier"], -x["pdays"], x["label"], -x["sdays"]))
+    out.sort(key=lambda x: (x["svc"] != svc, x["tier"], -x["pdays"], x["label"], -x["sdays"]))
     return out
 
 
 def plan_browser_sessions():
     steps = []
-    for it in _stale_sessions():
-        steps.append({"id": "b%d" % len(steps), "group": SESSION_TIERS[it["tier"]],
+    focus = getattr(_plan_ctx, "focus", "") or ""
+    for it in _stale_sessions(focus):
+        steps.append({"id": "b%d" % len(steps), "default": it["tier"] < 3,
+                      "group": SESSION_TIERS[it["tier"]] % focus if it["tier"] == 3 else SESSION_TIERS[it["tier"]],
                       "label": "%s・%s" % (it["label"], it["svc"]),
                       "detail": "profile %s；這個登入：已登入 %d 天、上次使用 %d 天前；登出頁：%s" % (
                           "%d 天沒開" % it["pdays"] if it["pdays"] < 9999 else "沒有使用紀錄", it["age"], it["sdays"], it["url"]),
@@ -2301,6 +2305,7 @@ def plan_browser_sessions():
     busy = _browsers_open(steps)
     for br in sorted({s["browser"] for s in steps if _browser_running(s["browser"])}):
         steps.insert(0, {"id": "cyc-" + br, "group": "⚙️ 執行方式", "kind": "browser-cycle", "browser": br,
+                         "default": any(x.get("default", True) for x in steps if x.get("browser") == br),
                          "label": "執行時自動關閉 %s，清完 cookie 再重新打開並還原分頁" % BROWSER_APPS[br],
                          "detail": "%s 開著時 cookie 刪不掉（它會把記憶體裡的 cookie 寫回去）；"
                                    "勾選後：Touch ID 授權 → 正常關閉 %s → 清 cookie → 用「還原上次的分頁」重新打開（這個頁面也會回來）；"
@@ -2484,11 +2489,11 @@ def make_plan(action, report="", focus=""):
         raise KeyError(action)
     report = report if report and report.replace("-", "").isdigit() and \
         os.path.isfile(os.path.join(REPORTS, report + ".json")) else ""
-    _plan_ctx.report = report
+    _plan_ctx.report, _plan_ctx.focus = report, focus
     try:
         plan = ACTIONS[action][2]()
     finally:
-        _plan_ctx.report = ""
+        _plan_ctx.report = _plan_ctx.focus = ""
     if focus:
         fp = os.path.expanduser(focus)
         hit = [s for s in plan["steps"] if s.get("path") == fp or

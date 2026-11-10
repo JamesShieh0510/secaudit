@@ -692,7 +692,8 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
                 out.append('<dt>%s</dt><dd%s>%s</dd>' % (label, ' class="ml"' if "\n" in str(f[k]) else "", val))
         fixes = "".join(
             '<a class="btn" target="_blank" href="/?fix=%s&amp;report=%s&amp;path=%s" title="到 Web UI 預覽修復步驟，授權後才會執行">%s</a>' % (
-                e(a), e(name), e(urllib.parse.quote(f.get("path") or "")), e(FIX_LABEL.get(a, a)))
+                e(a), e(name), e(urllib.parse.quote(f.get("path") or (
+                    f.get("title", "").split("：")[0] if f.get("rule") == "browser-session" else ""))), e(FIX_LABEL.get(a, a)))
             for a in (_actions_for(f.get("rule", ""), f.get("path", ""), f.get("detail", "")) if name else []))
         if ip and name:
             fixes += ('<a class="btn" target="_blank" href="/?fix=archive-idle-projects&amp;report=%s&amp;path=%s" '

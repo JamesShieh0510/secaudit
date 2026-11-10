@@ -125,6 +125,8 @@ APP_CRED_HINTS = {
     ".anydesk/": "這是 AnyDesk 自己產生的裝置金鑰，AnyDesk 沒有提供改存別處的方式，保留即可。",
     ".lmstudio/": "這是 LM Studio Hub 的登入憑證，App 自己管理，保留即可。",
 }
+# App 自己產生、自己管理，沒有改存別處的方式：權限正確又沒同步到雲端時，只列為「資訊」（沒有要處理的事）
+APP_CRED_KEEP = (".anydesk/", ".lmstudio/")
 # 不再使用時怎麼讓服務端撤銷金鑰（沒列到的用一般說法：從 App 裡登出 / 解除綁定）
 APP_CRED_REVOKE = {
     ".aws/": "到 AWS 主控台 IAM → 使用者 → 安全憑證，把這把 Access Key（AKIA 開頭）先停用、確認沒有東西壞掉後刪除，再從 credentials 移除那個 profile。",
@@ -201,7 +203,10 @@ def report_file_secrets(ctx: ScanContext, path: str, text: str):
         # App / 工具自己的憑證檔：程式每次執行都直接讀它，搬走 / 封存會讓 App 壞掉；要處理的是權限，或改用 App 提供的安全登入方式
         st = lstat_safe(path)
         loose = bool(st and group_or_world_readable(st))
-        if not loose and sev == "high":
+        rel_h = os.path.relpath(os.path.realpath(path), os.path.realpath(HOME))
+        if not loose and not cloud and rel_h.startswith(APP_CRED_KEEP):
+            sev = "info"
+        elif not loose and sev == "high":
             sev = "medium"
         notes.insert(0, "App / 工具自己的憑證檔（權限 %s%s）" % (mode_str(st) if st else "?", "，其他使用者可讀" if loose else "，只有你可讀"))
         fix = ("這是 App 自己會讀的憑證檔，不要搬進 1Password 後刪除、也不要封存：刪掉 App 就找不到、無法運作。"
