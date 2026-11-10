@@ -86,8 +86,10 @@ def apply(result):
             continue
         if a.get("sha") and file_sha(f.get("path", "")) != a["sha"]:
             # 標記後檔案被改過：標記失效，問題照常列出並加註
-            f["detail"] = ("⚠️ 這個問題在 %s 被標記為無害，但檔案內容之後被修改，標記已失效，請重新確認。" % a.get("time", "")) + \
-                          ((" ／ " + f["detail"]) if f.get("detail") else "")
+            # apply 會在掃描時和看報告時各跑一次：先拿掉舊的加註，避免重複
+            note = "⚠️ 這個問題在 %s 被標記為無害，但檔案內容之後被修改，標記已失效，請重新確認。" % a.get("time", "")
+            rest = [x for x in (f.get("detail") or "").split(" ／ ") if x and not x.startswith("⚠️ 這個問題在 ")]
+            f["detail"] = " ／ ".join([note] + rest)
             keep.append(f)
             continue
         f = dict(f, ack={"time": a.get("time", ""), "note": a.get("note", "")})

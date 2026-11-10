@@ -28,7 +28,8 @@ SOURCE_LABEL = {"manual": "手動", "scheduler": "排程", "watch": "即時監�
 
 FIX_LABEL = {"secure-files-1p": "🔧 修復：存進 1Password", "secure-files-dmg": "🔧 修復：加密封存 DMG",
              "fix-key-perms": "🔧 修復：權限改成 600", "redact-transcripts": "🔧 修復：遮罩對話紀錄",
-             "upgrade-runtimes": "🔧 修復：升級執行環境", "archive-idle-projects": "🔧 修復：封存閒置專案"}
+             "upgrade-runtimes": "🔧 修復：升級執行環境", "archive-idle-projects": "🔧 修復：封存閒置專案",
+             "remove-eol-runtimes": "🔧 修復：移除停止維護的舊版本"}
 
 
 def _actions_for(rule, path="", detail=""):
@@ -52,7 +53,7 @@ def _batch_fix(result, name, e):
         cnt["archive-idle-projects"] = len(idle)
     if not cnt:
         return ""
-    order = ["archive-idle-projects", "secure-files-1p", "secure-files-dmg", "fix-key-perms", "redact-transcripts", "upgrade-runtimes"]
+    order = ["archive-idle-projects", "secure-files-1p", "secure-files-dmg", "fix-key-perms", "redact-transcripts", "remove-eol-runtimes", "upgrade-runtimes"]
     btns = "".join('<a class="btn fixbatch" target="_blank" href="/?fix=%s&amp;report=%s" title="預覽這份報告裡所有可以這樣修的項目，勾選後授權執行">%s（%d 項）</a> ' % (
         e(a), e(name), e(FIX_LABEL.get(a, a).replace("🔧 修復：", "🔧 批次：")), cnt[a]) for a in order if a in cnt)
     btns += '<a class="btn fixbatch" target="_blank" href="/?allmd=1&amp;report=%s" title="所有修復動作的預覽＋需要手動處理的問題，彙整成一份 Markdown（只讀）">⬇ 全部修復預覽 Markdown</a>' % e(name)

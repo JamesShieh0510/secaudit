@@ -2409,6 +2409,7 @@ def open_step(plan_id, step_id):
 ACTIONS = {
     "redact-transcripts": ("🔑", "遮罩 AI 對話紀錄裡的金鑰", plan_redact),
     "upgrade-runtimes": ("⬆️", "升級執行環境（同一版本線）", plan_upgrade),
+    "remove-eol-runtimes": ("🧹", "移除停止維護的舊版本（沒有在用的）", lambda: __import__("secaudit.eol_cleanup", fromlist=["plan"]).plan()),
     "clean-go-toolchains": ("🧹", "清除舊的 Go toolchain 快取", plan_go_cache),
     "secure-files-dmg": ("📦", "含機密的檔案 → 加密 DMG", plan_secure_dmg),
     "secure-files-1p": ("🔐", "含機密的檔案 → 1Password", plan_secure_1p),
@@ -2446,7 +2447,9 @@ def actions_for(rule, path="", detail=""):
         return RULE_ACTIONS[rule]
     if rule.startswith("transcript-"):
         return ["redact-transcripts"]
-    if rule.startswith("runtime-") and (rule.endswith("-outdated") or rule.endswith("-eol") or rule.endswith("-vuln")):
+    if rule.startswith("runtime-") and rule.endswith("-eol"):
+        return ["remove-eol-runtimes", "upgrade-runtimes"]
+    if rule.startswith("runtime-") and (rule.endswith("-outdated") or rule.endswith("-vuln")):
         return ["upgrade-runtimes"]
     return []
 
@@ -2939,6 +2942,10 @@ def _execute(plan, steps, key_name=None, preauth=False):
                     except OSError as e:
                         errs.append("%s：%s" % (home_rel(p), e))
                 r = (not errs, "刪除 %d 項%s" % (done, ("\n" + "\n".join(errs)) if errs else ""))
+            elif s["kind"] in ("trash", "admin-trash", "conda-remove"):
+                from . import eol_cleanup
+                r = {"trash": eol_cleanup.trash, "admin-trash": eol_cleanup.admin_trash,
+                     "conda-remove": eol_cleanup.conda_remove}[s["kind"]](s)
             else:
                 r = (False, "未知的步驟類型")
             results.append({"id": s["id"], "label": s["label"], "ok": r[0], "output": r[1]})
