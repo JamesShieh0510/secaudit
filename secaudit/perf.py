@@ -1,10 +1,16 @@
 """即時效能分析（Web UI「⚡ 效能」頁籤）：電腦為什麼卡、是誰在吃資源、有沒有可疑的程式，並給出建議。
 
 只在有人開著頁籤時才取樣（每次請求最多 2.5 秒快取），不會在背景一直跑。
-資料來源都是 macOS 內建指令（不需要 sudo）：top、ps、sysctl、vm_stat、iostat、pmset、codesign。
+資料來源都是 macOS 內建指令與介面（不需要 sudo）：top、ps（含每個執行緒的狀態）、sysctl、vm_stat、iostat、pmset、
+codesign、libproc 的 proc_pid_rusage（每個程式的磁碟讀寫量；系統身分的程式讀不到），
+以及 FileProvider 的同步資料庫（唯讀開啟，用來算雲端硬碟還有多少檔案在排隊、在哪些資料夾）。
 """
+import collections
 import concurrent.futures
+import ctypes
+import glob
 import os
+import sqlite3
 import re
 import subprocess
 import threading
@@ -18,6 +24,8 @@ HISTORY = 200                 # 最近幾個取樣點（約 10 分鐘，視輪�
 _lock = threading.Lock()
 _cache = {"ts": 0, "data": None}
 _hist = []
+_qhist = []                   # 排隊來源的最近幾次取樣 [(時間, {App: 執行緒數})]，取平均比較接近 load（1 分鐘平均）
+QUEUE_WINDOW = 45
 
 # 常見的「吃資源」程式：說明它在做什麼、通常為什麼會忙、你可以怎麼做
 KNOWN = [
@@ -113,6 +121,168 @@ def _thermal():
     return {"speed_limit": limit, "warning": warn or limit < 100}
 
 
+def _threads():
+    """每個程式有幾個執行緒「正在跑或排隊等 CPU」（R）、「卡在等磁碟 / 核心」（U）。
+    load average 就是這兩種執行緒數量的平均，所以加總起來可以看出 load 是誰造成的。"""
+    out = _run(["ps", "-axM"], timeout=8).splitlines()
+    res = {}
+    if not out or "STAT" not in out[0]:
+        return res
+    h = out[0]
+    pid_end, si = h.index("PID") + 3, h.index("STAT")
+    for ln in out[1:]:
+        try:
+            pid = int(ln[:pid_end].split()[-1])
+        except (ValueError, IndexError):
+            continue
+        st = ln[si:si + 1]
+        c = res.setdefault(pid, [0, 0, 0])
+        c[2] += 1
+        if st == "R":
+            c[0] += 1
+        elif st == "U":
+            c[1] += 1
+    return res
+
+
+class _RUsage(ctypes.Structure):
+    _fields_ = [("uuid", ctypes.c_uint8 * 16)] + [(n, ctypes.c_uint64) for n in (
+        "user_time", "system_time", "pkg_idle_wkups", "interrupt_wkups", "pageins", "wired_size", "resident_size",
+        "phys_footprint", "proc_start_abstime", "proc_exit_abstime", "child_user_time", "child_system_time",
+        "child_pkg_idle_wkups", "child_interrupt_wkups", "child_pageins", "child_elapsed_abstime",
+        "diskio_bytesread", "diskio_byteswritten")]
+
+
+try:
+    _libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+except OSError:
+    _libproc = None
+_io_prev = {"t": 0.0, "v": {}}
+
+
+def _disk_by_pid(pids):
+    """每個程式這段時間的磁碟讀 / 寫（MB/s），跟上一次取樣比較。系統身分（root）的程式讀不到，回傳 None。"""
+    if _libproc is None:
+        return {}
+    now, cur = time.time(), {}
+    r = _RUsage()
+    for pid in pids:
+        if pid > 0 and _libproc.proc_pid_rusage(pid, 2, ctypes.byref(r)) == 0:
+            cur[pid] = (r.diskio_bytesread, r.diskio_byteswritten)
+    prev, dt = _io_prev["v"], now - _io_prev["t"]
+    _io_prev.update(t=now, v=cur)
+    if not prev or dt <= 0.5 or dt > 120:
+        return {}
+    out = {}
+    for pid, (rb, wb) in cur.items():
+        if pid in prev:
+            out[pid] = (max(0, rb - prev[pid][0]) / dt / 1048576, max(0, wb - prev[pid][1]) / dt / 1048576)
+    return out
+
+
+# ---------------------------------------------------------------- 雲端硬碟同步積壓（FileProvider）
+FP_DIR = os.path.join(HOME, "Library", "Application Support", "FileProvider")
+_cloud_cache = {"ts": 0.0, "data": []}
+_cloud_hist = {}                  # 資料庫 → [(時間, 剩下的項目數)]，用來算處理速度
+CLOUD_CACHE_SEC = 20
+CLOUD_SAMPLE = 100000             # 最多反查幾個排隊中項目的路徑（再依比例推估全部）
+
+
+def _cloud_label(root):
+    for pre, name in (("GoogleDrive-", "Google Drive"), ("OneDrive-", "OneDrive"), ("Dropbox", "Dropbox"), ("Box-", "Box")):
+        if root.startswith(pre):
+            acct = root[len(pre):]
+            return "%s（%s）" % (name, acct) if acct else name
+    if root in ("com~apple~CloudDocs", "iCloud Drive") or "CloudDocs" in root:
+        return "iCloud 雲碟"
+    return root or "雲端硬碟"
+
+
+def _fp_domain(db):
+    """一個同步資料庫還有多少項目在排隊，以及集中在哪些資料夾。唯讀開啟，不會鎖住同步。"""
+    uri = "file:%s?mode=ro" % db.replace("%", "%25").replace(" ", "%20").replace("?", "%3F").replace("#", "%23")
+    c = sqlite3.connect(uri, uri=True, timeout=1)
+    try:
+        n = {}
+        for tb in ("FS_item_jobs", "FP_item_jobs", "jobs"):
+            try:
+                n[tb] = c.execute("SELECT count(*) FROM %s" % tb).fetchone()[0]
+            except sqlite3.Error:
+                n[tb] = 0
+        total = sum(n.values())
+        if total == 0:
+            return None
+        cache = {}
+
+        def path(table, i, depth=0):
+            key = (table, i)
+            if key in cache:
+                return cache[key]
+            row = c.execute("SELECT parent_id, filename FROM %s WHERE id=?" % table, (i,)).fetchone()
+            if not row:
+                res = ()
+            elif row[0] is None or row[0] == i or depth > 40:
+                res = (row[1] or "",)
+            else:
+                res = path(table, row[0], depth + 1) + (row[1] or "",)
+            cache[key] = res
+            return res
+
+        folders, sampled, roots = collections.Counter(), 0, collections.Counter()
+        for jt, st in (("FS_item_jobs", "FS_snapshot"), ("FP_item_jobs", "FP_snapshot")):
+            if not n.get(jt):
+                continue
+            for (iid,) in c.execute("SELECT item_id FROM %s LIMIT ?" % jt, (CLOUD_SAMPLE,)).fetchall():
+                sampled += 1
+                p = path(st, iid)
+                if not p:
+                    folders[("", "（同步資料庫裡已經找不到這個項目）")] += 1
+                    continue
+                if p[0] == ".Trash" or (len(p) > 1 and p[1] == ".Trash"):
+                    k = p.index(".Trash")
+                    folders[("", "垃圾桶 / " + "/".join(p[k + 1:k + 3]))] += 1
+                else:
+                    roots[p[0]] += 1
+                    folders[(p[0], "/".join(p[1:6]))] += 1
+        root = roots.most_common(1)[0][0] if roots else ""
+        scale = total / sampled if sampled else 1
+        top = [{"folder": f, "other_root": bool(r and r != root), "count": int(round(v * scale))}
+               for (r, f), v in folders.most_common(8)]
+        return {"id": os.path.basename(os.path.dirname(os.path.dirname(db))), "label": _cloud_label(root), "root": root,
+                "total": total, "approx": sampled < total, "folders": top,
+                "uploads_downloads": n.get("jobs", 0)}
+    finally:
+        c.close()
+
+
+def _cloud_backlog():
+    """所有雲端硬碟（iCloud、Google Drive、OneDrive…都走 FileProvider）的同步積壓。最多每 20 秒算一次。"""
+    if time.time() - _cloud_cache["ts"] < CLOUD_CACHE_SEC:
+        return _cloud_cache["data"]
+    out = []
+    for db in glob.glob(os.path.join(FP_DIR, "*-*-*-*-*", "database", "db")):
+        try:
+            d = _fp_domain(db)
+        except (sqlite3.Error, OSError):
+            continue
+        h = _cloud_hist.setdefault(db, [])
+        now = time.time()
+        h.append((now, d["total"] if d else 0))
+        del h[:-60]
+        if not d or d["total"] < 20:          # 零星幾個項目是正常的，不顯示
+            continue
+        # 處理速度：跟 1～10 分鐘前比較
+        old = next(((t, v) for t, v in h if now - t <= 600), None)
+        if old and now - old[0] >= 60:
+            rate = (old[1] - d["total"]) / ((now - old[0]) / 60)
+            d["rate_per_min"] = round(rate, 1)
+            d["eta_min"] = round(d["total"] / rate) if rate > 0 else None
+        out.append(d)
+    out.sort(key=lambda x: -x["total"])
+    _cloud_cache.update(ts=time.time(), data=out)
+    return out
+
+
 def _app_name(exe, args):
     m = re.search(r"/([^/]+)\.app/Contents/MacOS/", exe)
     if m:
@@ -131,7 +301,13 @@ def _known(name):
     return None
 
 
-def _suspicion(pid, p, procs, known_db):
+def _tracking_since(known_db):
+    """常駐程式清單從哪一天開始記錄（最早的 first_seen）。清單剛建立的頭幾天，每個程式都會是「最近才出現」。"""
+    firsts = [v.get("first_seen", "") for v in known_db.values() if isinstance(v, dict) and v.get("first_seen")]
+    return min(firsts) if firsts else ""
+
+
+def _suspicion(pid, p, procs, known_db, since=""):
     """沿用常駐程式監控的判斷（位置、簽章、由誰啟動、通道），只針對吃資源的前幾名。"""
     exe = p["exe"]
     flags = []
@@ -152,26 +328,77 @@ def _suspicion(pid, p, procs, known_db):
         flags.append(("high", "ssh 帶了開通道的參數（可能讓別人從遠端連回你的電腦）"))
     k = known_db.get(R.norm_key(exe, p["args"])) or {}
     first = k.get("first_seen", "")
-    if first and first[:10] >= time.strftime("%Y-%m-%d", time.localtime(time.time() - 3 * 86400)) and k.get("signer") != "apple":
+    # 清單開始記錄的第一天就看到的程式不算「新出現」（那只是開始記錄的時間）
+    if (first and first[:10] >= time.strftime("%Y-%m-%d", time.localtime(time.time() - 3 * 86400))
+            and first[:10] > since[:10] and k.get("signer") != "apple"):
         flags.append(("low", "最近 3 天才第一次出現的程式（%s）" % first))
     return {"signer": kind, "signer_who": who, "from_user": user, "parent": R._chain_text(chain, procs)[:240], "flags": flags}
 
 
-def _diagnose(sysd, top_cpu, groups, engine):
+CLOUD_TIPS = {
+    "Google Drive": "急用時：選單列的 Google Drive 圖示 → ⚙️ →「暫停同步」，不用電腦時再恢復。",
+    "OneDrive": "急用時：選單列的 OneDrive 圖示 → ⚙️ →「暫停同步處理」。",
+    "Dropbox": "急用時：選單列的 Dropbox 圖示 → 頭像 →「暫停同步」。",
+    "iCloud": "急用時：Finder 側邊欄 iCloud 雲碟旁的雲朵圖示可以暫停。",
+}
+
+
+def _cloud_tip(label):
+    return next((v for k, v in CLOUD_TIPS.items() if label.startswith(k)), "可以先在該雲端硬碟 App 暫停同步，不用電腦時再恢復。")
+
+
+def _queue_summary(queue):
+    """把排隊的執行緒依「用途」合併：例如 mds、mds_stores、corespotlightd 都算 Spotlight。"""
+    agg = collections.OrderedDict()
+    for g in queue:
+        key = (g.get("known") or {}).get("what") or g["name"]
+        a = agg.setdefault(key, {"n": 0, "names": []})
+        a["n"] += g.get("avg", g["run"] + g["wait"])
+        a["names"].append(g["name"])
+    return sorted(agg.items(), key=lambda kv: -kv[1]["n"])
+
+
+def _diagnose(sysd, top_cpu, groups, engine, queue=(), cloud=(), io_top=(), io_ready=False):
     """把數字變成「為什麼卡、該怎麼做」。依嚴重程度排序。"""
     out = []
     n = sysd.get("ncpu") or 8
     load = sysd.get("load", [0, 0, 0])[0]
     busy = (sysd.get("cpu") or {}).get("busy", 0)
+    th_q = sysd.get("threads") or {}
+    summ = _queue_summary(queue)
+    who = "、".join("%s %.0f 個（%s）" % (k, v["n"], "、".join(v["names"][:3])) if len(v["names"]) > 1 or v["names"][0] != k
+                   else "%s %.0f 個" % (k, v["n"]) for k, v in summ[:4] if v["n"] >= 0.5)
+    who_line = ("最近 %d 次取樣平均有 %.0f 個執行緒正在跑或排隊，最多的是：%s。完整清單看下面「排隊來源」。" % (
+        th_q.get("samples", 1), th_q.get("avg", 0), who) if who else "")
     if load > n * 1.5 and busy and busy < 70:
-        out.append(("high", "系統排隊嚴重，但 CPU 沒有跑滿：等待中的工作 %.0f 個（核心數 %d），CPU 只用了 %.0f%%" % (load, n, busy),
-                    "macOS 的 load 也包含等磁碟、等系統服務的工作。這種情況通常是大量檔案操作（同步、索引、刪除 / 建立大量檔案、"
-                    "掛載磁碟映像）讓系統服務互相等待，點 App、開檔案會一頓一頓的。看下面「系統服務同時忙碌」的說明。"))
+        out.append(("high", "系統排隊嚴重，但 CPU 沒有跑滿：load %.0f（核心數 %d），CPU 只用了 %.0f%%" % (load, n, busy),
+                    "load 是「正在跑 + 排隊等 CPU + 卡在等磁碟 / 系統服務」的執行緒數平均。CPU 沒滿卻排很長，通常是大量檔案操作"
+                    "（雲端同步、索引、刪除 / 建立大量檔案、掛載磁碟映像）讓系統服務互相等待，點 App、開檔案會一頓一頓的。" + who_line))
     elif load > n * 1.5:
-        out.append(("high", "CPU 嚴重排隊：等待執行的工作 %.0f 個，是核心數（%d）的 %.1f 倍" % (load, n, load / n),
-                    "電腦卡頓最主要的原因。先處理下面「最吃 CPU」的前幾名。"))
+        out.append(("high", "CPU 嚴重排隊：load %.0f，是核心數（%d）的 %.1f 倍" % (load, n, load / n),
+                    "電腦卡頓最主要的原因。" + (who_line or "先處理下面「最吃 CPU」的前幾名。")))
     elif load > n:
-        out.append(("medium", "CPU 有點滿：等待執行的工作 %.0f 個，超過核心數 %d" % (load, n), "看下面最吃 CPU 的程式。"))
+        out.append(("medium", "CPU 有點滿：load %.0f，超過核心數 %d" % (load, n), who_line or "看下面最吃 CPU 的程式。"))
+    # 雲端同步積壓：具體是哪個帳號、哪些資料夾
+    for cd in cloud:
+        if cd["total"] < 500:
+            continue
+        rate = cd.get("rate_per_min")
+        speed = ("，每分鐘處理約 %s 個，大約 %s 分鐘處理完" % (f"{rate:,.0f}", f"{cd['eta_min']:,}") if rate and rate > 0 and cd.get("eta_min")
+                 else "，最近幾分鐘幾乎沒有減少" if rate is not None and rate <= 0 else "")
+        fl = "；".join("%s（%s 個）" % (f["folder"], f"{f['count']:,}") for f in cd["folders"][:3])
+        trash = any(f["folder"].startswith("垃圾桶") and f["count"] >= 100 for f in cd["folders"])
+        adv = "排隊最多的資料夾：%s。%s" % (fl, _cloud_tip(cd["label"]))
+        if trash:
+            adv += "「垃圾桶」裡的是你在這個雲端硬碟刪掉、還在同步刪除的檔案（例如 node_modules），清空它的垃圾桶可以減少要處理的量。"
+        adv += "如果某個資料夾（例如舊備份）不需要在這台電腦同步，可以把它移出同步範圍。"
+        out.append(("high" if cd["total"] >= 10000 else "medium",
+                    "%s 還有 %s%s 個項目在同步排隊%s" % (cd["label"], "約 " if cd.get("approx") else "", f"{cd['total']:,}", speed), adv))
+    if io_top:
+        heavy = [g for g in io_top if g["read"] + g["write"] >= 5]
+        if heavy:
+            out.append(("low", "磁碟讀寫最多的程式：%s" % "、".join("%s（讀 %.0f / 寫 %.0f MB/s）" % (g["name"], g["read"], g["write"]) for g in heavy[:3]),
+                        "系統身分的程式（例如 Spotlight 的 mds_stores、WindowServer）讀不到個別數字，所以不在這份清單裡；整台的讀寫量看上面的「磁碟讀寫」。"))
     if busy >= 85:
         out.append(("high", "CPU 使用率 %.0f%%" % busy, "幾乎所有核心都在忙。"))
     pr = sysd.get("pressure", 1)
@@ -247,6 +474,7 @@ def live(engine=None):
     with concurrent.futures.ThreadPoolExecutor(4) as ex:
         f_cpu, f_io = ex.submit(_cpu_usage), ex.submit(_disk_io)
         f_mem, f_th = ex.submit(_memory), ex.submit(_thermal)
+        f_thr, f_cloud = ex.submit(_threads), ex.submit(_cloud_backlog)
         procs = R.snapshot()
         sysd = R.system_stats()
         pm = f_th.result()
@@ -254,6 +482,8 @@ def live(engine=None):
         sysd.update(cpu=f_cpu.result(), disk=f_io.result(), mem=f_mem.result(),
                     thermal={"state": st, "name": R.THERMAL_NAME.get(st, "取不到"), "speed_limit": pm["speed_limit"],
                              "warning": (st is not None and st >= 2) or pm["warning"], "battery_temp": sysd.get("battery_temp")})
+        threads, cloud = f_thr.result(), f_cloud.result()
+    disk = _disk_by_pid(list(procs))
     try:
         sysd["load"] = [float(x) for x in os.getloadavg()]
     except OSError:
@@ -266,6 +496,7 @@ def live(engine=None):
             known_db = json.load(fh).get("known", {})
     except Exception:
         pass
+    since = _tracking_since(known_db)
     me = os.getpid()
     # 自己取樣用的 ps / top / iostat 等子程序不算
     procs = {k: v for k, v in procs.items() if v["ppid"] != me}
@@ -275,15 +506,30 @@ def live(engine=None):
         if pid <= 0:
             continue
         name = _app_name(p["exe"], p["args"])
-        g = groups.setdefault(name, {"name": name, "cpu": 0.0, "rss_mb": 0, "count": 0, "pids": []})
+        g = groups.setdefault(name, {"name": name, "cpu": 0.0, "rss_mb": 0, "count": 0, "pids": [],
+                                     "run": 0, "wait": 0, "threads": 0, "read": 0.0, "write": 0.0, "io_known": False})
+        tr = threads.get(pid) or (0, 0, 0)
+        g["run"] += tr[0]
+        g["wait"] += tr[1]
+        g["threads"] += tr[2]
+        if pid in disk:
+            g["io_known"] = True
+            g["read"] += disk[pid][0]
+            g["write"] += disk[pid][1]
         g["cpu"] += p["cpu"]
         g["rss_mb"] += p["rss_mb"]
         g["count"] += 1
         g["pids"].append(pid)
+    if 0 in threads:                                   # kernel_task（pid 0）不在 ps 的一般清單裡
+        k = threads[0]
+        groups.setdefault("kernel_task", {"name": "kernel_task", "cpu": 0.0, "rss_mb": 0, "count": 1, "pids": [0], "run": k[0],
+                                          "wait": k[1], "threads": k[2], "read": 0.0, "write": 0.0, "io_known": False})
     glist = sorted(groups.values(), key=lambda g: g["cpu"], reverse=True)
     for g in glist:
         g["cpu"] = round(g["cpu"], 1)
-        g["known"] = _known(g["name"]) or _known(os.path.basename(procs[g["pids"][0]]["exe"]))
+        g["read"], g["write"] = round(g["read"], 1), round(g["write"], 1)
+        first = procs.get(g["pids"][0])
+        g["known"] = _known(g["name"]) or (_known(os.path.basename(first["exe"])) if first else None)
         g["pids"] = g["pids"][:8]
 
     def row(pid):
@@ -292,8 +538,10 @@ def live(engine=None):
         base = os.path.basename(p["exe"])
         r = {"pid": pid, "name": name, "proc": base, "cpu": round(p["cpu"], 1), "rss_mb": p["rss_mb"], "age": p["age"],
              "uid": p["uid"], "exe": home_rel(p["exe"]), "args": home_rel(p["args"][:300]), "self": pid == me,
+             "run": (threads.get(pid) or (0,))[0], "wait": (threads.get(pid) or (0, 0))[1],
+             "read": round(disk[pid][0], 1) if pid in disk else None, "write": round(disk[pid][1], 1) if pid in disk else None,
              "known": _known(base) or _known(name)}
-        r.update(_suspicion(pid, p, procs, known_db))
+        r.update(_suspicion(pid, p, procs, known_db, since))
         return r
     by_cpu = sorted(procs, key=lambda k: procs[k]["cpu"], reverse=True)[:15]
     by_mem = sorted(procs, key=lambda k: procs[k]["rss_mb"], reverse=True)[:10]
@@ -307,8 +555,31 @@ def live(engine=None):
         _hist.append(point)
         del _hist[:-HISTORY]
         hist = list(_hist)
-    data = {"time": time.strftime("%H:%M:%S"), "system": sysd, "diagnosis": _diagnose(sysd, top_cpu, glist, engine),
+    # 排隊來源：load 是誰造成的。單次取樣只是一瞬間，用最近 45 秒的平均排序
+    now_q = {g["name"]: g["run"] + g["wait"] for g in glist if g["run"] + g["wait"] > 0}
+    with _lock:
+        _qhist.append((time.time(), now_q))
+        _qhist[:] = [x for x in _qhist if time.time() - x[0] <= QUEUE_WINDOW]
+        qh = list(_qhist)
+    avg = collections.Counter()
+    for _, m in qh:
+        avg.update(m)
+    gmap = {g["name"]: g for g in glist}
+    queue = []
+    for name, tot in avg.most_common(12):
+        g = dict(gmap.get(name) or {"name": name, "cpu": 0.0, "rss_mb": 0, "count": 0, "pids": [], "run": 0, "wait": 0,
+                                    "threads": 0, "read": 0.0, "write": 0.0, "io_known": False, "known": _known(name)})
+        g["avg"] = round(tot / len(qh), 1)
+        queue.append(g)
+    qtot = [sum(v[0] for v in threads.values()), sum(v[1] for v in threads.values()), sum(v[2] for v in threads.values())]
+    io_top = sorted((g for g in glist if g["io_known"] and g["read"] + g["write"] >= 0.1),
+                    key=lambda g: g["read"] + g["write"], reverse=True)[:8]
+    sysd["threads"] = {"run": qtot[0], "wait": qtot[1], "total": qtot[2], "samples": len(qh),
+                       "avg": round(sum(avg.values()) / len(qh), 1) if qh else 0}
+    data = {"time": time.strftime("%H:%M:%S"), "system": sysd,
+            "diagnosis": _diagnose(sysd, top_cpu, glist, engine, queue, cloud, io_top, bool(disk)),
             "groups": [dict(g, pids=g["pids"]) for g in glist[:12]], "top_cpu": top_cpu, "top_mem": top_mem,
+            "queue": [dict(g) for g in queue], "io_top": [dict(g) for g in io_top], "io_ready": bool(disk), "cloud": cloud,
             "history": hist, "nproc": len(procs)}
     with _lock:
         _cache.update(ts=time.time(), data=data)
@@ -329,10 +600,24 @@ def as_markdown(d):
                                          "，電池 %.1f °C" % s["thermal"]["battery_temp"] if (s.get("thermal") or {}).get("battery_temp") else ""),
          "", "## 自動判斷", ""]
     L += ["- [%s] %s：%s" % (x["level"], x["title"], x["advice"]) for x in d["diagnosis"]]
+    tq = s.get("threads") or {}
+    if d.get("queue"):
+        L += ["", "## 排隊來源（每個程式「正在跑 + 排隊 + 等磁碟」的執行緒，最近 %s 次取樣平均 %s 個）" % (tq.get("samples", "?"), tq.get("avg", "?")), "",
+              "| 程式 | 平均排隊 | 此刻 跑/等 | CPU% | 讀/寫 MB/s | 用途 |", "|---|---|---|---|---|---|"]
+        for g in d["queue"]:
+            L.append("| %s | %s | %d/%d | %.0f | %s | %s |" % (g["name"], g["avg"], g["run"], g["wait"], g["cpu"],
+                     "%.1f/%.1f" % (g["read"], g["write"]) if g.get("io_known") else "讀不到", (g.get("known") or {}).get("what", "")))
+    for c in d.get("cloud") or []:
+        L += ["", "## 雲端同步積壓：%s，%s%d 個項目%s" % (c["label"], "約 " if c.get("approx") else "", c["total"],
+              "，每分鐘處理約 %.0f 個" % c["rate_per_min"] if c.get("rate_per_min") else ""), ""]
+        L += ["- %s：%d" % (f["folder"], f["count"]) for f in c["folders"]]
+    if d.get("io_top"):
+        L += ["", "## 磁碟讀寫最多（系統身分的程式讀不到）", ""]
+        L += ["- %s：讀 %.1f / 寫 %.1f MB/s" % (g["name"], g["read"], g["write"]) for g in d["io_top"]]
     L += ["", "## 最吃 CPU 的程式", "", "| pid | 名稱 | CPU% | 記憶體 MB | 簽章 | 由誰啟動 | 指令 | 疑點 |", "|---|---|---|---|---|---|---|---|"]
     for p in d["top_cpu"]:
         L.append("| %d | %s | %.0f | %d | %s | %s | `%s` | %s |" % (
             p["pid"], p["name"], p["cpu"], p["rss_mb"], p["signer"], p["parent"].replace("|", "/")[:80],
             p["args"].replace("|", "/").replace("`", "'")[:120], "；".join(f[1] for f in p["flags"]) or "—"))
-    L += ["", "請判斷：1) 電腦卡頓的主因 2) 哪些程式可以安全結束 3) 有沒有可疑程式、要怎麼確認。"]
+    L += ["", "請判斷：1) 電腦卡頓的主因（參考排隊來源與雲端同步積壓） 2) 哪些程式可以安全結束 3) 有沒有可疑程式、要怎麼確認。"]
     return "\n".join(L)

@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="zh-Hant">
 <head>
+<script>try { const t = localStorage.getItem("sa_theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}</script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Mac 安全監控</title>
@@ -12,6 +13,9 @@ details.fold>summary::before{content:"▸";color:var(--muted);transition:transfo
 details.fold[open]>summary::before{transform:rotate(90deg)}
 :root{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--muted:#667085;--line:#e4e7ec;--accent:#2563eb;--high:#d92d20;--medium:#e8730c;--low:#c9a400;--info:#5b7fbd;--ok:#12a150;--code:#f2f4f7}
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#0f1216;--card:#171b21;--fg:#e6e9ef;--muted:#98a2b3;--line:#2a313b;--accent:#60a5fa;--high:#f97066;--medium:#fb923c;--low:#facc15;--info:#7ea6e0;--ok:#4ade80;--code:#222831}}
+:root{color-scheme:light dark}:root[data-theme=light]{color-scheme:light}:root[data-theme=dark]{color-scheme:dark}
+.themesw{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}.themesw button{border:0;border-radius:0;padding:5px 9px;font-size:13px;background:none;color:var(--muted)}
+.themesw button.on{background:var(--fg);color:var(--bg)}
 :root[data-theme=dark]{--bg:#0f1216;--card:#171b21;--fg:#e6e9ef;--muted:#98a2b3;--line:#2a313b;--accent:#60a5fa;--high:#f97066;--medium:#fb923c;--low:#facc15;--info:#7ea6e0;--ok:#4ade80;--code:#222831}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 -apple-system,"PingFang TC","Noto Sans TC",sans-serif}
 .wrap{max-width:1000px;margin:0 auto;padding:24px 16px 60px}h1{font-size:22px;margin:0}h2{font-size:16px;margin:0 0 12px}
@@ -61,7 +65,12 @@ section.tab{display:none}section.tab.on{display:block}
 .diag{display:flex;gap:10px;align-items:flex-start;padding:10px 2px;border-bottom:1px solid var(--line)}.diag:last-child{border:0}
 .diag .t{font-weight:600}.diag .a{font-size:13px;color:var(--muted);margin-top:2px;line-height:1.5}
 .pgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr));gap:0 16px}
-#perfApps,#perfProcs{overflow-x:auto}.ptab td:first-child{word-break:break-word}
+#perfApps,#perfProcs,#perfQueue,#perfIO{overflow-x:auto}
+#perfQueue .ptab td:first-child,#perfIO .ptab td:first-child{min-width:150px}#perfQueue .ptab,#perfIO .ptab{min-width:520px}
+.qbar{height:8px;border-radius:0 4px 4px 0;background:var(--c1);min-width:2px;margin-top:4px}.qcell{min-width:90px}
+.cloudd{padding:10px 0;border-bottom:1px solid var(--line)}.cloudd:last-child{border:0}.cloudd .hd{display:flex;gap:8px;flex-wrap:wrap;align-items:baseline}
+.cloudd .num{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}.cfold{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 10px;font-size:13px;margin-top:8px}
+.cfold .p{word-break:break-all}.cfold .c{text-align:right;font-variant-numeric:tabular-nums;color:var(--muted)}.cfold .b{grid-column:1/-1;height:6px;border-radius:0 3px 3px 0;background:var(--c3);margin-bottom:6px;min-width:2px}.ptab td:first-child{word-break:break-word}
 .ptab{width:100%;font-size:13px}.ptab td,.ptab th{padding:6px 5px;vertical-align:top}.ptab .n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 .ptab details>summary{cursor:pointer;list-style:none}.ptab details>summary::-webkit-details-marker{display:none}
 .ptab .sub{font-size:12px;color:var(--muted);word-break:break-all;margin-top:4px;line-height:1.5}
@@ -147,6 +156,7 @@ body.noscroll{overflow:hidden}
     <div><h1>🛡 Mac 安全監控</h1><div class="muted" id="sched"></div></div>
     <div class="row">
       <label class="muted" title="只影響右邊這兩顆手動掃描按鈕。排程、即時監看、資源監控觸發的掃描一律照常通知。會記在這個瀏覽器裡"><input type="checkbox" id="notify"> 手動掃描有變動時也發 Telegram</label>
+      <span class="themesw" role="group" aria-label="外觀"><button type="button" data-theme-set="auto" title="跟著系統的淺色 / 深色設定">自動</button><button type="button" data-theme-set="light" title="淺色">☀️ 淺色</button><button type="button" data-theme-set="dark" title="深色">🌙 深色</button></span>
       <button id="quick">快速掃描</button>
       <button class="primary" id="full">完整掃描</button>
     </div>
@@ -330,6 +340,17 @@ body.noscroll{overflow:hidden}
   </div>
 </div>
 <script>
+// 外觀：自動（跟著系統）/ 淺色 / 深色，記在這個瀏覽器裡
+function isDark() { const t = document.documentElement.dataset.theme; return t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches; }
+function setTheme(t) {
+  if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
+  try { if (t === "light" || t === "dark") localStorage.setItem("sa_theme", t); else localStorage.removeItem("sa_theme"); } catch (e) {}
+  document.querySelectorAll("[data-theme-set]").forEach(b => b.classList.toggle("on", b.dataset.themeSet === t));
+  try { const f = document.getElementById("rptFrame"), r = f && f.contentDocument && f.contentDocument.documentElement;   // 開著的報告也跟著換
+    if (r) { if (t === "light" || t === "dark") r.dataset.theme = t; else delete r.dataset.theme; } } catch (e) {}
+}
+document.querySelectorAll("[data-theme-set]").forEach(b => b.onclick = () => setTheme(b.dataset.themeSet));
+setTheme(document.documentElement.dataset.theme || "auto");
 // 分頁標籤：記住上次看的分頁（網址 #分頁 優先）
 const TABS = ["reports", "stats", "perf", "feed", "fix", "settings", "sop"];
 function showTab(t) {
@@ -523,12 +544,21 @@ function renderPerf(d) {
     host.replaceChildren();
     const tiles = el("div", "ptiles"); tiles.id = "perfTiles"; host.appendChild(tiles);
     const dg = el("div", "card"); dg.appendChild(el("b", "", "為什麼卡、該怎麼做")); const dl = el("div"); dl.id = "perfDiag"; dg.appendChild(dl); host.appendChild(dg);
+    const cc = el("div", "card"); cc.id = "perfCloudCard"; cc.hidden = true; cc.appendChild(el("b", "", "雲端硬碟同步積壓"));
+    cc.appendChild(el("div", "muted", "從各雲端硬碟（iCloud、Google Drive、OneDrive…）的同步資料庫唯讀取得：還有多少項目在排隊、集中在哪些資料夾。每 20 秒更新。"));
+    const cl = el("div"); cl.id = "perfCloud"; cc.appendChild(cl); host.appendChild(cc);
+    const qc = el("div", "card"); qc.appendChild(el("b", "", "排隊來源：load 是誰造成的"));
+    qc.appendChild(el("div", "muted", "load 是「正在跑 + 排隊等 CPU + 卡在等磁碟」的執行緒數。這裡數每個程式有幾個這樣的執行緒，取最近 45 秒的平均；短暫的爆發（例如 Spotlight 一次開很多 mdworker）可能讓 load 比這裡加總還高。"));
+    const qt = el("div"); qt.id = "perfQueue"; qc.appendChild(qt); host.appendChild(qc);
     const grid = el("div", "pgrid"); host.appendChild(grid);
     perfState.charts = {};
     [["busy", "CPU 使用率", "整台電腦，100% = 所有核心都在忙", "var(--c1)", "%"], ["disk", "磁碟讀寫", "所有磁碟合計（MB/s）", "var(--c3)", ""]].forEach(([key, title, sub, color, unit]) => {
       const box = el("div"); grid.appendChild(box);
       chartCard(box, title, sub, plot => { perfState.charts[key] = {plot, color, unit, title}; drawPerfChart(key); }, null);
     });
+    const ioc = el("div", "card"); ioc.appendChild(el("b", "", "磁碟讀寫最多的程式"));
+    ioc.appendChild(el("div", "muted", "每個程式這幾秒的讀寫量。系統身分的程式（Spotlight 的 mds_stores、WindowServer 等）macOS 不讓一般權限讀取，不會出現在這裡。"));
+    const iot = el("div"); iot.id = "perfIO"; ioc.appendChild(iot); host.appendChild(ioc);
     const apps = el("div", "card"); apps.appendChild(el("b", "", "依 App 合併（含它的子程序）")); apps.appendChild(el("div", "muted", "Chrome、Electron App 會開很多子程序，合併後才看得出是哪個 App 在吃資源"));
     const at = el("div"); at.id = "perfApps"; apps.appendChild(at); host.appendChild(apps);
     const pc = el("div", "card"); pc.appendChild(el("b", "", "程式明細")); 
@@ -554,19 +584,65 @@ function renderPerf(d) {
   d.diagnosis.forEach(x => { const r = el("div", "diag"); r.appendChild(el("span", "lvl " + x.level, LVL[x.level] || x.level));
     const b = el("div"); b.appendChild(el("div", "t", x.title)); b.appendChild(el("div", "a", x.advice)); r.appendChild(b); dl.appendChild(r); });
   Object.keys(perfState.charts).forEach(drawPerfChart);
+  renderCloud(d); renderPerfQueue(d); renderIO(d);
   const at = $("#perfApps"); at.replaceChildren(); const t = el("table", "ptab"); const h = t.insertRow();
   ["App / 程式", "CPU", "記憶體", "程序數"].forEach((x, i) => h.appendChild(el("th", i ? "n" : "", x)));
-  const openA = new Set([...document.querySelectorAll("#perfApps details[open]")].map(x => x.dataset.app));
-  d.groups.forEach(g => { const r = t.insertRow(); const c0 = r.insertCell();
-    if (g.known) { const dt = el("details"); dt.dataset.app = g.name; if (openA.has(g.name)) dt.open = true;
-      const sm = el("summary"); sm.appendChild(el("b", "", g.name)); sm.appendChild(el("div", "sub", g.known.what + " ▸")); dt.appendChild(sm);
-      dt.appendChild(el("div", "sub", "為什麼會忙：" + g.known.why)); dt.appendChild(el("div", "sub", "建議：" + g.known.tip)); c0.appendChild(dt); }
-    else c0.appendChild(el("b", "", g.name));
+  perfState.open_app = new Set([...document.querySelectorAll("#perfApps details[open]")].map(x => x.dataset.app));
+  d.groups.forEach(g => { const r = t.insertRow(); knownCell(r.insertCell(), g, "app");
     const c1 = r.insertCell(); c1.className = "n"; c1.textContent = Math.round(g.cpu) + "%";
     const c2 = r.insertCell(); c2.className = "n"; c2.textContent = fmtMB(g.rss_mb);
     const c3 = r.insertCell(); c3.className = "n"; c3.textContent = g.count; });
   at.appendChild(t);
   renderProcs(d);
+}
+function knownCell(c0, g, kind) {
+  if (g.known) { const dt = el("details"); dt.dataset[kind] = g.name; if (perfState["open_" + kind]?.has(g.name)) dt.open = true;
+    const sm = el("summary"); sm.appendChild(el("b", "", g.name)); sm.appendChild(el("div", "sub", g.known.what + " ▸")); dt.appendChild(sm);
+    dt.appendChild(el("div", "sub", "為什麼會忙：" + g.known.why)); dt.appendChild(el("div", "sub", "建議：" + g.known.tip)); c0.appendChild(dt); }
+  else c0.appendChild(el("b", "", g.name));
+}
+const fmtRate = v => v === null || v === undefined ? "—" : v >= 10 ? Math.round(v) + "" : v.toFixed(1);
+function renderPerfQueue(d) {
+  const host = $("#perfQueue"); perfState.open_q = new Set([...host.querySelectorAll("details[open]")].map(x => x.dataset.q)); host.replaceChildren();
+  const q = d.queue || [], tq = d.system.threads || {};
+  host.appendChild(el("div", "muted", `最近 ${tq.samples || 0} 次取樣平均 ${tq.avg ?? "—"} 個執行緒正在跑或排隊（此刻 ${tq.run ?? "—"} 個在跑 / 排隊、${tq.wait ?? "—"} 個在等磁碟；全部 ${tq.total ?? "—"} 個執行緒）`));
+  if (!q.length) { host.appendChild(el("div", "muted", "目前沒有程式在排隊。")); return; }
+  const t = el("table", "ptab"); const h = t.insertRow();
+  ["App / 程式", "平均排隊", "此刻 跑 / 等", "CPU", "讀 / 寫 MB/s"].forEach((x, i) => h.appendChild(el("th", i ? "n" : "", x)));
+  const mx = Math.max(...q.map(g => g.avg), 1);
+  q.forEach(g => { const r = t.insertRow(); knownCell(r.insertCell(), g, "q");
+    const c1 = r.insertCell(); c1.className = "n qcell"; c1.appendChild(el("div", "", String(g.avg))); const b = el("div", "qbar"); b.style.width = (g.avg / mx * 100) + "%"; c1.appendChild(b);
+    const c2 = r.insertCell(); c2.className = "n"; c2.textContent = `${g.run} / ${g.wait}`;
+    const c3 = r.insertCell(); c3.className = "n"; c3.textContent = Math.round(g.cpu) + "%";
+    const c4 = r.insertCell(); c4.className = "n"; c4.textContent = g.io_known ? `${fmtRate(g.read)} / ${fmtRate(g.write)}` : "讀不到"; });
+  host.appendChild(t);
+}
+function renderIO(d) {
+  const host = $("#perfIO"); perfState.open_io = new Set([...host.querySelectorAll("details[open]")].map(x => x.dataset.io)); host.replaceChildren();
+  if (!d.io_ready) { host.appendChild(el("div", "muted", "需要兩次取樣才算得出來，下一次更新就會出現。")); return; }
+  const l = d.io_top || [];
+  if (!l.length) { host.appendChild(el("div", "muted", "這幾秒沒有程式在大量讀寫（系統身分的程式除外）。")); return; }
+  const t = el("table", "ptab"); const h = t.insertRow();
+  ["App / 程式", "讀 MB/s", "寫 MB/s", "CPU"].forEach((x, i) => h.appendChild(el("th", i ? "n" : "", x)));
+  l.forEach(g => { const r = t.insertRow(); knownCell(r.insertCell(), g, "io");
+    [fmtRate(g.read), fmtRate(g.write), Math.round(g.cpu) + "%"].forEach(v => { const c = r.insertCell(); c.className = "n"; c.textContent = v; }); });
+  host.appendChild(t);
+}
+function renderCloud(d) {
+  const card = $("#perfCloudCard"), host = $("#perfCloud"), l = d.cloud || [];
+  card.hidden = !l.length; host.replaceChildren();
+  l.forEach(c => { const box = el("div", "cloudd"); const hd = el("div", "hd");
+    hd.appendChild(el("b", "", c.label)); hd.appendChild(el("span", "num", (c.approx ? "約 " : "") + c.total.toLocaleString()));
+    hd.appendChild(el("span", "muted", "個項目在排隊"));
+    if (c.rate_per_min !== undefined) hd.appendChild(el("span", "muted", c.rate_per_min > 0
+      ? `・每分鐘處理約 ${Math.round(c.rate_per_min).toLocaleString()} 個${c.eta_min ? `，約 ${c.eta_min.toLocaleString()} 分鐘處理完` : ""}`
+      : "・最近幾分鐘幾乎沒有減少"));
+    else hd.appendChild(el("span", "muted", "・處理速度：開著頁籤 1 分鐘後才算得出來"));
+    box.appendChild(hd);
+    const g = el("div", "cfold"); const mx = Math.max(...c.folders.map(f => f.count), 1);
+    c.folders.forEach(f => { g.appendChild(el("div", "p", f.folder)); g.appendChild(el("div", "c", f.count.toLocaleString()));
+      const b = el("div", "b"); b.style.width = (f.count / mx * 100) + "%"; g.appendChild(b); });
+    box.appendChild(g); host.appendChild(box); });
 }
 function drawPerfChart(key) {
   const c = perfState.charts[key], d = perfState.last; if (!c || !d) return;
@@ -591,7 +667,9 @@ function renderProcs(d) {
     else if (p.known) sm.appendChild(el("div", "sub", p.known.what));
     dt.appendChild(sm);
     [["執行檔", p.exe], ["指令", p.args], ["由誰啟動（由近到遠）", p.parent], ["簽章", (SIGN[p.signer] || p.signer) + (p.signer_who && p.signer !== "apple" ? "：" + p.signer_who : "")],
-     ["執行身分", p.uid === 0 ? "root（系統）" : "uid " + p.uid]].forEach(([k, v]) => dt.appendChild(el("div", "sub", k + "：" + v)));
+     ["執行身分", p.uid === 0 ? "root（系統）" : "uid " + p.uid],
+     ["排隊中的執行緒", `${p.run} 個在跑 / 排隊、${p.wait} 個在等磁碟`],
+     ["磁碟", p.read === null || p.read === undefined ? "讀不到（系統身分的程式，或還在等第二次取樣）" : `讀 ${fmtRate(p.read)} MB/s・寫 ${fmtRate(p.write)} MB/s`]].forEach(([k, v]) => dt.appendChild(el("div", "sub", k + "：" + v)));
     if (p.known) { dt.appendChild(el("div", "sub", "為什麼會忙：" + p.known.why)); dt.appendChild(el("div", "sub", "建議：" + p.known.tip)); }
     else if (!p.flags.length) dt.appendChild(el("div", "sub", "建議：確認是不是你在用的程式；不認得就搜尋程式名稱或按上方「📋 複製給 AI 分析」。要結束可以用「活動監視器」。"));
     else dt.appendChild(el("div", "sub", "建議：先不要直接結束。確認執行檔位置與由誰啟動是否合理；不認得就按上方「📋 複製給 AI 分析」，或到「📋 報告」看常駐程式的紀錄。"));
@@ -700,7 +778,7 @@ function renderMermaid(root) {
     const sc = document.createElement("script");
     sc.src = "/static/vendor/mermaid-11.4.1.min.js";
     sc.onload = () => { mermaid.initialize({startOnLoad: false, securityLevel: "strict",
-      theme: matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "default"}); ok(); };
+      theme: isDark() ? "dark" : "default"}); ok(); };
     sc.onerror = () => { mermaidReady = null; bad(new Error("流程圖程式載入失敗")); };
     document.head.appendChild(sc);
   });
@@ -800,6 +878,7 @@ rptFrame.addEventListener("load", () => {
   // 報告裡的連結：其他報告 → 在彈窗裡切換；修復 / 下載預覽（/?fix=…）→ 回到主控台處理
   let doc; try { doc = rptFrame.contentDocument; } catch (e) { return; }
   if (!doc) return;
+  const th = document.documentElement.dataset.theme; if (th) doc.documentElement.dataset.theme = th;   // 舊報告沒有讀外觀設定，這裡補上
   doc.addEventListener("keydown", e => { if (e.key === "Escape") closeReport(); });
   doc.addEventListener("click", e => {
     const a = e.target.closest && e.target.closest("a[href]"); if (!a) return;

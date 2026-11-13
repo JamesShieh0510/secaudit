@@ -19,7 +19,7 @@
 | 機密與憑證 | 明文 `.env`、各家 API Key 格式、私鑰（權限、是否有密碼保護）、`~/.ssh`（新增的金鑰、authorized_keys 新增的公鑰）、`~/.aws`、`~/.npmrc`、`~/.docker`、`~/.git-credentials` 等 |
 | 瀏覽器 | Chrome / Arc / Brave / Edge / Firefox 各 profile 中重要服務的登入 session 持續多久、閒置多久；擴充功能權限；是否開著遠端除錯；暫存資料夾是否出現 Cookies / Login Data 副本。**只讀 cookie 的網域與時間，不讀取、不解密 cookie 值** |
 | 系統資源與常駐程式 | 每分鐘取樣 CPU / 記憶體：單一程式持續吃滿 CPU（挖礦特徵）、閒置時整台 CPU 偏高、記憶體壓力 / swap / 單一程式記憶體暴增、溫度偏高或降頻（macOS 熱狀態）；新出現的常駐程式（執行超過 5 分鐘、以前沒看過的非 Apple 執行檔），附簽章、位置、啟動時間與由誰啟動，從你的終端機或 AI 助理開的程式只記在報告裡不推播 |
-| ⚡ 效能（Web UI） | 即時分析電腦為什麼卡：CPU、load、記憶體、swap、磁碟讀寫、溫度（熱狀態 + 電池溫度），依 App 合併的資源用量、最吃 CPU / 記憶體的程式（簽章、由誰啟動、可疑疑點），自動判斷原因並給建議；可一鍵複製快照給 AI 分析。只在開著頁籤時取樣 |
+| ⚡ 效能（Web UI） | 即時分析電腦為什麼卡：CPU、load、記憶體、swap、磁碟讀寫、溫度（熱狀態 + 電池溫度），**排隊來源**（每個程式有幾個執行緒在跑 / 排隊 / 等磁碟，看出 load 是誰造成的）、每個程式的磁碟讀寫量、**雲端硬碟同步積壓**（唯讀讀取 FileProvider 同步資料庫：iCloud / Google Drive / OneDrive 還有多少項目在排隊、集中在哪些資料夾、處理速度與預估時間）、依 App 合併的資源用量、最吃 CPU / 記憶體的程式（簽章、由誰啟動、可疑疑點），自動判斷原因並給建議；可一鍵複製快照給 AI 分析。只在開著頁籤時取樣 |
 | 開機自動執行 | LaunchAgents / LaunchDaemons（含程式簽章）、crontab、shell 啟動檔 |
 | 供應鏈與版本 | 各專案 lockfile（npm / pnpm / yarn / pip / poetry / uv / Go / Cargo / Gemfile / composer）查 [OSV.dev](https://osv.dev)；全域 npm 套件 |
 | 執行環境版本 | **所有已安裝的**Node.js、Python、Go、Ruby、Java、PHP、Rust、Deno、Bun、.NET（nvm / fnm / volta / asdf / mise / Homebrew / conda / pyenv / uv / rbenv / rvm / sdkman / rustup / 系統內建）是否停止維護（[endoflife.date](https://endoflife.date)）；Node.js 是否錯過官方標記的安全更新；專案指定的版本（`.nvmrc`、`.python-version`、`.tool-versions`、`go.mod`、`package.json` engines、`pyproject.toml`、`Dockerfile` FROM、compose `image:`） |

@@ -517,7 +517,7 @@ const RT=[...document.querySelectorAll('.rtabs button')].map(b=>b.dataset.t);
 function mmd(){const ns=[...document.querySelectorAll('section.rtab[data-tab=sop] pre.mermaid')];
  if(!ns.length||location.protocol!=='http:'||window._mmd)return;window._mmd=1;
  const sc=document.createElement('script');sc.src='/static/vendor/mermaid-11.4.1.min.js';
- sc.onload=()=>{mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'default'});
+ sc.onload=()=>{mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:(document.documentElement.dataset.theme?document.documentElement.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'default'});
   mermaid.run({nodes:ns}).then(()=>document.querySelectorAll('.mmd-note').forEach(x=>x.remove()));};
  document.head.appendChild(sc);}
 function rtab(t){if(!RT.includes(t))t='overview';
@@ -626,7 +626,8 @@ def to_html(result, changes=None, summary="", sop=None, md_text="", name=""):
     for f in fs:
         cats.setdefault(f["category"], {s: 0 for s in SEVERITIES})[f["severity"]] += 1
     p = ['<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">',
-         '<title>安全掃描報告</title><style>%s</style></head><body data-report="%s"><div class="wrap">' % (CSS, e(name)),
+         '<title>安全掃描報告</title><style>%s</style>'
+         '<script>try{const t=localStorage.getItem("sa_theme");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t}catch(e){}</script></head><body data-report="%s"><div class="wrap">' % (CSS, e(name)),
          '<h1>🛡 安全掃描報告</h1><div class="muted">%s ・ %s ・ 耗時 %s 秒 ・ 模式 %s</div>' % (
              e(result["host"]), e(result["started"]), e(result["duration_sec"]), e(MODE_LABEL.get(result["mode"], result["mode"])))]
     _, idle = _idle(result)
