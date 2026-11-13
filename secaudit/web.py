@@ -198,6 +198,29 @@ def make_handler(engine: Engine, token: str, port: int):
                     "secrets": {"telegram": bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID")),
                                 "ollama": bool(os.environ.get("OLLAMA_API_KEY"))},
                 })
+            if u.path == "/api/github":
+                from . import ghwatch
+                cfg = load_config()
+                if "md=1" in (u.query or ""):
+                    sev = urllib.parse.parse_qs(u.query).get("min", ["info"])[0]
+                    return self._send(200, {"md": ghwatch.as_markdown(cfg, sev if sev in ("high", "medium", "low", "info") else "info")})
+                st = ghwatch.load_alerts()
+                marks = ghwatch.load_marks()
+                alerts = sorted(st["alerts"].items(), key=lambda kv: (-kv[1].get("last", 0)))
+                return self._send(200, {
+                    "config": cfg.get("github_watch") or {},
+                    "available": ghwatch.gh_accounts(),
+                    "status": st.get("status") or {}, "running": bool(engine.status.get("github_running")),
+                    "next": engine.status.get("next_github", ""),
+                    "owners": {k: {"last_ok": v.get("last_ok"), "error": v.get("error", ""), "is_org": v.get("is_org"),
+                                   "repos": v.get("repos_seen"), "audit_at": (v.get("audit") or {}).get("at")}
+                               for k, v in st["owners"].items()},
+                    "timeline": ghwatch.timeline()[-2000:],
+                    "alerts": [dict({k: a.get(k) for k in ("rule", "severity", "title", "path", "detail", "evidence", "first", "last", "count", "owner")},
+                                    key=key, check=(a.get("check") or {}).get("note", ""),
+                                    state=ghwatch.alert_state(key, a, marks)[0], resolved=ghwatch.alert_state(key, a, marks)[1])
+                               for key, a in alerts[:400]],
+                })
             if u.path == "/api/actions":
                 from . import actions, webauthn
                 return self._send(200, {"catalog": actions.catalog(), "status": actions.status, "history": actions.history(),
@@ -319,6 +342,47 @@ def make_handler(engine: Engine, token: str, port: int):
                 cfg["full_scan_hour"] = min(23, max(0, cfg["full_scan_hour"]))
                 save_config(cfg)
                 return self._send(200, {"ok": True})
+            if path == "/api/github/config":
+                from .ghwatch import NAME_RE
+                accs, seen = [], set()
+                for a in body.get("accounts") or []:
+                    login = str(a.get("login", "")).strip()
+                    if not NAME_RE.match(login) or login.lower() in seen:
+                        continue
+                    seen.add(login.lower())
+                    owners = []
+                    for o in a.get("owners") or []:
+                        o = str(o).strip().strip("/").split("/")[-1]
+                        if NAME_RE.match(o) and o.lower() not in {x.lower() for x in owners}:
+                            owners.append(o)
+                    accs.append({"login": login, "owners": owners[:30], "enabled": bool(a.get("enabled", True))})
+                cfg = load_config()
+                cfg["github_watch"] = {"enabled": bool(body.get("enabled")), "accounts": accs[:10],
+                                       "interval_min": min(240, max(5, int(body.get("interval_min") or 15)))}
+                save_config(cfg)
+                engine._next_gh = 0          # 存檔後馬上檢查一次
+                return self._send(200, {"ok": True})
+            if path == "/api/github/mark":
+                # 手動標記會降低警示，跟「已確認無害」一樣每次都發 Telegram
+                from . import ghwatch
+                from .notify import telegram_send
+                import html as _h
+                keys = [str(k)[:400] for k in (body.get("keys") or [body.get("key", "")]) if k][:500]
+                kind = str(body.get("kind", ""))
+                note = str(body.get("note", ""))[:300]
+                ok_n, err = 0, ""
+                for k in keys:
+                    ok, msg = ghwatch.mark(k, kind, note)
+                    ok_n += ok
+                    err = err or ("" if ok else msg)
+                if ok_n:
+                    label = {"fixed": "已處理", "false_positive": "誤判", "reopen": "撤銷標記（重新列出）"}.get(kind, kind)
+                    telegram_send("🐙 secaudit：%d 筆 GitHub 警示標記為「%s」%s。不是你做的話請到 Web UI 撤銷。" % (
+                        ok_n, label, ("，備註：" + _h.escape(note[:100])) if note else ""))
+                return self._send(200 if ok_n else 404, {"ok": bool(ok_n), "count": ok_n, "error": err})
+            if path == "/api/github/poll":
+                ok = engine.github_poll_async(force_audit=bool(body.get("audit")))
+                return self._send(200 if ok else 409, {"started": ok})
             if path == "/api/pick":
                 # 叫出 macOS 原生的「選擇資料夾」視窗
                 try:

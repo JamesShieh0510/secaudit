@@ -175,6 +175,7 @@ body.noscroll{overflow:hidden}
     <button data-tab="stats">📈 統計</button>
     <button data-tab="perf">⚡ 效能</button>
     <button data-tab="feed">🧯 漏洞快訊</button>
+    <button data-tab="github">🐙 GitHub<span class="badge" id="tbGh"></span></button>
     <button data-tab="fix">🛠 處理<span class="badge" id="tbFix"></span></button>
     <button data-tab="settings">⚙️ 設定<span class="badge" id="tbSet"></span></button>
     <button data-tab="sop">📖 運作 SOP</button>
@@ -222,6 +223,29 @@ body.noscroll{overflow:hidden}
     <div id="feedMsg" class="note" style="display:none"></div>
     <div class="muted" id="feedMeta"></div>
     <div id="feed" style="margin-top:8px"></div>
+  </div>
+  </section>
+  <section class="tab" data-tab="github">
+  <div class="card">
+    <div class="top"><h2>🐙 GitHub 監控</h2><span class="row" style="gap:6px"><button id="ghPoll">立即檢查</button><button id="ghAudit" title="另外檢查成員、外部協作者、webhook、deploy key、分支保護、組織機密（平常每天一次）">檢查（含設定稽核）</button></span></div>
+    <div class="muted">定期讀取各帳號、各組織 repo 的變動（只讀，不修改任何東西），找出 CI 供應鏈攻擊的手法：繞過 PR 直接改 workflow、workflow 裡把機密送出去、改了又還原、新分支夾帶 workflow、可疑 commit 已被執行、執行紀錄被刪除、大量相同的 PR、新成員 / webhook / deploy key。
+      新警示會列進報告的「GitHub 監控」並發 Telegram 通知。token 用 <code>gh auth token -u 帳號</code> 讀取（或 1Password 注入的 <code>GH_TOKEN_帳號</code>），不寫入任何檔案。</div>
+    <div id="ghStatus" style="margin-top:8px"></div>
+  </div>
+  <div class="card">
+    <h2>帳號與組織</h2>
+    <label class="cfg">開啟 GitHub 監控<input type="checkbox" id="ghEnabled"></label>
+    <label class="cfg">檢查頻率（分鐘）<input type="number" id="ghInterval" min="5" max="240" style="width:80px"></label>
+    <div class="muted" style="margin:6px 0">每個帳號填要監控的組織或個人帳號（逗號分隔，可以直接貼網址）。帳號要先在終端機用 <code>gh auth login</code> 登入；本機已登入：<span id="ghAvail"></span></div>
+    <div id="ghAccounts"></div>
+    <div class="row" style="margin-top:8px"><button type="button" id="ghAdd">＋ 新增帳號</button><button type="button" id="ghSave">儲存</button><span id="ghMsg" class="muted"></span></div>
+  </div>
+  <div class="card">
+    <div class="top"><h2>警示</h2><span class="row" style="gap:6px"><span id="ghCount" class="muted"></span>
+      <span class="row" style="gap:0"><button id="ghVList" type="button">清單</button><button id="ghVTime" type="button">時間軸</button></span>
+      <select id="ghMdMin" title="匯出哪些嚴重度"><option value="info">全部</option><option value="medium">中以上</option><option value="high">只有高風險</option></select>
+      <button id="ghMd" title="下載成 Markdown，可以直接交給 AI agent 複審（不含任何 token 或機密值）">📄 匯出 Markdown</button></span></div>
+    <div id="ghAlerts"></div>
   </div>
   </section>
   <section class="tab" data-tab="fix">
@@ -352,9 +376,10 @@ function setTheme(t) {
 document.querySelectorAll("[data-theme-set]").forEach(b => b.onclick = () => setTheme(b.dataset.themeSet));
 setTheme(document.documentElement.dataset.theme || "auto");
 // 分頁標籤：記住上次看的分頁（網址 #分頁 優先）
-const TABS = ["reports", "stats", "perf", "feed", "fix", "settings", "sop"];
+const TABS = ["reports", "stats", "perf", "feed", "github", "fix", "settings", "sop"];
 function showTab(t) {
   if (!TABS.includes(t)) t = "reports";
+  if (t === "github") loadGithub();
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
   document.querySelectorAll("section.tab").forEach(s => s.classList.toggle("on", s.dataset.tab === t));
   try { localStorage.setItem("secaudit-tab", t); } catch (e) {}
@@ -915,6 +940,163 @@ document.addEventListener("toggle", e => {
   const d = e.target; if (!d.dataset || !d.dataset.okey) return;
   d.open ? OPEN.add(d.dataset.okey) : OPEN.delete(d.dataset.okey);
 }, true);
+// ================================================================ 🐙 GitHub 監控
+let ghCfg = null, ghDirty = false;
+const SEVC = {high: "var(--high)", medium: "var(--medium)", low: "var(--low)", info: "var(--info)"};
+const SEVL = {high: "高", medium: "中", low: "低", info: "資訊"};
+const fmtT = t => t ? new Date(t * 1000).toLocaleString("zh-TW", {month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false}) : "—";
+async function loadGithub() {
+  const d = await api("/api/github");
+  if (!ghDirty) {
+    ghCfg = JSON.parse(JSON.stringify(d.config || {}));
+    ghCfg.accounts = ghCfg.accounts || [];
+    $("#ghEnabled").checked = !!ghCfg.enabled; $("#ghInterval").value = ghCfg.interval_min || 15;
+    renderGhAccounts(d.available || []);
+  }
+  $("#ghAvail").textContent = (d.available || []).join("、") || "（沒有，請先 gh auth login）";
+  const s = d.status || {};
+  const own = Object.entries(d.owners || {}).map(([k, v]) => `<div>${v.error ? "❌" : "✅"} <b>${esc(k)}</b>${v.is_org ? "（組織）" : "（個人）"}
+    ${v.repos ? `・${v.repos} 個 repo` : ""}・上次成功 ${fmtT(v.last_ok)}・設定稽核 ${fmtT(v.audit_at)}${v.error ? ` <span style="color:var(--high)">${esc(v.error)}</span>` : ""}</div>`).join("");
+  $("#ghStatus").innerHTML = (d.running ? "⏳ 檢查中…<br>" : "") +
+    (s.at ? `上次檢查 ${fmtT(s.at)}，新警示 ${s.new || 0} 項・下次 ${esc(d.next || "—")}` : (ghCfg.enabled ? "尚未檢查" : "目前關閉")) +
+    (s.summary || []).map(x => `<div class="muted">${esc(x)}</div>`).join("") +
+    (s.errors || []).map(x => `<div style="color:var(--high)">⚠️ ${esc(x)}</div>`).join("") + (own ? `<div style="margin-top:6px">${own}</div>` : "");
+  const al = d.alerts || [];
+  const open = al.filter(a => !a.state), hi = open.filter(a => a.severity === "high").length;
+  $("#tbGh").textContent = hi ? hi : "";
+  $("#ghCount").textContent = al.length ? `未處理 ${open.length} 項（高風險 ${hi}）・已處理 ${al.length - open.length} 項` : "";
+  ghTimeline = d.timeline || []; ghAlertsData = al;
+  const sig = JSON.stringify([al.map(a => [a.title, a.last, a.count, a.state, a.check]), ghTimeline.length]);
+  if (sig !== ghSig) { ghSig = sig; setGhView(ghView); }
+  clearTimeout(window._ght);
+  if ($("section.tab[data-tab=github]").classList.contains("on")) window._ght = setTimeout(loadGithub, d.running ? 3000 : 20000);
+}
+let ghView = (() => { try { return localStorage.getItem("ghView") || "list"; } catch (e) { return "list"; } })();
+let ghSig = "", ghTimeline = [], ghAlertsData = [], ghTlFilter = {q: "", org: "", actor: "", sev: "", hideDetected: true};
+function setGhView(v) {
+  ghView = v; try { localStorage.setItem("ghView", v); } catch (e) {}
+  $("#ghVList").classList.toggle("primary", v === "list"); $("#ghVTime").classList.toggle("primary", v === "time");
+  if (v === "time") renderGhTimeline(); else renderGhList(ghAlertsData);
+}
+$("#ghVList").onclick = () => setGhView("list"); $("#ghVTime").onclick = () => setGhView("time");
+function renderGhTimeline() {
+  const box = $("#ghAlerts"); box.replaceChildren();
+  const actors = [...new Set(ghTimeline.map(e => e.actor).filter(Boolean))].sort();
+  const orgs = [...new Set(ghTimeline.map(e => e.org).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  if (ghTlFilter.org && !orgs.includes(ghTlFilter.org)) ghTlFilter.org = "";
+  const bar = el("div", "row"); bar.style.cssText = "gap:6px;flex-wrap:wrap;margin:6px 0";
+  const q = el("input"); q.type = "search"; q.placeholder = "篩選 repo / 內容"; q.value = ghTlFilter.q; q.style.maxWidth = "220px";
+  const og = el("select"); og.appendChild(new Option("所有組織", "")); orgs.forEach(o => og.appendChild(new Option(`${o}（${ghTimeline.filter(e => e.org === o && !e.detected).length}）`, o))); og.value = ghTlFilter.org;
+  const ac = el("select"); ac.appendChild(new Option("所有帳號", "")); actors.forEach(a => ac.appendChild(new Option(a, a))); ac.value = ghTlFilter.actor;
+  const sv = el("select"); [["", "所有嚴重度"], ["high", "高"], ["medium", "中以上"]].forEach(([v, t]) => sv.appendChild(new Option(t, v))); sv.value = ghTlFilter.sev;
+  const hd = el("label"); const hc = el("input"); hc.type = "checkbox"; hc.checked = ghTlFilter.hideDetected; hd.appendChild(hc); hd.appendChild(document.createTextNode(" 隱藏設定稽核（沒有事件時間）"));
+  const cnt = el("span", "muted");
+  bar.append(q, og, ac, sv, hd, cnt); box.appendChild(bar);
+  const list = el("div"); box.appendChild(list);
+  const draw = () => {
+    Object.assign(ghTlFilter, {q: q.value.trim().toLowerCase(), org: og.value, actor: ac.value, sev: sv.value, hideDetected: hc.checked});
+    const f = ghTlFilter;
+    const ev = ghTimeline.filter(e => (!f.hideDetected || !e.detected) && (!f.org || e.org === f.org) && (!f.actor || e.actor === f.actor) &&
+      (!f.sev || (f.sev === "high" ? e.severity === "high" : ["high", "medium"].includes(e.severity))) &&
+      (!f.q || (e.repo + " " + e.text + " " + e.label).toLowerCase().includes(f.q)));
+    const repos = new Set(ev.map(e => e.repo));
+    cnt.textContent = ev.length ? `${ev.length} 個事件・${repos.size} 個 repo・${fmtT(ev[0].t)} → ${fmtT(ev[ev.length - 1].t)}` : "";
+    list.replaceChildren();
+    if (!ev.length) { list.appendChild(el("div", "muted", "沒有符合的事件")); return; }
+    let day = "", prev = 0;
+    ev.forEach(e => {
+      const dt = new Date(e.t * 1000);
+      const dk = dt.toLocaleDateString("zh-TW", {year: "numeric", month: "2-digit", day: "2-digit", weekday: "short"});
+      if (dk !== day) { const h = el("h3", "", dk); h.style.cssText = "margin:14px 0 4px;font-size:14px;border-bottom:1px solid var(--line);padding-bottom:3px"; list.appendChild(h); day = dk; prev = 0; }
+      if (prev && e.t - prev > 3600) { const g = el("div", "muted", `⋯ 間隔 ${Math.round((e.t - prev) / 360) / 10} 小時`); g.style.cssText = "font-size:12px;margin:4px 0 4px 58px"; list.appendChild(g); }
+      prev = e.t;
+      const r = el("div"); r.style.cssText = `display:flex;gap:8px;align-items:baseline;padding:3px 0 3px 8px;border-left:3px solid ${SEVC[e.severity] || "var(--line)"};margin-left:4px` + (e.state ? ";opacity:.5" : "");
+      if (e.state) r.title = "這筆警示已處理";
+      const tm = el("code", "", dt.toLocaleTimeString("zh-TW", {hour: "2-digit", minute: "2-digit", hour12: false})); tm.style.minWidth = "44px";
+      const lb = el("span", "pill", e.label); lb.style.background = SEVC[e.severity]; lb.style.whiteSpace = "nowrap";
+      const body = el("div"); body.style.cssText = "flex:1;min-width:0;word-break:break-word";
+      const rp = el(e.path ? "a" : "b", "", e.repo); if (e.path) { rp.href = e.path; rp.target = "_blank"; rp.rel = "noopener"; rp.style.fontWeight = "600"; }
+      body.append(rp, document.createTextNode(" "));
+      if (e.actor) { const a = el("span", "", "@" + e.actor); a.style.cssText = "color:var(--high);cursor:pointer"; a.title = "只看這個帳號"; a.onclick = () => { ac.value = e.actor; draw(); }; body.append(a, document.createTextNode(" ")); }
+      body.appendChild(el("span", "muted", e.text + (e.detected ? "（偵測時間）" : "") + (e.state ? " ✅" : "")));
+      r.append(tm, lb, body); list.appendChild(r);
+    });
+  };
+  q.oninput = draw; og.onchange = draw; ac.onchange = draw; sv.onchange = draw; hc.onchange = draw; draw();
+}
+let ghShowResolved = false;
+async function ghMark(keys, kind, note) {
+  const r = await api("/api/github/mark", {keys, kind, note: note || ""});
+  $("#ghMsg").textContent = r.ok ? `已更新 ${r.count} 筆` : "❌ " + (r.error || "失敗");
+  setTimeout(() => { $("#ghMsg").textContent = ""; }, 4000); ghSig = ""; loadGithub();
+}
+function renderGhList(all) {
+  const box = $("#ghAlerts"); box.replaceChildren();
+  const bar = el("label", "muted"); const sr = el("input"); sr.type = "checkbox"; sr.checked = ghShowResolved;
+  sr.onchange = () => { ghShowResolved = sr.checked; renderGhList(all); };
+  bar.append(sr, document.createTextNode(` 顯示已處理（${all.filter(a => a.state).length}）`)); box.appendChild(bar);
+  const al = all.filter(a => ghShowResolved || !a.state);
+  if (!al.length) { box.appendChild(el("div", "muted", all.length ? "沒有未處理的警示 🎉" : "目前沒有警示")); }
+  al.forEach(a => {
+    const c = el("div"); c.style.cssText = `margin:8px 0;padding:8px 10px;border-left:4px solid ${SEVC[a.severity] || "var(--line)"};background:var(--code);border-radius:6px`;
+    const h = el("div"); const pill = el("span", "pill", SEVL[a.severity] || a.severity); pill.style.background = SEVC[a.severity]; h.appendChild(pill);
+    h.appendChild(document.createTextNode(" ")); h.appendChild(el("b", "", a.title || ""));
+    c.appendChild(h);
+    if (a.detail) c.appendChild(el("div", "", a.detail));
+    if (a.evidence) { const pre = el("pre", "", a.evidence); pre.style.cssText = "white-space:pre-wrap;word-break:break-all;margin:6px 0;font-size:12px"; c.appendChild(pre); }
+    const m = el("div", "muted"); m.textContent = `第一次 ${fmtT(a.first)}・最近 ${fmtT(a.last)}${a.count > 1 ? `・${a.count} 次` : ""}・${a.owner || ""}`;
+    if (/^https:\/\/github\.com\//.test(a.path || "")) { const ln = el("a", "", " 開啟 GitHub ↗"); ln.href = a.path; ln.target = "_blank"; ln.rel = "noopener"; m.appendChild(ln); }
+    c.appendChild(m);
+    const ctl = el("div", "row"); ctl.style.cssText = "gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center";
+    if (a.state) {
+      c.style.opacity = ".6";
+      const r = a.resolved || {};
+      ctl.appendChild(el("span", "", a.state === "auto" ? `✅ 自動確認已處理（${fmtT(r.at)}）：${r.reason || ""}`
+        : `✅ 手動標記為「${r.kind === "false_positive" ? "誤判" : "已處理"}」（${fmtT(r.at)}）${r.note ? "：" + r.note : ""}`));
+      const b = el("button", "", "撤銷，重新列出"); b.type = "button"; b.onclick = () => ghMark([a.key], "reopen"); ctl.appendChild(b);
+    } else {
+      if (a.check) { const n = el("div", "", "目前狀態：" + a.check); n.style.cssText = "width:100%;font-size:13px"; ctl.appendChild(n); }
+      const note = el("input"); note.type = "text"; note.placeholder = "備註（例如：AWS 金鑰 11/14 已輪替）"; note.style.cssText = "flex:1;min-width:180px";
+      const b1 = el("button", "", "標記已處理"); b1.type = "button"; b1.onclick = () => ghMark([a.key], "fixed", note.value);
+      const b2 = el("button", "", "誤判"); b2.type = "button"; b2.onclick = () => ghMark([a.key], "false_positive", note.value);
+      ctl.append(note, b1, b2);
+    }
+    c.appendChild(ctl); box.appendChild(c);
+  });
+}
+function renderGhAccounts(avail) {
+  const box = $("#ghAccounts"); box.replaceChildren();
+  if (!ghCfg.accounts.length) box.appendChild(el("div", "muted", "還沒有帳號，按「＋ 新增帳號」"));
+  ghCfg.accounts.forEach((a, i) => {
+    const row = el("div", "target"); const p = el("div", "p"); p.style.flex = "1";
+    const l1 = el("div", "row"); l1.style.gap = "6px";
+    const lg = el("input"); lg.type = "text"; lg.value = a.login || ""; lg.placeholder = "GitHub 帳號"; lg.setAttribute("list", "ghAvailList"); lg.style.maxWidth = "180px";
+    lg.oninput = () => { a.login = lg.value.trim(); ghDirty = true; };
+    const en = el("label"); const cb = el("input"); cb.type = "checkbox"; cb.checked = a.enabled !== false; cb.onchange = () => { a.enabled = cb.checked; ghDirty = true; };
+    en.appendChild(cb); en.appendChild(document.createTextNode(" 啟用"));
+    l1.appendChild(lg); l1.appendChild(en); p.appendChild(l1);
+    const ow = el("input"); ow.type = "text"; ow.value = (a.owners || []).join(", "); ow.placeholder = "要監控的組織 / 個人帳號，例如 my-org, other-org, " + (a.login || "自己的帳號");
+    ow.style.cssText = "width:100%;margin-top:6px"; ow.oninput = () => { a.owners = ow.value.split(/[,\s、，]+/).filter(Boolean); ghDirty = true; };
+    p.appendChild(ow); row.appendChild(p);
+    const rm = el("button", "", "移除"); rm.type = "button"; rm.onclick = () => { ghCfg.accounts.splice(i, 1); ghDirty = true; renderGhAccounts(avail); };
+    row.appendChild(rm); box.appendChild(row);
+  });
+  let dl = $("#ghAvailList"); if (!dl) { dl = el("datalist"); dl.id = "ghAvailList"; document.body.appendChild(dl); }
+  dl.replaceChildren(...avail.map(x => { const o = el("option"); o.value = x; return o; }));
+}
+$("#ghAdd").onclick = () => { ghCfg.accounts.push({login: "", owners: [], enabled: true}); ghDirty = true; api("/api/github").then(d => renderGhAccounts(d.available || [])); };
+$("#ghEnabled").onchange = () => { ghDirty = true; }; $("#ghInterval").oninput = () => { ghDirty = true; };
+$("#ghSave").onclick = async () => {
+  const r = await api("/api/github/config", {enabled: $("#ghEnabled").checked, interval_min: +$("#ghInterval").value, accounts: ghCfg.accounts});
+  $("#ghMsg").textContent = r.ok ? "已儲存，馬上開始檢查（第一次會往回看 72 小時，組織大的話要幾分鐘）" : "❌ " + (r.error || "儲存失敗");
+  ghDirty = false; setTimeout(() => { $("#ghMsg").textContent = ""; }, 6000); loadGithub();
+};
+$("#ghMd").onclick = async () => {
+  const r = await api("/api/github?md=1&min=" + encodeURIComponent($("#ghMdMin").value));
+  if (r.md) downloadMd(r.md, `secaudit-github-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}.md`);
+};
+$("#ghPoll").onclick = async () => { const r = await api("/api/github/poll", {}); $("#ghMsg").textContent = r.started ? "" : "已經在檢查中"; loadGithub(); };
+$("#ghAudit").onclick = async () => { const r = await api("/api/github/poll", {audit: true}); $("#ghMsg").textContent = r.started ? "" : "已經在檢查中"; loadGithub(); };
 function rerenderLocal() { renderTargets(); if (state) { renderFeed(state.vulnfeed, state.status); renderAcks(state.acks || []); } }
 function renderAcks(list) {
   const pg = pageSlice("acks", list, 10);

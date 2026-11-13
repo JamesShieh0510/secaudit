@@ -9,7 +9,7 @@ WATCH_SECTIONS = {
     "MCP 伺服器", "Claude Code hooks", "Claude Code 允許清單", "使用者 LaunchAgent", "全域 LaunchAgent",
     "LaunchDaemon（root 權限）", "crontab", "shell 啟動檔", "Telegram channel", "plugin marketplaces",
     "AI 指令檔", "有漏洞的套件", "瀏覽器擴充功能", "~/.ssh 檔案", "authorized_keys 公鑰", "~/.ssh/config 指令", "遠端登入（SSH 伺服器）",
-    "可疑位置的執行檔", "勒索軟體跡象", "secaudit 授權金鑰", "已確認無害項目", "secaudit 封存設定",
+    "可疑位置的執行檔", "勒索軟體跡象", "secaudit 授權金鑰", "已確認無害項目", "secaudit 封存設定", "GitHub 監控設定", "GitHub 監控手動標記",
 }
 
 
@@ -57,7 +57,7 @@ def compare(prev_state: dict, result: dict):
         old_cats = {f.get("category") for f in old_f.values()} | {cur_find[k]["category"] for k in old_f if k in cur_find}
         for k, f in cur_find.items():
             # 資源監控事件（res-）一出現就要通知，不受「新分類當基準」影響
-            if k not in old_f and (f["category"] in old_cats or f["rule"].startswith("res-")):
+            if k not in old_f and (f["category"] in old_cats or f["rule"].startswith(("res-", "gh-"))):
                 changes.append({"type": "new_finding", "section": f["category"], "key": f["title"], "severity": f["severity"],
                                 "new": "%s %s" % (f["path"], f.get("evidence", "")), "why": f.get("why", ""),
                                 "detail": (f.get("detail") or "")[:1200], "scope": scope})

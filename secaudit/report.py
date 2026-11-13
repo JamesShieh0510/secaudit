@@ -11,7 +11,7 @@ from .diff import TYPE_LABEL, finding_key
 from . import sop as _sop
 
 SEV_ORDER = {s: i for i, s in enumerate(SEVERITIES)}
-CAT_ORDER = ["掃描範圍", "入侵跡象", "AI 與 Agent", "機密與憑證", "瀏覽器", "開機自動執行", "供應鏈與版本"]
+CAT_ORDER = ["掃描範圍", "入侵跡象", "GitHub 監控", "AI 與 Agent", "機密與憑證", "瀏覽器", "開機自動執行", "供應鏈與版本"]
 
 
 def copy_btn(path):

@@ -126,6 +126,11 @@ def main():
     arc.add_argument("paths", nargs="+", help="要封存的資料夾")
     arc.add_argument("--yes", action="store_true", help="不再詢問確認（仍然需要 Touch ID）")
     sub.add_parser("test-notify", help="測試 Telegram 與 Ollama 設定")
+    gh_ = sub.add_parser("git-hooks", help="安裝 / 移除 git pull、clone 時的檢查（全域 core.hooksPath）")
+    gh_.add_argument("--uninstall", action="store_true")
+    gm_ = sub.add_parser("github-md", help="把 GitHub 監控的警示匯出成 Markdown（給 AI agent 複審）")
+    gm_.add_argument("-o", "--output", help="寫到檔案（預設印到標準輸出）")
+    gm_.add_argument("--min", default="info", choices=["high", "medium", "low", "info"], help="最低嚴重度")
     np_ = sub.add_parser("notify", help="透過執行中的常駐程式發 Telegram（不需要 1Password）")
     np_.add_argument("text")
     sp = sub.add_parser("scan")
@@ -145,6 +150,21 @@ def main():
     from secaudit.web import get_token, serve
 
     cfg = load_config()
+    if args.cmd == "git-hooks":
+        from secaudit import githook
+        print(githook.uninstall() if args.uninstall else githook.install())
+        print("注意：自己設了 core.hooksPath 的 repo（例如 husky）不會執行全域 hook，那些 repo 仍由 GitHub 監控涵蓋。")
+        return
+    if args.cmd == "github-md":
+        from secaudit import ghwatch
+        md = ghwatch.as_markdown(cfg, args.min)
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as fh:
+                fh.write(md)
+            print("已寫入 %s" % args.output)
+        else:
+            sys.stdout.write(md)
+        return
     if args.cmd == "archive":
         from secaudit import actions
         sys.exit(actions.archive_cli(args.paths, assume_yes=args.yes))

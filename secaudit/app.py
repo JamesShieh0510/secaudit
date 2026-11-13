@@ -43,6 +43,8 @@ DEFAULT_CONFIG = {
     "report_keep_days": 30,         # 一般報告保留天數
     "full_report_keep_days": 90,    # 完整掃描報告保留天數
     "targets": [],                  # [{path,label,kind,enabled}]，空的時候用預設
+    # GitHub 監控：accounts = [{login, owners: [組織或個人帳號], enabled}]；token 用 gh auth token -u <login> 或 GH_TOKEN_<LOGIN>
+    "github_watch": {"enabled": False, "interval_min": 15, "accounts": []},
 }
 
 
@@ -360,6 +362,27 @@ class Engine:
         threading.Thread(target=self.recheck, args=(name,), daemon=True).start()
         return True
 
+    def github_poll(self, force_audit=False):
+        from . import ghwatch
+        self.status["github_running"] = True
+        try:
+            r = ghwatch.poll(load_config(), force_audit=force_audit)
+            if r.get("new"):
+                self._force_quick = True
+            return r
+        except Exception as e:
+            self.status["last_error"] = "GitHub 監控：%s: %s" % (type(e).__name__, str(e)[:150])
+            traceback.print_exc()
+            return {"error": str(e)}
+        finally:
+            self.status["github_running"] = False
+
+    def github_poll_async(self, force_audit=False):
+        if self.status.get("github_running"):
+            return False
+        threading.Thread(target=self.github_poll, args=(force_audit,), daemon=True).start()
+        return True
+
     def scan_async(self, mode, notify_user=True):
         if self.status["running"]:
             return False
@@ -461,6 +484,17 @@ class Engine:
             if now - getattr(self, "_last_flush", 0) > 120:
                 self._last_flush = now
                 self.flush_outbox()
+            gw = cfg.get("github_watch") or {}
+            if gw.get("enabled") and gw.get("accounts"):
+                if now >= getattr(self, "_next_gh", 0):
+                    self._next_gh = now + max(5, int(gw.get("interval_min") or 15)) * 60
+                    self.github_poll_async()
+                self.status["next_github"] = time.strftime("%H:%M", time.localtime(self._next_gh))
+            else:
+                self.status["next_github"] = "（已關閉）"
+            if getattr(self, "_force_quick", False) and not self.lock.locked():
+                self._force_quick = False
+                next_quick = now          # GitHub 監控有新警示：馬上跑一次快速掃描，走原本的通知流程
             if now >= next_full:
                 self.scan("full", source="scheduler")
                 next_full = self._next_full(cfg)

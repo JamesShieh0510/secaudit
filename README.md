@@ -20,6 +20,8 @@
 | 瀏覽器 | Chrome / Arc / Brave / Edge / Firefox 各 profile 中重要服務的登入 session 持續多久、閒置多久；擴充功能權限；是否開著遠端除錯；暫存資料夾是否出現 Cookies / Login Data 副本。**只讀 cookie 的網域與時間，不讀取、不解密 cookie 值** |
 | 系統資源與常駐程式 | 每分鐘取樣 CPU / 記憶體：單一程式持續吃滿 CPU（挖礦特徵）、閒置時整台 CPU 偏高、記憶體壓力 / swap / 單一程式記憶體暴增、溫度偏高或降頻（macOS 熱狀態）；新出現的常駐程式（執行超過 5 分鐘、以前沒看過的非 Apple 執行檔），附簽章、位置、啟動時間與由誰啟動，從你的終端機或 AI 助理開的程式只記在報告裡不推播 |
 | ⚡ 效能（Web UI） | 即時分析電腦為什麼卡：CPU、load、記憶體、swap、磁碟讀寫、溫度（熱狀態 + 電池溫度），**排隊來源**（每個程式有幾個執行緒在跑 / 排隊 / 等磁碟，看出 load 是誰造成的）、每個程式的磁碟讀寫量、**雲端硬碟同步積壓**（唯讀讀取 FileProvider 同步資料庫：iCloud / Google Drive / OneDrive 還有多少項目在排隊、集中在哪些資料夾、處理速度與預估時間）、依 App 合併的資源用量、最吃 CPU / 記憶體的程式（簽章、由誰啟動、可疑疑點），自動判斷原因並給建議；可一鍵複製快照給 AI 分析。只在開著頁籤時取樣 |
+| 🐙 GitHub 監控 | 可新增多個 GitHub 帳號，每個帳號監控多個組織 / 個人帳號（只讀 API）：繞過 PR 直接改 workflow、workflow 被加入外傳機密的寫法（`toJSON(secrets)`、連到裸 IP、外傳服務、讀 runner token / 記憶體）、改了又還原、新分支夾帶 workflow、**可疑版本是否真的被執行**（直接讀當次執行的 workflow 檔）、執行紀錄被刪除、同一人短時間對大量 repo 開同樣的 PR / 改 workflow、新成員 / 外部協作者 / webhook / deploy key、repo 變公開；每天稽核預設分支保護與開放給所有 repo 的組織機密。「改了又還原」會自動判斷中間版本有沒有被執行（執行紀錄、是否單獨 push、觸發條件、執行編號缺號）；自動確認警示是否已處理完（攻擊分支已刪除、workflow 已還原、PR 已關閉…），也可以手動標記已處理 / 誤判；清單 / 時間軸兩種檢視，可依組織、帳號、嚴重度篩選；可匯出 Markdown 給 AI agent 複審（`python3 audit.py github-md`） |
+| git pull / clone 檢查 | 全域 git hook（`python3 audit.py git-hooks` 安裝）：只看這次拉下來的改動，workflow 可疑內容、改了又還原、`package.json` 新增安裝腳本、`.vscode/tasks.json` 開資料夾就執行、husky / lefthook、`.npmrc` registry；終端機警告 + macOS 通知 + 列入報告。自己設了 core.hooksPath 的 repo（例如 husky）不會執行全域 hook |
 | 開機自動執行 | LaunchAgents / LaunchDaemons（含程式簽章）、crontab、shell 啟動檔 |
 | 供應鏈與版本 | 各專案 lockfile（npm / pnpm / yarn / pip / poetry / uv / Go / Cargo / Gemfile / composer）查 [OSV.dev](https://osv.dev)；全域 npm 套件 |
 | 執行環境版本 | **所有已安裝的**Node.js、Python、Go、Ruby、Java、PHP、Rust、Deno、Bun、.NET（nvm / fnm / volta / asdf / mise / Homebrew / conda / pyenv / uv / rbenv / rvm / sdkman / rustup / 系統內建）是否停止維護（[endoflife.date](https://endoflife.date)）；Node.js 是否錯過官方標記的安全更新；專案指定的版本（`.nvmrc`、`.python-version`、`.tool-versions`、`go.mod`、`package.json` engines、`pyproject.toml`、`Dockerfile` FROM、compose `image:`） |
@@ -153,6 +155,7 @@ TELEGRAM_BOT_TOKEN={{ op://<vault>/<item>/TELEGRAM_BOT_TOKEN }}
 | GitHub API / CISA | 只下載公開漏洞清單，不上傳資料 |
 | Ollama 主機（啟用 AI 摘要時） | 變動清單：路徑、指令片段、檔案指紋（機密已遮罩）；漏洞快訊的公開漏洞資料 |
 | Telegram | 警示與漏洞快訊 |
+| GitHub API（啟用 GitHub 監控時） | 只讀取：repo 清單、事件、比較 diff、workflow 檔與執行紀錄、成員與設定；token 用 `gh auth token -u 帳號` 或 `GH_TOKEN_帳號` 讀取，不寫入檔案 |
 
 這些都可以在 Web UI 關閉：「查詢 CVE / 版本資料庫」「AI 摘要」「漏洞快訊頻率 = 0」。
 
@@ -182,7 +185,7 @@ TELEGRAM_BOT_TOKEN={{ op://<vault>/<item>/TELEGRAM_BOT_TOKEN }}
 ## 專案結構
 
 ```
-audit.py                 指令入口（scan / serve / daemon / test-notify / url）
+audit.py                 指令入口（scan / serve / daemon / test-notify / url / git-hooks / github-md）
 ecosystem.config.js      PM2 設定
 scripts/op-store.sh      把金鑰存進 1Password 並產生 .env.tpl
 secaudit/
@@ -197,6 +200,9 @@ secaudit/
   stats.py               統計：每日計數、每小時資源取樣、統計頁籤的彙整
   envtpl.py              寫死的機密 → 1Password + .env.tpl
   notify.py              Telegram、LLM
+  ghwatch.py             GitHub 監控（背景輪詢，結果存 data/ghwatch.json）
+  checks_github.py       GitHub 監控與 git pull 檢查的結果轉成報告問題
+  githook.py             git pull / clone 時的全域 hook
   report.py / sop.py     報告與 SOP
   app.py / web.py        排程、狀態、Web UI
   actions.py             修復動作（唯一會修改系統的模組，執行前必須通過 Touch ID）

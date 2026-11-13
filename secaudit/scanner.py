@@ -6,7 +6,7 @@ import socket
 import stat
 import time
 
-from . import checks_ai, checks_browser, checks_resources, checks_persistence, checks_secrets, checks_threats, runtimes, supply_chain
+from . import checks_ai, checks_browser, checks_github, checks_resources, checks_persistence, checks_secrets, checks_threats, runtimes, supply_chain
 from .core import HOME, PRUNE_DIRS, ScanContext, Target, is_dataless
 from .rules import (AI_INSTRUCTION_FILES, CONTENT_EXTS, CONTENT_NAMES, ENV_FILE_RE, ENV_SAFE_SUFFIX,
                     PRIVATE_KEY_NAMES)
@@ -208,7 +208,7 @@ def run_scan(targets, mode="full", cache=None, progress=None, cancel=None, onlin
                checks_persistence.check_launch_items, checks_persistence.check_crontab, checks_persistence.check_shell_rc,
                checks_secrets.check_credential_files, checks_secrets.check_ssh_dir, checks_browser.check_browsers,
                checks_threats.check_odd_executables, checks_threats.check_ransom_quick,
-               checks_resources.check_resources):
+               checks_resources.check_resources, checks_github.check_github):
         if ctx.cancel.is_set():
             break
         fn(ctx)
@@ -273,7 +273,7 @@ def _system_checks(ctx, cache):
                checks_persistence.check_launch_items, checks_persistence.check_crontab, checks_persistence.check_shell_rc,
                checks_secrets.check_credential_files, checks_secrets.check_ssh_dir, checks_browser.check_browsers,
                checks_threats.check_odd_executables, checks_threats.check_ransom_quick,
-               checks_resources.check_resources):
+               checks_resources.check_resources, checks_github.check_github):
         if ctx.cancel.is_set():
             return
         fn(ctx)
